@@ -2,7 +2,13 @@
 
 export(crm_update_cal_events)
 export(crm_update_companies)
+export(crm_update_lead_mails_background)
 export(crm_update_lead_names)
 export(crm_update_leads)
 export(crm_update_protocols)
 export(crm_update_users)
+export(msgraph_map_calls_events)
+export(msgraph_update_calls)
+export(msgraph_update_events)
+export(msgraph_update_mails)
+export(msgraph_update_users)

@@ -1,6 +1,6 @@
 Package: dbconnectorR
 Title: Connect and Export Data from External Systems to Your Database
-Version: 0.0.0.9000
+Version: 0.0.0.9003
 Authors@R: 
     person("Moritz", "Hemmann", email = "moritz.hemmann@studyflix.de", 
            role = c("aut", "cre"))
@@ -22,4 +22,5 @@ Imports:
     httr,
     jsonlite,
     DBI,
-    stringr
+    stringr,
+    progress
