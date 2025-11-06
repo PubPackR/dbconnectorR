@@ -1,0 +1,25 @@
+Package: dbconnectorR
+Title: Connect and Export Data from External Systems to Your Database
+Version: 0.0.0.9000
+Authors@R: 
+    person("Moritz", "Hemmann", email = "moritz.hemmann@studyflix.de", 
+           role = c("aut", "cre"))
+Description: Provides functions to extract, transform, and load data from external systems 
+    such as CRM platforms and Microsoft Graph into your internal database. Designed for 
+    streamlined data pipelines, standardized exports, and consistent data management.
+License: `use_mit_license()`, `use_gpl3_license()` or friends to pick a
+    license
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
+Imports:
+    dplyr,
+    lubridate,
+    tidyr,
+    purrr,
+    tidyselect,
+    tibble,
+    httr,
+    jsonlite,
+    DBI,
+    stringr
