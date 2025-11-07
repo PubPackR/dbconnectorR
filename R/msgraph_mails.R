@@ -406,12 +406,14 @@ parse_mail_recipients <- function(recipient_list, recipient_type, mail_id) {
 #'
 #' @return Character string with normalized email address
 normalize_external_email <- function(email) {
-  if (grepl("#ext#", email, ignore.case = TRUE)) {
+  # Vectorized version using ifelse
+  normalized <- ifelse(
+    grepl("#ext#", email, ignore.case = TRUE),
     # Cut off from '#EXT#' onward, then replace first underscore with '@'
-    email <- sub("(?i)#ext#.*", "", email)
-    email <- sub("_", "@", email, fixed = TRUE)
-  }
-  return(email)
+    sub("_", "@", sub("(?i)#ext#.*", "", email), fixed = TRUE),
+    email
+  )
+  return(normalized)
 }
 
 
