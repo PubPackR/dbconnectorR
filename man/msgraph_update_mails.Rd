@@ -22,6 +22,8 @@ raw.msgraph_contacts, raw.msgraph_mail_recipients, raw.msgraph_mail_senders}
 \item tenant_id: Azure AD tenant ID
 \item client_id: Azure AD client/application ID
 \item client_secret: Azure AD client secret
+Note: This is NOT keys$msgraph from authentication_process(). You need to
+construct this list manually with all three elements.
 }}
 
 \item{start_date}{Optional. Date to start mail retrieval from.
@@ -54,16 +56,36 @@ This function:
 \examples{
 \dontrun{
 # Basic usage with automatic start date
-msgraph_update_mails(con, keys)
+msgraph_update_mails(
+  con,
+  msgraph_keys = list(
+    tenant_id = "your-tenant-id",
+    client_id = "your-client-id",
+    client_secret = keys$msgraph
+  )
+)
 
 # Specify custom start date
-msgraph_update_mails(con, keys, start_date = "2025-01-01")
+msgraph_update_mails(
+  con,
+  msgraph_keys = list(
+    tenant_id = "your-tenant-id",
+    client_id = "your-client-id",
+    client_secret = keys$msgraph
+  ),
+  start_date = "2025-01-01"
+)
 
 # Process specific users only
-msgraph_update_mails(con, keys, user_filter = c("user-id-1", "user-id-2"))
-
-# Disable retry logic
-msgraph_update_mails(con, keys, max_retries = 1)
+msgraph_update_mails(
+  con,
+  msgraph_keys = list(
+    tenant_id = "your-tenant-id",
+    client_id = "your-client-id",
+    client_secret = keys$msgraph
+  ),
+  user_filter = c("user-id-1", "user-id-2")
+)
 }
 
 }
