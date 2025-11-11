@@ -731,7 +731,10 @@ anonymize_with_crm_data <- function(con, crm_lead_ids, positions, tokens) {
 filter_person_data_all <- function(con, tokens_df, person_ids, company_ids) {
 
   leads <- dplyr::tbl(con, I("raw.crm_leads")) %>% dplyr::filter(id %in% person_ids) %>% dplyr::collect()
-  lead_address <- dplyr::tbl(con, I("processed.crm_lead_address_with_fallback")) %>% dplyr::filter(lead_id %in% person_ids) %>% dplyr::collect()
+  lead_address <- dplyr::tbl(con, I("processed.crm_lead_address_with_fallback")) %>%
+    dplyr::mutate(lead_id = as.integer(lead_id)) %>%
+    dplyr::filter(lead_id %in% person_ids) %>%
+    dplyr::collect()
   companies <- dplyr::tbl(con, I("raw.crm_companies")) %>% dplyr::filter(id %in% company_ids) %>% dplyr::collect()
   company_address <- dplyr::tbl(con, I("raw.crm_company_address")) %>% dplyr::filter(company_id %in% company_ids) %>% dplyr::collect()
 
@@ -768,7 +771,7 @@ filter_person_data_all <- function(con, tokens_df, person_ids, company_ids) {
     type = c("SURNAME", "FIRST_NAME", "FULL_NAME"),
     priority = 1,
     name_for_token = paste(name, surname)  # Vollständiger aktueller Name
-  ) %>% filter(!is.na(token) & token != "")
+  ) %>% dplyr::filter(!is.na(token) & token != "")
 
   # Erstelle Tokens für alle historischen Namen (Priority 2 = danach gesucht)
   if (nrow(lead_names_historical) > 0) {
@@ -867,7 +870,7 @@ filter_person_data_all <- function(con, tokens_df, person_ids, company_ids) {
     lead_address_tokens,
     company_address_tokens
   ) %>%
-    dplyr::filter(!is.na(token), token != "")
+    dplyr::filter(!is.na(token) & token != "")
 
   return(all_tokens)
 }
