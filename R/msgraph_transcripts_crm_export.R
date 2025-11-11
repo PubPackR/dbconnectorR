@@ -19,17 +19,30 @@ CRM_DEFAULT_AUTHOR_USER_ID <- 199146L
 # Main Wrapper Function
 ################################################################################
 
-#' Export All Transcripts to CRM
+#' Export Transcripts to CRM
 #'
-#' Exports all deanonymized transcript summaries to CRM as protocols
+#' Exports all deanonymized transcript summaries to CRM as protocols.
+#' This is step 5 of the transcript processing pipeline.
 #'
 #' @param con Database connection
-#' @param crm_keys CRM API key
-#' @param use_test_account Logical, whether to use test CRM account
-#' @param logger Logger function
-#' @return Invisible NULL
-#' @keywords internal
-export_all_transcripts_to_crm <- function(con,
+#' @param crm_keys CRM API key for protocol creation
+#' @param use_test_account Logical, whether to use test CRM account.
+#'   Default: FALSE
+#' @param logger Logger function for output messages
+#'
+#' @return Invisible NULL (updates database and creates CRM protocols)
+#'
+#' @examples
+#' \dontrun{
+#' msgraph_export_transcripts_to_crm(
+#'   con = con,
+#'   crm_keys = keys$crm,
+#'   use_test_account = FALSE
+#' )
+#' }
+#'
+#' @export
+msgraph_export_transcripts_to_crm <- function(con,
                                           crm_keys,
                                           use_test_account = FALSE,
                                           logger = function(msg, level = "INFO") cat(msg, "\n")) {

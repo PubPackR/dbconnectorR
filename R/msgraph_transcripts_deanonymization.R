@@ -13,15 +13,23 @@
 # Main Wrapper Function
 ################################################################################
 
-#' Deanonymize All Transcript Summaries
+#' Deanonymize Transcript Summaries
 #'
-#' Replaces anonymized placeholders with original names in all summaries
+#' Replaces anonymized placeholders with original names in all summaries.
+#' This is step 4 of the transcript processing pipeline.
 #'
 #' @param con Database connection
-#' @param logger Logger function
-#' @return Invisible NULL
-#' @keywords internal
-deanonymize_all_transcript_summaries <- function(con,
+#' @param logger Logger function for output messages
+#'
+#' @return Invisible NULL (updates database)
+#'
+#' @examples
+#' \dontrun{
+#' msgraph_deanonymize_transcripts(con = con)
+#' }
+#'
+#' @export
+msgraph_deanonymize_transcripts <- function(con,
                                                  logger = function(msg, level = "INFO") cat(msg, "\n")) {
 
   # Call the main deanonymization function

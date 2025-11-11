@@ -10,9 +10,10 @@
 # - Database operations
 ################################################################################
 
-#' Retrieve and Save Transcripts
+#' Retrieve Transcripts from MS Graph
 #'
-#' Main function to retrieve transcripts from MS Graph API and save to database
+#' Main function to retrieve transcripts from MS Graph API and save to database.
+#' This is step 1 of the transcript processing pipeline.
 #'
 #' @param con Database connection
 #' @param msgraph_keys List containing MS Graph API credentials with elements:
@@ -20,11 +21,25 @@
 #'   - client_id: Azure AD client/application ID
 #'   - client_secret: Azure AD client secret
 #' @param start_date Start date for retrieval (NULL = from last transcript in DB)
-#' @param end_date End date for retrieval
-#' @param logger Logger function
-#' @return Invisible NULL
-#' @keywords internal
-retrieve_and_save_transcripts <- function(con,
+#' @param end_date End date for retrieval (defaults to tomorrow)
+#' @param logger Logger function for output messages
+#'
+#' @return Invisible NULL (updates database)
+#'
+#' @examples
+#' \dontrun{
+#' msgraph_retrieve_transcripts(
+#'   con = con,
+#'   msgraph_keys = list(
+#'     tenant_id = "your-tenant-id",
+#'     client_id = "your-client-id",
+#'     client_secret = keys$msgraph
+#'   )
+#' )
+#' }
+#'
+#' @export
+msgraph_retrieve_transcripts <- function(con,
                                           msgraph_keys,
                                           start_date = NULL,
                                           end_date = Sys.Date() + 1,

@@ -19,16 +19,28 @@ library(bit64)
 # Main Wrapper Function
 ################################################################################
 
-#' Anonymize All Transcripts
+#' Anonymize Transcripts
 #'
-#' Anonymizes all transcripts that haven't been anonymized yet
+#' Anonymizes all transcripts that haven't been anonymized yet using CoreNLP NER.
+#' This is step 2 of the transcript processing pipeline.
 #'
 #' @param con Database connection
-#' @param preserved_names Character vector of names to preserve (e.g., company names)
-#' @param logger Logger function
-#' @return Invisible NULL
-#' @keywords internal
-anonymize_all_transcripts <- function(con, 
+#' @param preserved_names Character vector of names to preserve (e.g., company names).
+#'   Default: c("studyflix", "study flix", "studi flix", "studiflix")
+#' @param logger Logger function for output messages
+#'
+#' @return Invisible NULL (updates database)
+#'
+#' @examples
+#' \dontrun{
+#' msgraph_anonymize_transcripts(
+#'   con = con,
+#'   preserved_names = c("studyflix", "competitor_name")
+#' )
+#' }
+#'
+#' @export
+msgraph_anonymize_transcripts <- function(con,
                                       preserved_names = c("studyflix"),
                                       logger = function(msg, level = "INFO") cat(msg, "\n")) {
 

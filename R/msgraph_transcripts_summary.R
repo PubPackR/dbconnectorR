@@ -15,18 +15,31 @@
 # Main Wrapper Function
 ################################################################################
 
-#' Generate All Transcript Summaries
+#' Summarize Transcripts
 #'
-#' Generates AI summaries for all anonymized transcripts that don't have summaries yet
+#' Generates AI summaries for all anonymized transcripts that don't have summaries yet.
+#' This is step 3 of the transcript processing pipeline.
 #'
 #' @param con Database connection
-#' @param openrouter_model AI model to use
-#' @param openrouter_keys OpenRouter API key
-#' @param prompt_base_path Base path for prompt template files
-#' @param logger Logger function
-#' @return Invisible NULL
-#' @keywords internal
-generate_all_transcript_summaries <- function(con,
+#' @param openrouter_model AI model to use. Default: "openai/gpt-5-chat"
+#' @param openrouter_keys OpenRouter API key for AI summary generation
+#' @param prompt_base_path Base path for prompt template files.
+#'   Default: "../../base-data/msgraph/text_for_summary_prompt/"
+#' @param logger Logger function for output messages
+#'
+#' @return Invisible NULL (updates database)
+#'
+#' @examples
+#' \dontrun{
+#' msgraph_summarize_transcripts(
+#'   con = con,
+#'   openrouter_keys = keys$openrouter,
+#'   openrouter_model = "openai/gpt-5-chat"
+#' )
+#' }
+#'
+#' @export
+msgraph_summarize_transcripts <- function(con,
                                               openrouter_model = "openai/gpt-5-chat",
                                               openrouter_keys,
                                               prompt_base_path = "../../base-data/msgraph/text_for_summary_prompt/",

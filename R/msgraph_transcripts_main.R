@@ -186,7 +186,7 @@ execute_transcript_load <- function(con, config) {
   config$logger("Loading transcripts from MS Graph API", "INFO")
 
   # Delegate to transcript retrieval module
-  retrieve_and_save_transcripts(
+  msgraph_retrieve_transcripts(
     con = con,
     msgraph_keys = config$msgraph_keys,
     start_date = config$start_date,
@@ -202,7 +202,7 @@ execute_transcript_anonymization <- function(con, config) {
   config$logger("Anonymizing transcripts", "INFO")
 
   # Delegate to anonymization module
-  anonymize_all_transcripts(
+  msgraph_anonymize_transcripts(
     con = con,
     preserved_names = config$preserved_names,
     logger = config$logger
@@ -216,7 +216,7 @@ execute_transcript_summarization <- function(con, config) {
   config$logger("Generating AI summaries", "INFO")
 
   # Delegate to summary module
-  generate_all_transcript_summaries(
+  msgraph_summarize_transcripts(
     con = con,
     openrouter_model = config$openrouter_model,
     openrouter_keys = config$openrouter_keys,
@@ -231,7 +231,7 @@ execute_transcript_deanonymization <- function(con, config) {
   config$logger("Deanonymizing summaries", "INFO")
 
   # Delegate to deanonymization module
-  deanonymize_all_transcript_summaries(
+  msgraph_deanonymize_transcripts(
     con = con,
     logger = config$logger
   )
@@ -244,7 +244,7 @@ execute_transcript_crm_export <- function(con, config) {
   config$logger("Exporting to CRM", "INFO")
 
   # Delegate to CRM export module
-  export_all_transcripts_to_crm(
+  msgraph_export_transcripts_to_crm(
     con = con,
     crm_keys = config$crm_keys,
     use_test_account = config$use_test_account,
