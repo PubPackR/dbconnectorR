@@ -5,16 +5,6 @@
 # Handles speaker tags, names, companies, and personal data
 ################################################################################
 
-## ----- libraries -----
-library(dplyr)
-library(tidyr)
-library(stringr)
-library(coreNLP)
-library(purrr)
-library(stringdist)
-library(glue)
-library(bit64)
-
 ################################################################################
 # Main Wrapper Function
 ################################################################################
@@ -157,9 +147,9 @@ anonymize_transcripts <- function(con,
                                   lead_mails,
                                   complete_overwrite = FALSE) {
 
-  transcripts <- tbl(con, I("processed.msgraph_call_transcripts")) %>%
-    filter(!is.na(transcript_content) & (is.na(transcript_content_anonymized) | complete_overwrite)) %>%
-    collect()
+  transcripts <- dplyr::tbl(con, I("processed.msgraph_call_transcripts")) %>%
+    dplyr::filter(!is.na(transcript_content) & (is.na(transcript_content_anonymized) | complete_overwrite)) %>%
+    dplyr::collect()
 
   if (nrow(transcripts) == 0) {
     message("No transcripts to anonymize.")
@@ -185,18 +175,18 @@ anonymize_transcripts <- function(con,
     mails <- participant_info$email
     ids <- participant_info$id
 
-    all_participants <- tbl(con, I("raw.msgraph_contacts")) %>%
-      filter(id %in% ids) %>%
-      select(id, email) %>%
-      left_join(tbl(con, I("raw.msgraph_users")) %>% select(email, name), by = "email") %>%
-      collect()
+    all_participants <- dplyr::tbl(con, I("raw.msgraph_contacts")) %>%
+      dplyr::filter(id %in% ids) %>%
+      dplyr::select(id, email) %>%
+      dplyr::left_join(dplyr::tbl(con, I("raw.msgraph_users")) %>% dplyr::select(email, name), by = "email") %>%
+      dplyr::collect()
 
     # Data for customers
     person_data_crm <- lead_mails %>%
-      select(mail_address_name, lead_id) %>%
-      left_join(all_participants, by = c("mail_address_name" = "email"), relationship = "many-to-many") %>%
-      filter(!is.na(id)) %>%
-      select(-id)
+      dplyr::select(mail_address_name, lead_id) %>%
+      dplyr::left_join(all_participants, by = c("mail_address_name" = "email"), relationship = "many-to-many") %>%
+      dplyr::filter(!is.na(id)) %>%
+      dplyr::select(-id)
 
     tryCatch({
       anonymized_content <- anonymize_content(
@@ -270,7 +260,7 @@ anonymize_content <- function(con, content, positions, contacts, crm_lead_ids, a
   }
 
   # get token of the transcript and cleans them
-  tokens <- annotateString(content)$token
+  tokens <- coreNLP::annotateString(content)$token
   tokens <- clean_token(tokens, preserved_names)
 
   known_information <- c()
@@ -278,25 +268,25 @@ anonymize_content <- function(con, content, positions, contacts, crm_lead_ids, a
   if(scope == "call_transcripts") {
     # anonymize all names in <v ... >
     information_speaker <- anonymize_speaker(con, tokens) # replace with speaker_xxxxxx
-    known_information <- bind_rows(known_information, information_speaker)
+    known_information <- dplyr::bind_rows(known_information, information_speaker)
 
     # anonymize employees and customers
-    information_lead_msgraph <- anonymize_names((all_participants %>% filter(is.na(name)))$id, contacts, tokens) %>% mutate(person_type = "Lead")
-    known_information <- bind_rows(known_information, information_lead_msgraph)
+    information_lead_msgraph <- anonymize_names((all_participants %>% dplyr::filter(is.na(name)))$id, contacts, tokens) %>% dplyr::mutate(person_type = "Lead")
+    known_information <- dplyr::bind_rows(known_information, information_lead_msgraph)
 
     # anonymize studyflix sales employees
-    information_sales_msgraph <- anonymize_names((all_participants %>% filter(!is.na(name)))$id, contacts, tokens) %>% mutate(person_type = "Salesperson")
-    known_information <- bind_rows(known_information, information_sales_msgraph)
+    information_sales_msgraph <- anonymize_names((all_participants %>% dplyr::filter(!is.na(name)))$id, contacts, tokens) %>% dplyr::mutate(person_type = "Salesperson")
+    known_information <- dplyr::bind_rows(known_information, information_sales_msgraph)
   }
 
   if(nrow(crm_lead_ids) > 0) {
     information_crm_data <- anonymize_with_crm_data(con, crm_lead_ids, positions, tokens)
-    known_information <- bind_rows(known_information, information_crm_data)
+    known_information <- dplyr::bind_rows(known_information, information_crm_data)
   }
 
   # replace PERSON NER with a specific id
   information_ner <- id_anonymize_persons(con, tokens)
-  known_information <- bind_rows(known_information, information_ner)
+  known_information <- dplyr::bind_rows(known_information, information_ner)
 
   if(scope == "call_transcripts") {
     tokens <- process_transcript_placeholders(con, known_information, tokens, content_id, scope)
@@ -346,28 +336,28 @@ anonymize_speaker <- function(con, tokens) {
   tokens_safe <- tokens_safe[tokens_safe != ""]
   tokens_df <- data.frame(token = tokens_safe, stringsAsFactors = FALSE)
   tokens_only_contact <- tokens_df %>%
-    mutate(system = "msgraph") %>%
-    mutate(name_clean = gsub(" ", "", gsub("^<v\\s+|>$", "", token)))
+    dplyr::mutate(system = "msgraph") %>%
+    dplyr::mutate(name_clean = gsub(" ", "", gsub("^<v\\s+|>$", "", token)))
 
-  tokens_with_id <- tbl(con, I("raw.msgraph_contacts")) %>%
-    select(id, ms_name) %>%
-    rename(name = ms_name) %>%
-    mutate(name_clean = sql("REPLACE(name, ' ', '')")) %>%
-    filter(name_clean %in% tokens_only_contact$name_clean) %>%
-    collect() %>%
-    full_join(tokens_only_contact, by = "name_clean") %>%
-    select(-name_clean) %>%
-    mutate(type = "SPEAKER") %>%
-    mutate(
-      only_name = if_else(grepl("^<v\\s+[^>]+>$", token), gsub("^<v\\s+|>$", "", token), NA_character_),
-      formatted_name = if_else(
-        str_detect(token, ","),
-        str_replace(only_name, "^([^,]+),\\s*(.*)$", "\\2 \\1"),
+  tokens_with_id <- dplyr::tbl(con, I("raw.msgraph_contacts")) %>%
+    dplyr::select(id, ms_name) %>%
+    dplyr::rename(name = ms_name) %>%
+    dplyr::mutate(name_clean = sql("REPLACE(name, ' ', '')")) %>%
+    dplyr::filter(name_clean %in% tokens_only_contact$name_clean) %>%
+    dplyr::collect() %>%
+    dplyr::full_join(tokens_only_contact, by = "name_clean") %>%
+    dplyr::select(-name_clean) %>%
+    dplyr::mutate(type = "SPEAKER") %>%
+    dplyr::mutate(
+      only_name = dplyr::if_else(grepl("^<v\\s+[^>]+>$", token), gsub("^<v\\s+|>$", "", token), NA_character_),
+      formatted_name = dplyr::if_else(
+        stringr::str_detect(token, ","),
+        stringr::str_replace(only_name, "^([^,]+),\\s*(.*)$", "\\2 \\1"),
         only_name),
-      formatted_name = str_trim(formatted_name)
+      formatted_name = stringr::str_trim(formatted_name)
     ) %>%
-    mutate(name = coalesce(name, formatted_name)) %>%
-    select(-formatted_name, -only_name)
+    dplyr::mutate(name = dplyr::coalesce(name, formatted_name)) %>%
+    dplyr::select(-formatted_name, -only_name)
 
   return(tokens_with_id)
 }
@@ -388,25 +378,25 @@ anonymize_names <- function(participant_ids, contacts, tokens, prefix) {
   }
 
   names_long <- contacts %>%
-    filter(id %in% participant_ids) %>%
-    select(id, ms_name) %>%
-    mutate(
+    dplyr::filter(id %in% participant_ids) %>%
+    dplyr::select(id, ms_name) %>%
+    dplyr::mutate(
       name = trimws(ms_name),
       # handle "Nachname, Vorname" by swapping
-      ms_name_clean = if_else(str_detect(name, ","),
-                              str_trim(str_c(str_trim(str_extract(name, "(?<=,).*")), " ", str_trim(str_extract(name, "^[^,]+")))),
+      ms_name_clean = dplyr::if_else(stringr::str_detect(name, ","),
+                              stringr::str_trim(stringr::str_c(stringr::str_trim(stringr::str_extract(name, "(?<=,).*")), " ", stringr::str_trim(stringr::str_extract(name, "^[^,]+")))),
                               name),
-      split_name = str_split(ms_name_clean, "\\s+"),
+      split_name = stringr::str_split(ms_name_clean, "\\s+"),
       FIRST_NAME = sapply(split_name, function(x) if(length(x) > 1) paste(head(x, -1), collapse = " ") else ""),
       NAME = sapply(split_name, function(x) tail(x, 1)),
       FULL_NAME = ms_name_clean
     ) %>%
-    select(id, name, FIRST_NAME, NAME, FULL_NAME) %>%
-    pivot_longer(cols = c(FIRST_NAME, NAME, FULL_NAME),
+    dplyr::select(id, name, FIRST_NAME, NAME, FULL_NAME) %>%
+    tidyr::pivot_longer(cols = c(FIRST_NAME, NAME, FULL_NAME),
                 names_to = "type",
                 values_to = "token") %>%
-    filter(token != "") %>%  # optional, falls FIRST_NAME leer war
-    mutate(system = "msgraph")
+    dplyr::filter(token != "") %>%  # optional, falls FIRST_NAME leer war
+    dplyr::mutate(system = "msgraph")
 
   return(names_long)
 }
@@ -425,63 +415,63 @@ process_transcript_placeholders <- function(con, known_information, tokens, cont
 
   # clean known information
   known_information_cleaned <- known_information %>%
-    distinct() %>%
-    mutate(nullable_id = if_else(is.na(id) & system != "ner", TRUE, FALSE)) %>%
-    mutate(id = as.integer(if_else(is.na(id) & system != "ner", row_number(), id))) %>%
-    group_by(id) %>%
-    mutate(person_type = last(na.omit(person_type))) %>%
-    ungroup() %>%
-    mutate(
-      formatted_name = if_else(
-        !is.na(name) & str_detect(name, ",") & !grepl("COMPANY", type),
-        str_replace(name, "^([^,]+),\\s*(.*)$", "\\2 \\1"),
-        ifelse(grepl("COMPANY", type), NA, if_else(is.na(name), token, name))
+    dplyr::distinct() %>%
+    dplyr::mutate(nullable_id = dplyr::if_else(is.na(id) & system != "ner", TRUE, FALSE)) %>%
+    dplyr::mutate(id = as.integer(dplyr::if_else(is.na(id) & system != "ner", dplyr::row_number(), id))) %>%
+    dplyr::group_by(id) %>%
+    dplyr::mutate(person_type = dplyr::last(na.omit(person_type))) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(
+      formatted_name = dplyr::if_else(
+        !is.na(name) & stringr::str_detect(name, ",") & !grepl("COMPANY", type),
+        stringr::str_replace(name, "^([^,]+),\\s*(.*)$", "\\2 \\1"),
+        ifelse(grepl("COMPANY", type), NA, dplyr::if_else(is.na(name), token, name))
       )
     ) %>%
-    mutate(name = trimws(gsub("  ", " ", name))) %>%
-    mutate(formatted_name = trimws(gsub("  ", " ", formatted_name))) %>%
-    group_by(formatted_name) %>%
-    mutate(person_type = last(na.omit(person_type))) %>%
-    ungroup() %>%
-    mutate(person_type = coalesce(person_type, "Lead")) %>%
-    filter(!is.na(person_type)) %>%
-    group_by(id) %>%
-    mutate(formatted_name = ifelse(!is.na(id), last(na.omit(formatted_name)), formatted_name)) %>%
-    ungroup() %>%
-    group_by(token) %>%
-    filter(!(n() > 1 & system == "ner")) %>%
-    ungroup() %>%
-    filter(!(person_type == "Unknown" & token %in% c(
+    dplyr::mutate(name = trimws(gsub("  ", " ", name))) %>%
+    dplyr::mutate(formatted_name = trimws(gsub("  ", " ", formatted_name))) %>%
+    dplyr::group_by(formatted_name) %>%
+    dplyr::mutate(person_type = dplyr::last(na.omit(person_type))) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(person_type = dplyr::coalesce(person_type, "Lead")) %>%
+    dplyr::filter(!is.na(person_type)) %>%
+    dplyr::group_by(id) %>%
+    dplyr::mutate(formatted_name = ifelse(!is.na(id), dplyr::last(na.omit(formatted_name)), formatted_name)) %>%
+    dplyr::ungroup() %>%
+    dplyr::group_by(token) %>%
+    dplyr::filter(!(dplyr::n() > 1 & system == "ner")) %>%
+    dplyr::ungroup() %>%
+    dplyr::filter(!(person_type == "Unknown" & token %in% c(
       "Social", "Media", "Marketing", "Branding", "Employer",
       "E-Learning", "Learning", "Plattform", "Klicktechnisch"
     ))) %>%
-    mutate(id = ifelse(nullable_id, 0, id)) %>%
-    select(-nullable_id)
+    dplyr::mutate(id = ifelse(nullable_id, 0, id)) %>%
+    dplyr::select(-nullable_id)
 
   # build placeholders
   placeholders <- known_information_cleaned %>%
-    filter(person_type %in% c("Lead", "Salesperson", "Unknown") & !grepl("COMPANY", type)) %>%
-    distinct(person_type, formatted_name) %>%
-    arrange(person_type, formatted_name) %>%
-    group_by(person_type) %>%
-    mutate(placeholder = paste0(person_type, "_", row_number()))
+    dplyr::filter(person_type %in% c("Lead", "Salesperson", "Unknown") & !grepl("COMPANY", type)) %>%
+    dplyr::distinct(person_type, formatted_name) %>%
+    dplyr::arrange(person_type, formatted_name) %>%
+    dplyr::group_by(person_type) %>%
+    dplyr::mutate(placeholder = paste0(person_type, "_", dplyr::row_number()))
 
   replacements_and_placeholders <- known_information_cleaned %>%
-    left_join(placeholders, by = c("person_type", "formatted_name")) %>%
-    mutate(type = str_to_title(str_to_lower(gsub("COMPANY_", "", type)))) %>%
-    group_by(formatted_name, type) %>%
-    mutate(additional_number = row_number()) %>%
-    mutate(placeholder = ifelse(
+    dplyr::left_join(placeholders, by = c("person_type", "formatted_name")) %>%
+    dplyr::mutate(type = stringr::str_to_title(stringr::str_to_lower(gsub("COMPANY_", "", type)))) %>%
+    dplyr::group_by(formatted_name, type) %>%
+    dplyr::mutate(additional_number = dplyr::row_number()) %>%
+    dplyr::mutate(placeholder = ifelse(
       type %in% c("City", "Street", "Zip", "Company"),
       paste0(placeholder, "_", type, "_", additional_number),
       placeholder
     )) %>%
-    mutate(placeholder = ifelse(
+    dplyr::mutate(placeholder = ifelse(
       grepl("<v ", token),
       paste0("< Speaker: ", placeholder, " >"),
       paste0("< ", placeholder, " >")
     )) %>%
-    arrange(person_type, desc(nchar(token)))
+    dplyr::arrange(person_type, dplyr::desc(nchar(token)))
 
   # replace tokens in text
   for (i in seq_len(nrow(replacements_and_placeholders))) {
@@ -494,37 +484,37 @@ process_transcript_placeholders <- function(con, known_information, tokens, cont
 
   # track which replacements were used
   used_replacement_tokens <- tokens %>%
-    distinct(NER) %>%
-    filter(!(NER %in% c("O", "MISC", "LOCATION", "ORGANIZATION"))) %>%
-    left_join(replacements_and_placeholders, by = c("NER" = "placeholder")) %>%
-    filter(!is.na(token)) %>%
-    mutate(actual_value = ifelse(
+    dplyr::distinct(NER) %>%
+    dplyr::filter(!(NER %in% c("O", "MISC", "LOCATION", "ORGANIZATION"))) %>%
+    dplyr::left_join(replacements_and_placeholders, by = c("NER" = "placeholder")) %>%
+    dplyr::filter(!is.na(token)) %>%
+    dplyr::mutate(actual_value = ifelse(
       grepl("name", type, ignore.case = TRUE) | type == "Speaker",
       formatted_name,
       token
     )) %>%
-    mutate(
+    dplyr::mutate(
       crm_id = ifelse(system == "crm", id, 0),
       ms_id = ifelse(system == "msgraph", id, 0),
       crm_user_id = ifelse(system == "crm_user", id, 0)
     ) %>%
-    distinct(NER, actual_value, person_type, crm_id, ms_id, crm_user_id) %>%
-    group_by(NER) %>%
-    summarise(
-      actual_value = first(actual_value),
-      person_type  = first(person_type),
+    dplyr::distinct(NER, actual_value, person_type, crm_id, ms_id, crm_user_id) %>%
+    dplyr::group_by(NER) %>%
+    dplyr::summarise(
+      actual_value = dplyr::first(actual_value),
+      person_type  = dplyr::first(person_type),
       crm_id       = max(crm_id),
       ms_id        = max(ms_id),
       crm_user_id  = max(crm_user_id),
       .groups = "drop"
     ) %>%
-    mutate(
+    dplyr::mutate(
       crm_id = ifelse(crm_id == 0, NA_integer_, crm_id),
       ms_id = ifelse(ms_id == 0, NA_integer_, ms_id),
       crm_user_id = ifelse(crm_user_id == 0, NA_integer_, crm_user_id)
     ) %>%
-    rename(placeholder = NER) %>%
-    mutate(transcript_id = content_id)
+    dplyr::rename(placeholder = NER) %>%
+    dplyr::mutate(transcript_id = content_id)
 
     # Check if any Lead_ placeholders exist - if not, this is an internal call
     has_lead_placeholders <- any(grepl("Lead_", used_replacement_tokens$placeholder, fixed = TRUE))
@@ -571,9 +561,9 @@ id_anonymize_persons <- function(con, tokens) {
 
   tokens_df <- data.frame(token = tokens_safe, stringsAsFactors = FALSE)
   tokens_only_contact <- tokens_df %>%
-    mutate(system = "ner") %>%
-    mutate(type = "PERSON") %>%
-    mutate(person_type = "Unknown")
+    dplyr::mutate(system = "ner") %>%
+    dplyr::mutate(type = "PERSON") %>%
+    dplyr::mutate(person_type = "Unknown")
 
   return(tokens_only_contact)
 }
@@ -600,9 +590,9 @@ clean_token <- function(tokens, preserved_names) {
 
   # Update NER for short PERSONs and preserved names
   tokens <- tokens %>%
-    mutate(token_lower_case = str_to_lower(token)) %>%
-    mutate(NER = if_else((NER == "PERSON" & nchar(token) <= 2) | token_lower_case %in% preserved_names, "O", NER)) %>%
-    select(-token_lower_case)
+    dplyr::mutate(token_lower_case = stringr::str_to_lower(token)) %>%
+    dplyr::mutate(NER = dplyr::if_else((NER == "PERSON" & nchar(token) <= 2) | token_lower_case %in% preserved_names, "O", NER)) %>%
+    dplyr::select(-token_lower_case)
 
   return(tokens)
 }
@@ -658,7 +648,7 @@ replace_websites <- function(tokens_df) {
   web_pattern <- "(https?://(?:www\\.)?[a-zA-Z0-9-]+\\.[a-zA-Z]{2,6}(/[^\\s]*)?|www\\.[a-zA-Z0-9-]+\\.[a-zA-Z]{2,6}(/[^\\s]*)?)"
 
   tokens_df <- tokens_df %>%
-    mutate(NER = if_else(
+    dplyr::mutate(NER = dplyr::if_else(
       grepl(web_pattern, token),
       "<WEBSITE>",
       NER
@@ -677,7 +667,7 @@ replace_emails <- function(tokens_df) {
   email_pattern <- "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}"
 
   tokens_df <- tokens_df %>%
-    mutate(NER = if_else(
+    dplyr::mutate(NER = dplyr::if_else(
       grepl(email_pattern, token),
       "<EMAIL>",
       NER
@@ -709,20 +699,20 @@ anonymize_with_crm_data <- function(con, crm_lead_ids, positions, tokens) {
     if (is.na(crm_lead_ids$name[id_var])) {
       # CRM Protocol: Get both lead data AND salesperson data
       positions_ <- positions %>%
-        filter(lead_id == lead_id_var)
+        dplyr::filter(lead_id == lead_id_var)
 
       company_id <- positions_ %>%
-        filter(lead_id == lead_id_var) %>%
-        pull(company_id)
+        dplyr::filter(lead_id == lead_id_var) %>%
+        dplyr::pull(company_id)
 
       # Get lead/customer data (names, company, addresses)
-      known_information <- bind_rows(known_information, filter_person_data_all(con, tokens_df = tokens, person_ids = as.integer(lead_id_var), company_ids = company_id))
+      known_information <- dplyr::bind_rows(known_information, filter_person_data_all(con, tokens_df = tokens, person_ids = as.integer(lead_id_var), company_ids = company_id))
 
       # Also get salesperson data (responsible user, protocol writers)
-      known_information <- bind_rows(known_information, filter_salesperson_crm_data(con, tokens_df = tokens, person_ids = as.integer(lead_id_var)))
+      known_information <- dplyr::bind_rows(known_information, filter_salesperson_crm_data(con, tokens_df = tokens, person_ids = as.integer(lead_id_var)))
     } else {
       # MS Teams Transcript: Only anonymize salesperson data (internal call)
-      known_information <- bind_rows(known_information, filter_salesperson_crm_data(con, tokens, as.integer(lead_id_var)))
+      known_information <- dplyr::bind_rows(known_information, filter_salesperson_crm_data(con, tokens, as.integer(lead_id_var)))
     }
   }
 
@@ -740,10 +730,10 @@ anonymize_with_crm_data <- function(con, crm_lead_ids, positions, tokens) {
 #' @keywords internal
 filter_person_data_all <- function(con, tokens_df, person_ids, company_ids) {
 
-  leads <- tbl(con, I("raw.crm_leads")) %>% filter(id %in% person_ids) %>% collect()
-  lead_address <- tbl(con, I("processed.crm_lead_address_with_fallback")) %>% filter(lead_id %in% person_ids) %>% collect()
-  companies <- tbl(con, I("raw.crm_companies")) %>% filter(id %in% company_ids) %>% collect()
-  company_address <- tbl(con, I("raw.crm_company_address")) %>% filter(company_id %in% company_ids) %>% collect()
+  leads <- dplyr::tbl(con, I("raw.crm_leads")) %>% dplyr::filter(id %in% person_ids) %>% dplyr::collect()
+  lead_address <- dplyr::tbl(con, I("processed.crm_lead_address_with_fallback")) %>% dplyr::filter(lead_id %in% person_ids) %>% dplyr::collect()
+  companies <- dplyr::tbl(con, I("raw.crm_companies")) %>% dplyr::filter(id %in% company_ids) %>% dplyr::collect()
+  company_address <- dplyr::tbl(con, I("raw.crm_company_address")) %>% dplyr::filter(company_id %in% company_ids) %>% dplyr::collect()
 
   name <- safe_extract(leads, "lead_first_name")
   surname <- safe_extract(leads, "lead_name")
@@ -767,10 +757,10 @@ filter_person_data_all <- function(con, tokens_df, person_ids, company_ids) {
   zip_company    <- safe_extract(company_address, "zip")
 
   # --- Leads: Hole historische Namen ---
-  lead_names_historical <- tbl(con, I("raw.crm_lead_names")) %>%
-    filter(!is.na(name_removed_at)) %>%
-    filter(lead_id %in% person_ids) %>%
-    collect()
+  lead_names_historical <- dplyr::tbl(con, I("raw.crm_lead_names")) %>%
+    dplyr::filter(!is.na(name_removed_at)) %>%
+    dplyr::filter(lead_id %in% person_ids) %>%
+    dplyr::collect()
 
   # Erstelle Tokens für aktuellen Namen (Priority 1 = zuerst gesucht)
   current_name_tokens <- tibble(
@@ -783,27 +773,27 @@ filter_person_data_all <- function(con, tokens_df, person_ids, company_ids) {
   # Erstelle Tokens für alle historischen Namen (Priority 2 = danach gesucht)
   if (nrow(lead_names_historical) > 0) {
     historical_name_tokens <- lead_names_historical %>%
-      filter(!is.na(first_name_new) | !is.na(name_new)) %>%
+      dplyr::filter(!is.na(first_name_new) | !is.na(name_new)) %>%
       rowwise() %>%
-      mutate(
+      dplyr::mutate(
         full_name = paste(first_name_new, name_new),
         name_for_token = paste(first_name_new, name_new)  # Historischer vollständiger Name
       ) %>%
-      ungroup() %>%
-      select(first_name_new, name_new, full_name, name_for_token) %>%
-      pivot_longer(cols = c(first_name_new, name_new, full_name),
+      dplyr::ungroup() %>%
+      dplyr::select(first_name_new, name_new, full_name, name_for_token) %>%
+      tidyr::pivot_longer(cols = c(first_name_new, name_new, full_name),
                    names_to = "type_name",
                    values_to = "token") %>%
-      filter(!is.na(token) & token != "NA" & token != "") %>%
-      mutate(
-        type = case_when(
+      dplyr::filter(!is.na(token) & token != "NA" & token != "") %>%
+      dplyr::mutate(
+        type = dplyr::case_when(
           type_name == "first_name_new" ~ "FIRST_NAME",
           type_name == "name_new" ~ "SURNAME",
           type_name == "full_name" ~ "FULL_NAME"
         ),
         priority = 2
       ) %>%
-      select(token, type, priority, name_for_token)
+      dplyr::select(token, type, priority, name_for_token)
   } else {
     historical_name_tokens <- tibble(
       token = character(),
@@ -814,20 +804,20 @@ filter_person_data_all <- function(con, tokens_df, person_ids, company_ids) {
   }
 
   # Kombiniere: Aktuelle Namen ZUERST, dann historische (bei Duplikaten: erste behalten)
-  all_name_tokens <- bind_rows(current_name_tokens, historical_name_tokens) %>%
-    arrange(priority, desc(nchar(token))) %>%
-    distinct(token, .keep_all = TRUE)
+  all_name_tokens <- dplyr::bind_rows(current_name_tokens, historical_name_tokens) %>%
+    dplyr::arrange(priority, dplyr::desc(nchar(token))) %>%
+    dplyr::distinct(token, .keep_all = TRUE)
 
   # Erstelle lead_tokens mit allen Namen
   # WICHTIG: Jeder Token behält seinen eigenen Namen (aktuell ODER historisch)
   lead_tokens <- all_name_tokens %>%
-    mutate(
+    dplyr::mutate(
       id = person_id,
       name = name_for_token,  # Verwende den Namen des jeweiligen Tokens (aktuell oder historisch)
       system = "crm",
       person_type = "Lead"
     ) %>%
-    select(-priority, -name_for_token)
+    dplyr::select(-priority, -name_for_token)
 
   if(!is.na(company_id)) {
       # --- Company ---
@@ -871,13 +861,13 @@ filter_person_data_all <- function(con, tokens_df, person_ids, company_ids) {
   }
 
   # --- Alles zusammen ---
-  all_tokens <- bind_rows(
+  all_tokens <- dplyr::bind_rows(
     lead_tokens,
     company_tokens,
     lead_address_tokens,
     company_address_tokens
   ) %>%
-    filter(!is.na(token), token != "")
+    dplyr::filter(!is.na(token), token != "")
 
   return(all_tokens)
 }
@@ -892,25 +882,25 @@ filter_person_data_all <- function(con, tokens_df, person_ids, company_ids) {
 #' @keywords internal
 filter_salesperson_crm_data <- function(con, tokens_df, person_ids) {
 
-  responsible_users <- tbl(con, I("raw.crm_leads")) %>%
-    filter(id %in% person_ids) %>%
-    distinct(responsible_user_id) %>%
-    rename(user_id = responsible_user_id) %>%
-    collect()
+  responsible_users <- dplyr::tbl(con, I("raw.crm_leads")) %>%
+    dplyr::filter(id %in% person_ids) %>%
+    dplyr::distinct(responsible_user_id) %>%
+    dplyr::rename(user_id = responsible_user_id) %>%
+    dplyr::collect()
 
-  protocol_writers <- tbl(con, I("raw.crm_lead_protocols")) %>%
-    left_join(tbl(con, I("raw.crm_lead_protocol_relations")) %>% select(protocol_id, lead_id), by = c("id" = "protocol_id")) %>%
-    filter(lead_id %in% person_ids) %>%
-    distinct(user_id) %>%
-    collect()
+  protocol_writers <- dplyr::tbl(con, I("raw.crm_lead_protocols")) %>%
+    dplyr::left_join(dplyr::tbl(con, I("raw.crm_lead_protocol_relations")) %>% dplyr::select(protocol_id, lead_id), by = c("id" = "protocol_id")) %>%
+    dplyr::filter(lead_id %in% person_ids) %>%
+    dplyr::distinct(user_id) %>%
+    dplyr::collect()
 
   # get user names
-  user_names <- tbl(con, I("raw.crm_users")) %>%
-    filter(id %in% responsible_users$user_id | id %in% protocol_writers$user_id) %>%
-    select(id, user_first_name, user_name) %>%
-    filter(!is.na(user_first_name) & !is.na(user_name)) %>%
-    filter(user_first_name != "Leadmanagement") %>%
-    collect()
+  user_names <- dplyr::tbl(con, I("raw.crm_users")) %>%
+    dplyr::filter(id %in% responsible_users$user_id | id %in% protocol_writers$user_id) %>%
+    dplyr::select(id, user_first_name, user_name) %>%
+    dplyr::filter(!is.na(user_first_name) & !is.na(user_name)) %>%
+    dplyr::filter(user_first_name != "Leadmanagement") %>%
+    dplyr::collect()
 
   # --- Apply Replacements ---
 
@@ -929,8 +919,8 @@ filter_salesperson_crm_data <- function(con, tokens_df, person_ids) {
       type        = c("SURNAME", "FIRST_NAME", "FULL_NAME"),
       person_type = "Salesperson"
     ) %>%
-      filter(!is.na(token), token != "")
-    salesperson_tokens <- bind_rows(salesperson_tokens, salesperson)
+      dplyr::filter(!is.na(token), token != "")
+    salesperson_tokens <- dplyr::bind_rows(salesperson_tokens, salesperson)
   }
 
   return(salesperson_tokens)
@@ -1064,18 +1054,18 @@ find_and_replace_personal_data <- function(tokens_df, personal_data, replacement
   if (length(filtered_terms) == 0) return(tokens_df)
 
   # fuzzy search with variable max_dist
-  tokens <- map_dfr(filtered_terms, function(term) {
+  tokens <- purrr::map_dfr(filtered_terms, function(term) {
 
     # adaptive distance: here 30% of length, but at least 1, at most 3
     max_dist <- max(1, min(3, floor(nchar(term) * 0.3)))
 
     tokens_df %>%
-      filter(stringdist::stringdist(tolower(token), tolower(term), method = "lv") <= max_dist)
+      dplyr::filter(stringdist::stringdist(tolower(token), tolower(term), method = "lv") <= max_dist)
   }) %>%
-    distinct()
+    dplyr::distinct()
 
   tokens_df <- tokens_df %>%
-    mutate(
+    dplyr::mutate(
       NER = ifelse(
         CharacterOffsetBegin %in% tokens$CharacterOffsetBegin & !grepl("< ", NER),
         replacement,
@@ -1119,10 +1109,10 @@ id_anonymize_locations <- function(con, tokens) {
   existing <- DBI::dbGetQuery(con, query)
 
   #get only number rows of table
-  existing_rows <- tbl(con, I("processed.text_anonymizations")) %>%
-    filter(grepl("LOCATION", anonymized)) %>%
-    summarise(n = n()) %>%
-    pull(n) %>%
+  existing_rows <- dplyr::tbl(con, I("processed.text_anonymizations")) %>%
+    dplyr::filter(grepl("LOCATION", anonymized)) %>%
+    dplyr::summarise(n = dplyr::n()) %>%
+    dplyr::pull(n) %>%
     as.integer()
 
   existing_tokens <- existing$original
@@ -1188,10 +1178,10 @@ id_anonymize_organizations <- function(con, tokens) {
   existing <- DBI::dbGetQuery(con, query)
 
   #get only number rows of table
-  existing_rows <- tbl(con, I("processed.text_anonymizations")) %>%
-    filter(grepl("ORGANIZATION", anonymized)) %>%
-    summarise(n = n()) %>%
-    pull(n) %>%
+  existing_rows <- dplyr::tbl(con, I("processed.text_anonymizations")) %>%
+    dplyr::filter(grepl("ORGANIZATION", anonymized)) %>%
+    dplyr::summarise(n = dplyr::n()) %>%
+    dplyr::pull(n) %>%
     as.integer()
 
   existing_tokens <- existing$original
