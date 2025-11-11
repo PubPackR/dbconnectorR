@@ -659,7 +659,7 @@ get_transcripts_ready_for_export <- function(con) {
       # Include if not marked as non-matchable OR if non-matchable but less than 30 days old
       not_matchable_with_crm == FALSE |
         (not_matchable_with_crm == TRUE &
-         transcript_created_at > sql("CURRENT_TIMESTAMP - INTERVAL '30 days'"))
+         transcript_created_at > dbplyr::sql("CURRENT_TIMESTAMP - INTERVAL '30 days'"))
     ) %>%
     dplyr::collect()
 

@@ -204,7 +204,7 @@ anonymize_transcripts <- function(con,
       # Update in database
       if (is.na(anonymized_content)) {
         # Internal call detected - set both content fields to NULL
-        sql_query <- glue_sql(
+        sql_query <- glue::glue_sql(
           "
           UPDATE processed.msgraph_call_transcripts
           SET transcript_content_anonymized = NULL,
@@ -215,7 +215,7 @@ anonymize_transcripts <- function(con,
         )
       } else {
         # External call - store anonymized content
-        sql_query <- glue_sql(
+        sql_query <- glue::glue_sql(
           "
           UPDATE processed.msgraph_call_transcripts
           SET transcript_content_anonymized = {anonymized_content}
@@ -342,7 +342,7 @@ anonymize_speaker <- function(con, tokens) {
   tokens_with_id <- dplyr::tbl(con, I("raw.msgraph_contacts")) %>%
     dplyr::select(id, ms_name) %>%
     dplyr::rename(name = ms_name) %>%
-    dplyr::mutate(name_clean = sql("REPLACE(name, ' ', '')")) %>%
+    dplyr::mutate(name_clean = dbplyr::sql("REPLACE(name, ' ', '')")) %>%
     dplyr::filter(name_clean %in% tokens_only_contact$name_clean) %>%
     dplyr::collect() %>%
     dplyr::full_join(tokens_only_contact, by = "name_clean") %>%
@@ -374,7 +374,7 @@ anonymize_speaker <- function(con, tokens) {
 anonymize_names <- function(participant_ids, contacts, tokens, prefix) {
 
   if(length(participant_ids) == 0) {
-    return(tibble())
+    return(tibble::tibble())
   }
 
   names_long <- contacts %>%
@@ -551,7 +551,7 @@ id_anonymize_persons <- function(con, tokens) {
   person_tokens <- unique(na.omit(tokens$token[tokens$NER == "PERSON"]))
 
   if (length(person_tokens) == 0) {
-    return(tibble())
+    return(tibble::tibble())
   }
 
   # Step 2: Fetch existing mappings
@@ -763,7 +763,7 @@ filter_person_data_all <- function(con, tokens_df, person_ids, company_ids) {
     dplyr::collect()
 
   # Erstelle Tokens für aktuellen Namen (Priority 1 = zuerst gesucht)
-  current_name_tokens <- tibble(
+  current_name_tokens <- tibble::tibble(
     token = c(surname, name, paste(name, surname)),
     type = c("SURNAME", "FIRST_NAME", "FULL_NAME"),
     priority = 1,
@@ -774,7 +774,7 @@ filter_person_data_all <- function(con, tokens_df, person_ids, company_ids) {
   if (nrow(lead_names_historical) > 0) {
     historical_name_tokens <- lead_names_historical %>%
       dplyr::filter(!is.na(first_name_new) | !is.na(name_new)) %>%
-      rowwise() %>%
+      dplyr::rowwise() %>%
       dplyr::mutate(
         full_name = paste(first_name_new, name_new),
         name_for_token = paste(first_name_new, name_new)  # Historischer vollständiger Name
@@ -795,7 +795,7 @@ filter_person_data_all <- function(con, tokens_df, person_ids, company_ids) {
       ) %>%
       dplyr::select(token, type, priority, name_for_token)
   } else {
-    historical_name_tokens <- tibble(
+    historical_name_tokens <- tibble::tibble(
       token = character(),
       type = character(),
       priority = integer(),
@@ -821,7 +821,7 @@ filter_person_data_all <- function(con, tokens_df, person_ids, company_ids) {
 
   if(!is.na(company_id)) {
       # --- Company ---
-    company_tokens <- tibble(
+    company_tokens <- tibble::tibble(
       id         = person_id,
       additional_id = company_id,
       name       = company_name,
@@ -831,12 +831,12 @@ filter_person_data_all <- function(con, tokens_df, person_ids, company_ids) {
       person_type= "Lead"
     )
   } else {
-    company_tokens <- tibble()
+    company_tokens <- tibble::tibble()
   }
 
 
   # --- Lead Address ---
-  lead_address_tokens <- tibble(
+  lead_address_tokens <- tibble::tibble(
     id         = person_id,
     name    = paste(name, surname),
     token      = c(city_person, street_person, zip_person),
@@ -847,7 +847,7 @@ filter_person_data_all <- function(con, tokens_df, person_ids, company_ids) {
 
   if(!is.na(company_id)) {
     # --- Company Address ---
-    company_address_tokens <- tibble(
+    company_address_tokens <- tibble::tibble(
       id         = person_id,
       additional_id = company_id,
       name    = company_name,
@@ -857,7 +857,7 @@ filter_person_data_all <- function(con, tokens_df, person_ids, company_ids) {
       person_type= "Lead"
     )
   } else {
-    company_address_tokens <- tibble()
+    company_address_tokens <- tibble::tibble()
   }
 
   # --- Alles zusammen ---
@@ -907,11 +907,11 @@ filter_salesperson_crm_data <- function(con, tokens_df, person_ids) {
   salesperson_tokens <- c()
 
   if(nrow(user_names) == 0) {
-    return(tibble())
+    return(tibble::tibble())
   }
 
   for(i in 1:nrow(user_names)) {
-    salesperson <- tibble(
+    salesperson <- tibble::tibble(
       id          = user_names$id[i],
       name        = paste(user_names$user_first_name[i], user_names$user_name[i]),
       token       = c(user_names$user_name[i], user_names$user_first_name[i], paste(user_names$user_first_name[i], user_names$user_name[i])),
@@ -1009,8 +1009,8 @@ compress_column <- function(column) {
   column <- gsub("®", "", column, fixed = TRUE)
   column <- gsub("\\*", "", column)
   column <- tolower(column)
-  column <- str_remove_all(column, "[`]|[']|[']| [`]| [']| [']|[,]|[(]|[)]| [/]|[/]")
-  column <- str_remove_all(column, " ag\\b| se\\b| gmbh|\\bohg\\b|\\bco\\b| \\+ co\\.| co\\.| kg\\b| deutschland| österreich| und\\b| für\\b| holding\\b| mbh\\b| eg\\b| ggmbh\\b| group\\b| ev\\b| der\\b| germany\\b| unilive| gesellschaft\\b| schweiz| gruppe| bv\\b")
+  column <- stringr::str_remove_all(column, "[`]|[']|[']| [`]| [']| [']|[,]|[(]|[)]| [/]|[/]")
+  column <- stringr::str_remove_all(column, " ag\\b| se\\b| gmbh|\\bohg\\b|\\bco\\b| \\+ co\\.| co\\.| kg\\b| deutschland| österreich| und\\b| für\\b| holding\\b| mbh\\b| eg\\b| ggmbh\\b| group\\b| ev\\b| der\\b| germany\\b| unilive| gesellschaft\\b| schweiz| gruppe| bv\\b")
   column <- gsub(" & ", " ", column, fixed = TRUE)
   column <- gsub(" &", " ", column, fixed = TRUE)
   column <- gsub("&", " ", column, fixed = TRUE)
@@ -1025,7 +1025,7 @@ compress_column <- function(column) {
   column <- gsub("^firmengruppe ", "", column)
   column <- gsub("^unternehmensgruppe ", "", column)
   column <- gsub("stadtverwaltung", "stadt", column)
-  column <- str_remove_all(column, " [.]|[.]")
+  column <- stringr::str_remove_all(column, " [.]|[.]")
   column <- trimws(column)
   column %>% stringr::str_replace_all("[äÄ]", "ae") %>%
     stringr::str_replace_all("[öÖ]", "oe") %>% stringr::str_replace_all("[üÜ]",
