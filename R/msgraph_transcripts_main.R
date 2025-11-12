@@ -35,8 +35,6 @@
 #'   If NULL, automatically determined from last transcript in database.
 #' @param end_date Optional. Date to end transcript retrieval.
 #'   Default: tomorrow (to include today's transcripts)
-#' @param preserved_names Character vector of company/brand names to preserve
-#'   during anonymization (e.g., c("studyflix", "competitor_name"))
 #' @param use_test_account Logical. If TRUE, exports to test CRM account.
 #'   Default: FALSE
 #' @param resume Logical. If TRUE, resumes from last successful step.
@@ -107,7 +105,6 @@ msgraph_update_transcripts <- function(con,
                                        steps = c("load", "anonymize", "summarize", "deanonymize", "export_to_crm"),
                                        start_date = NULL,
                                        end_date = Sys.Date() + 1,
-                                       preserved_names = c("studyflix", "study flix", "studi flix", "studiflix"),
                                        use_test_account = FALSE,
                                        resume = FALSE,
                                        log_level = "INFO",
@@ -123,7 +120,6 @@ msgraph_update_transcripts <- function(con,
     openrouter_keys = openrouter_keys,
     crm_keys = crm_keys,
     openrouter_model = openrouter_model,
-    preserved_names = preserved_names,
     use_test_account = use_test_account,
     start_date = start_date,
     end_date = end_date,
@@ -204,7 +200,6 @@ execute_transcript_anonymization <- function(con, config) {
   # Delegate to anonymization module
   msgraph_anonymize_transcripts(
     con = con,
-    preserved_names = config$preserved_names,
     logger = config$logger
   )
 }

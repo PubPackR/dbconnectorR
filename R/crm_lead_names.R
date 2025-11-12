@@ -14,7 +14,7 @@
 #' \dontrun{
 #'   crm_update_lead_names(con, crm_key, TRUE)
 #' }
-crm_update_lead_names <- function(con, crm_key, is_daily) {
+crm_update_lead_names <- function(con, crm_key, is_daily = TRUE) {
   last_update_lead_names <- dplyr::tbl(con, I("raw.crm_lead_names")) %>%
     dplyr::summarise(max_added_at = max(name_added_at, na.rm = TRUE)) %>%
     dplyr::collect() %>%

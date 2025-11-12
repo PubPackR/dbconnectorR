@@ -8,7 +8,7 @@
 #'
 #' @return A list containing updated leads and tasks data.
 #' @export
-crm_update_leads <- function(con, crm_key, is_daily) {
+crm_update_leads <- function(con, crm_key, is_daily = TRUE) {
 
     last_update_tasks <- dplyr::tbl(con, I("raw.crm_lead_tasks")) %>%
       dplyr::summarise(max_updated_at = max(updated_at, na.rm = TRUE)) %>%

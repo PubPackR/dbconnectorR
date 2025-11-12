@@ -135,19 +135,25 @@ get_call_participants_combined <- function(con, call_ids, include_event_attendee
 #' Load Preserved Company Names
 #'
 #' Loads company/brand names to preserve during anonymization
+#' from a text file containing comma-separated values.
 #'
-#' @param file_path Path to file with company names
-#' @return Character vector of company names
+#' @return Character vector of company names. Always includes studyflix variations.
 #' @keywords internal
-load_preserved_names <- function(file_path = "../../base-data/msgraph/text_for_summary_prompt/wettbewerber.txt") {
+load_preserved_names <- function() {
+  file_path <- "../../base-data/msgraph/text_for_summary_prompt/wettbewerber.txt"
+
   if (!file.exists(file_path)) {
-    warning("Preserved names file not found: ", file_path)
-    return(character(0))
+    warning("Preserved names file not found: ", file_path,
+            ". Using default values only.")
+    return(c("studyflix", "study flix", "studi flix", "studiflix"))
   }
 
   content <- paste(readLines(file_path, warn = FALSE), collapse = " ")
   names <- trimws(unlist(strsplit(content, ",")))
   names <- names[names != ""]
+
+  # Always include standard studyflix variations
+  names <- unique(c(names, "studyflix", "study flix", "studi flix", "studiflix"))
 
   return(names)
 }
