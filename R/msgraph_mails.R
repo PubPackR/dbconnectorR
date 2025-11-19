@@ -81,9 +81,6 @@ msgraph_update_mails <- function(con,
                                   user_filter = NULL,
                                   max_retries = 3) {
 
-  # Load required helper functions
-  source('func/support_functions.R')
-
   # 1. Get processable users
   message("Loading user list...")
   all_users <- get_processable_users(con)
