@@ -62,13 +62,16 @@ deanonymize_transcript_summaries <- function(con) {
   for (i in seq_len(nrow(to_process))) {
     row <- to_process[i, ]
 
+    # Ensure ID is properly handled as character
+    transcript_id <- as.character(row$id)
+
     cat("Deanonymizing transcript", i, "of", nrow(to_process), "\n")
 
     tryCatch({
       deanonymized <- deanonymize_text(
         con,
         anonymized_text = row$transcript_summary_anonymized,
-        transcript_id = row$id
+        transcript_id = transcript_id
       )
 
       if (is.null(deanonymized)) deanonymized <- ""
@@ -76,11 +79,11 @@ deanonymize_transcript_summaries <- function(con) {
       DBI::dbExecute(con, "
         UPDATE processed.msgraph_call_transcripts
         SET transcript_summary = $1
-        WHERE transcript_id = $2
-      ", params = list(deanonymized, row$transcript_id))
+        WHERE id = $2
+      ", params = list(deanonymized, transcript_id))
 
     }, error = function(e) {
-      cat("❌ Failed to deanonymize transcript ID:", row$transcript_id, "\n")
+      cat("❌ Failed to deanonymize transcript ID:", transcript_id, "\n")
       cat("   Error:", e$message, "\n")
       cat("   Continuing with next transcript...\n\n")
     })
@@ -102,26 +105,41 @@ deanonymize_text <- function(con, anonymized_text, transcript_id_var) {
 
   anonymized_text <- as.character(anonymized_text)[1]
 
+  # Check if anonymized_text is NA or empty
+  if(is.na(anonymized_text) || nchar(anonymized_text) == 0) {
+    return("")
+  }
+
   placeholders <- dplyr::tbl(con, I("processed.msgraph_call_transcript_placeholders")) %>%
     dplyr::filter(transcript_id == transcript_id_var) %>%
     dplyr::select(placeholder, actual_value) %>%
     dplyr::collect()
 
   if(nrow(placeholders) == 0) {
-    cat("⚠️  No placeholders found for transcript_id:", transcript_id_var, "- returning original text\n")
     return(anonymized_text)
   }
 
   # Extract tokens: "< Lead_1 >" (with spaces) or "<Lead_1>" (without spaces)
   # Pattern: < optional-spaces WORD_NUMBER optional-spaces >
-  tokens <- stringr::str_extract_all(anonymized_text, "< (?:Speaker: )?[A-Za-z0-9_-]+ >")[[1]] %>%
-    unique() %>%
-    stringr::str_replace_all("-", "_")  # Ersetze Bindestriche mit Unterstrichen
+  tokens_raw <- stringr::str_extract_all(anonymized_text, "< (?:Speaker: )?[A-Za-z0-9_-]+ >")[[1]]
 
-  # build data frame
+  if(length(tokens_raw) == 0) {
+    return(anonymized_text)
+  }
+
+  tokens <- tokens_raw %>%
+    unique() %>%
+    stringr::str_replace_all("-", "_")  # Replace hyphens with underscores
+
+  # Build data frame
+  token_clean_vec <- stringr::str_trim(stringr::str_remove_all(tokens, "[<>]"))
+
+  # Remove "Speaker: " prefix if present (it's sometimes in the summary but not in placeholders)
+  token_clean_vec <- stringr::str_remove(token_clean_vec, "^Speaker:\\s*")
+
   df <- tibble::tibble(
     token_full  = tokens,
-    token_clean = stringr::str_trim(stringr::str_remove_all(tokens, "[<>]")),  # Entferne < > und trim Leerzeichen
+    token_clean = token_clean_vec,
     actual_value = NA_character_
   )
 
@@ -129,7 +147,7 @@ deanonymize_text <- function(con, anonymized_text, transcript_id_var) {
     return(anonymized_text)
   }
 
-  # keep only those where we can find df$token_clean in placeholders$placeholder as substring
+  # Match tokens with placeholders
   for(i in 1:nrow(df)) {
     token_clean <- df$token_clean[i]
 
@@ -147,6 +165,10 @@ deanonymize_text <- function(con, anonymized_text, transcript_id_var) {
   }
 
   df <- df %>% dplyr::filter(!is.na(actual_value))
+
+  if(nrow(df) == 0) {
+    return(anonymized_text)
+  }
 
   deanonymized_text <- stringi::stri_replace_all_fixed(
     anonymized_text,
