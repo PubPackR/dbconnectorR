@@ -16,6 +16,8 @@
 #'
 #' @param con Database connection
 #' @param logger Logger function for output messages
+#' @param force_interactive Logical or NULL. If NULL (default), uses interactive() to determine mode.
+#'   If TRUE, forces interactive mode. If FALSE, forces non-interactive mode.
 #'
 #' @return Invisible NULL (updates database)
 #'
@@ -26,14 +28,15 @@
 #'
 #' @export
 msgraph_anonymize_transcripts <- function(con,
-                                      logger = function(msg, level = "INFO") cat(msg, "\n")) {
+                                      logger = function(msg, level = "INFO") cat(msg, "\n"),
+                                      force_interactive = NULL) {
 
   # Load preserved names from file
   preserved_names <- load_preserved_names()
   logger(sprintf("Loaded %d preserved names", length(preserved_names)), "DEBUG")
 
   # Initialize CoreNLP
-  path_to_core_nlp <- get_latest_corenlp_path()
+  path_to_core_nlp <- get_latest_corenlp_path(force_interactive = force_interactive)
   coreNLP::initCoreNLP(path_to_core_nlp, type = "german")
   logger("CoreNLP initialized", "DEBUG")
 
@@ -99,11 +102,21 @@ msgraph_anonymize_transcripts <- function(con,
 #'
 #' Finds the most recent CoreNLP installation
 #'
+#' @param force_interactive Logical or NULL. If NULL (default), uses interactive() to determine mode.
+#'   If TRUE, forces interactive mode (uses "opt" path). If FALSE, forces non-interactive mode (uses "/opt" path).
+#'
 #' @return Character string with path to CoreNLP directory
 #' @keywords internal
-get_latest_corenlp_path <- function() {
+get_latest_corenlp_path <- function(force_interactive = NULL) {
+  # Determine if we're in interactive mode
+  is_interactive <- if (!is.null(force_interactive)) {
+    force_interactive
+  } else {
+    interactive()
+  }
+
   # Base path depends on interactivity
-  base_path <- if (interactive()) "opt" else "/opt"
+  base_path <- if (is_interactive) "opt" else "/opt"
 
   # List folders in that path
   folders <- list.dirs(base_path, full.names = FALSE, recursive = FALSE)
