@@ -334,7 +334,8 @@ map_transcripts_to_crm_entities <- function(con, transcript_summaries) {
 
   # Filter to only mappable transcripts
   mappable_transcripts <- transcript_mappings %>%
-    dplyr::filter(!is.na(attachable_id), !is.na(attachable_type))
+    dplyr::filter(!is.na(attachable_id), !is.na(attachable_type)) %>% 
+    dplyr::distinct()
 
   unmapped_count <- nrow(transcript_summaries) - nrow(mappable_transcripts)
   if (unmapped_count > 0) {
