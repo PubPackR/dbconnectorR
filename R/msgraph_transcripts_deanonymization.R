@@ -64,13 +64,18 @@ deanonymize_transcript_summaries <- function(con) {
 
     # Ensure ID is properly handled as character
     transcript_id <- as.character(row$id)
+    anonymized_text <- row$transcript_summary_anonymized
+
+    # Replace narrow non-breaking spaces with regular spaces
+    strange_spaces <- "[\u00A0\u202F\u2009\u200A\u200B]"
+    anonymized_text <- stringr::str_replace_all(anonymized_text, strange_spaces, " ")
 
     cat("Deanonymizing transcript", i, "of", nrow(to_process), "\n")
 
     tryCatch({
       deanonymized <- deanonymize_text(
         con,
-        anonymized_text = row$transcript_summary_anonymized,
+        anonymized_text = anonymized_text,
         transcript_id = transcript_id
       )
 

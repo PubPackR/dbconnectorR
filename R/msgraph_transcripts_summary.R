@@ -107,6 +107,9 @@ generate_and_save_transcript_summaries <- function(con, openrouter_model, openro
       row$transcript_content_anonymized <- paste0("Gespräch vom ", row$call_start, "\r\n ", row$transcript_content_anonymized)
       summary_text <- summarize_ts(row$transcript_content_anonymized, paths, openrouter_model, openrouter_key)
 
+      strange_spaces <- "[\u00A0\u202F\u2009\u200A\u200B]"
+      summary_text <- stringr::str_replace_all(summary_text, strange_spaces, " ")
+
       if (is.null(summary_text)) summary_text <- ""
 
       DBI::dbExecute(

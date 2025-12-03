@@ -388,7 +388,7 @@ export_transcripts_to_crm <- function(con, crm_api_key, transcript_mappings,
       transcript_id = id,  # Preserve transcript ID for tracking
       protocol_header = paste("Teams Meeting Summary -",
                             format(as.Date(transcript_created_at), "%Y-%m-%d")),
-      content = format_transcript_for_crm(transcript_summary),
+      content = format_transcript_for_crm(transcript_summary, sales_user_names),
       field_type = "protocols",
       action = "add",
       badge = "meeting-summary"
@@ -521,27 +521,7 @@ export_single_protocol_to_crm <- function(con, headers, protocol_data, use_test_
   # print(paste0("https://studyflix-gmbh.centralstationcrm.net/people/", protocol_data$attachable_id))
   # browser()
 
-  formatted_content <- protocol_data$content %>%
-    sub("\n\n", "\r\n\r\n---\r\n\r\n", .) %>%
-    gsub("\n\\*\\*", "\n* **", .) %>%
-    gsub("\n- ", "\r\n  * ", .) %>%
-    gsub("\n  - ", "\r\n      * ", .) %>%
-    gsub("\n    - ", "\r\n          * ", .) %>%
-    gsub("\n      - ", "\r\n              * ", .)
-
-  # Append sales user names to first line of content
-  if (!is.na(protocol_data$sales_user_names)) {
-    # Split content into lines
-    content_lines <- strsplit(formatted_content, "\r\n")[[1]]
-
-    # Append to first line
-    if (length(content_lines) > 0) {
-      content_lines[1] <- paste0(content_lines[1], " - ", protocol_data$sales_user_names)
-    }
-
-    # Rejoin content
-    formatted_content <- paste(content_lines, collapse = "\r\n")
-  }
+  formatted_content <- protocol_data$content
 
   # Always use default user ID for CRM protocol creation
   # (Sales user information will be stored separately)
@@ -606,17 +586,30 @@ export_single_protocol_to_crm <- function(con, headers, protocol_data, use_test_
 
 #' Format Transcript Summary for CRM Export
 #'
-#' Applies markdown formatting transformations to prepare summaries for CRM
-#' @param content Character vector of transcript summary content
-#' @return Character vector with applied formatting transformations
-#' @keywords internal
-format_transcript_for_crm <- function(content) {
+#' Applies markdown formatting transformations to prepare transcript summaries for CRM export.
+#' The function normalizes line endings, standardizes list bullets, removes trailing whitespace,
+#' fixes bullet point formatting, adds section breaks after bold headers, and replaces underscores
+#' with dashes to meet CRM style requirements.
+#'
+#' @param content Character vector of transcript summary content.
+#'
+#' @return Character vector with applied formatting transformations.
+#'
+#' @examples
+#' format_transcript_for_crm(c("**Header**\\n- Item 1\\n- Item 2"))
+#'
+#' @export
+format_transcript_for_crm <- function(content, sales_user_names = NULL, wrap_length = 100) {
   if (length(content) == 0 || all(is.na(content))) {
     return(content)
   }
 
   # Apply each formatting transformation sequentially
   formatted_content <- content
+
+  # Replace narrow non-breaking spaces with regular spaces
+  strange_spaces <- "[\u00A0\u202F\u2009\u200A\u200B]"
+  formatted_content <- stringr::str_replace_all(formatted_content, strange_spaces, " ")
 
   # 1. Line ending normalization (convert escaped newlines to proper line endings)
   formatted_content <- gsub("\\\\n", "\r\n", formatted_content)
@@ -637,9 +630,26 @@ format_transcript_for_crm <- function(content) {
   # 6. Replace underscores with dashes (per CRM style requirements)
   formatted_content <- gsub("_", "-", formatted_content)
 
+  # 7. Weitere Formatierungen aus export_single_protocol_to_crm
+  formatted_content <- formatted_content %>%
+    sub("\n\n", "\r\n\r\n---\r\n\r\n", .) %>%
+    gsub("\n\\*\\*", "\n* **", .) %>%
+    gsub("\n- ", "\r\n  * ", .) %>%
+    gsub("\n  - ", "\r\n      * ", .) %>%
+    gsub("\n    - ", "\r\n          * ", .) %>%
+    gsub("\n      - ", "\r\n              * ", .)
+
+  # 8. Append sales user names to first line of content (optional)
+  if (!is.null(sales_user_names) && !is.na(sales_user_names)) {
+    content_lines <- strsplit(formatted_content, "\r\n")[[1]]
+    if (length(content_lines) > 0) {
+      content_lines[1] <- paste0(content_lines[1], " - ", sales_user_names)
+    }
+    formatted_content <- paste(content_lines, collapse = "\r\n")
+  }
+
   return(formatted_content)
 }
-
 
 #' Get Transcript Summaries Ready for CRM Export
 #'
