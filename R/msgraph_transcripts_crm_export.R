@@ -641,11 +641,17 @@ format_transcript_for_crm <- function(content, sales_user_names = NULL, wrap_len
 
   # 8. Append sales user names to first line of content (optional)
   if (!is.null(sales_user_names) && !all(is.na(sales_user_names))) {
-    content_lines <- strsplit(formatted_content, "\r\n")[[1]]
-    if (length(content_lines) > 0) {
-      content_lines[1] <- paste0(content_lines[1], " - ", sales_user_names)
-    }
-    formatted_content <- paste(content_lines, collapse = "\r\n")
+    # Process each transcript individually
+    formatted_content <- mapply(function(content_item, names_item) {
+      if (is.na(names_item)) {
+        return(content_item)
+      }
+      content_lines <- strsplit(content_item, "\r\n")[[1]]
+      if (length(content_lines) > 0) {
+        content_lines[1] <- paste0(content_lines[1], " - ", names_item)
+      }
+      paste(content_lines, collapse = "\r\n")
+    }, formatted_content, sales_user_names, SIMPLIFY = TRUE, USE.NAMES = FALSE)
   }
 
   return(formatted_content)
