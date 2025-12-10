@@ -1071,7 +1071,7 @@ find_and_replace_personal_data <- function(tokens_df, personal_data, replacement
   tokens <- purrr::map_dfr(filtered_terms, function(term) {
 
     # adaptive distance: here 30% of length, but at least 1, at most 3
-    max_dist <- max(1, min(3, floor(nchar(term) * 0.3)))
+    max_dist <- min(3, floor(nchar(term) * 0.2))
 
     tokens_df %>%
       dplyr::filter(stringdist::stringdist(tolower(token), tolower(term), method = "lv") <= max_dist)
