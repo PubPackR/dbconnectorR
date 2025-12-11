@@ -85,6 +85,19 @@ crm_update_leads <- function(con, crm_key, is_daily = TRUE) {
     # Upsert Social Media Links
     data <- leads$social_media_links %>% resolve_lead_id(all_leads)
     upsert_delete_missing(con, "raw.crm_lead_social_media_links", data, match_cols = c("lead_id", "link_name"))
+  
+    # Upsert Connections
+    data <- leads$connections %>%
+      resolve_lead_id(all_leads, col = "lead_id_1") %>%
+      resolve_lead_id(all_leads, col = "lead_id_2") %>%
+      resolve_user_ids(all_users, c("created_by_user_id", "updated_by_user_id")) %>%
+      dplyr::mutate(
+        lead_id_1_new = if_else(lead_id_1 > lead_id_2, lead_id_2, lead_id_1),
+        lead_id_2_new = if_else(lead_id_1 > lead_id_2, lead_id_1, lead_id_2)
+      ) %>%
+      dplyr::select(-lead_id_1, -lead_id_2) %>%
+      dplyr::rename(lead_id_1 = lead_id_1_new, lead_id_2 = lead_id_2_new)
+    upsert_delete_missing(con, "raw.crm_lead_connections", data, match_cols = c("lead_id_1", "lead_id_2"))
     
     # Upsert Tasks
     data <- leads$tasks %>%
@@ -113,7 +126,7 @@ crm_update_leads <- function(con, crm_key, is_daily = TRUE) {
     }
     
     return(leads)
-  }
+}
 
 download_and_enrich_leads <- function(last_update_tasks, tags_old, crm_key, daily_download = TRUE) {
 
@@ -288,6 +301,27 @@ download_and_enrich_leads <- function(last_update_tasks, tags_old, crm_key, dail
     dplyr::mutate(is_primary = dplyr::coalesce(is_primary, TRUE)) %>%
     dplyr::mutate(is_api_input = dplyr::coalesce(is_primary, FALSE)) %>%
     dplyr::distinct()
+
+  connections <- leads %>%
+    dplyr::select(connections) %>%
+    tidyr::unnest("connections") %>%
+    dplyr::select(
+      crm_connection_id = id,
+      lead_id_1 = object_1_id,
+      lead_id_2 = object_2_id,
+      connection_quantity = quantity,
+      connection_quality = quality,
+      created_by_user_id,
+      updated_by_user_id,
+      connection_created_at = created_at,
+      connection_updated_at = updated_at
+    ) %>%
+    dplyr::mutate(
+      connection_created_at = lubridate::ymd_hms(connection_created_at, tz = "CET"),
+      connection_updated_at = lubridate::ymd_hms(connection_updated_at, tz = "CET"),
+      is_deleted = FALSE
+    ) %>%
+    dplyr::distinct()
   
   main_table <- leads %>%
     dplyr::select(-tidyselect::where(is.list)) %>%
@@ -324,6 +358,7 @@ download_and_enrich_leads <- function(last_update_tasks, tags_old, crm_key, dail
                      addrs = addrs,
                      homepages = homepages,
                      social_media_links = social_media_links,
+                     connections = connections,
                      tasks = tasks,
                      task_comments = task_comments)
   
