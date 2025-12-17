@@ -85,14 +85,15 @@ msgraph_update_events <- function(con, access_token, startDate, user_id = NULL) 
     dplyr::summarise(is_organizer = any(is_organizer)) %>%
     dplyr::ungroup()
 
-  update_events(con, all_calendar_events_)
+  update_events(con, all_calendar_events_, startDate)
   update_contacts_from_events(con, msgraph_event_participants)
   update_event_participants(con, msgraph_event_participants)
 }
 
-update_events <- function(con, all_calendar_events_) {
+update_events <- function(con, all_calendar_events_, startDate) {
 
-  msgraph_events <- all_calendar_events_ %>%
+  # Process new calendar events - KEEP user_id for now to track which events came from which calendars
+  msgraph_events_new <- all_calendar_events_ %>%
     dplyr::select(-attendees, -organizer) %>%
     dplyr::mutate(date = as.Date(start_dateTime)) %>%
     dplyr::mutate(id = as.character(id)) %>%
@@ -101,13 +102,14 @@ update_events <- function(con, all_calendar_events_) {
     dplyr::mutate(online_meeting_join_url = as.character(onlineMeeting_joinUrl)) %>%
     dplyr::mutate(is_single_instance = type == "singleInstance") %>%
     dplyr::select(msgraph_ical_uid = iCalUId, event_created_at = createdDateTime, event_updated_at = lastModifiedDateTime, subject, is_single_instance,
-           is_online_meeting = isOnlineMeeting, online_meeting_join_url, event_start = start_dateTime, event_end = end_dateTime, is_canceled) %>%
+           is_online_meeting = isOnlineMeeting, online_meeting_join_url, event_start = start_dateTime, event_end = end_dateTime, is_canceled, user_id) %>%
     dplyr::mutate(msgraph_ical_uid = as.character(msgraph_ical_uid),
            event_created_at = lubridate::ymd_hms(event_created_at),
            event_updated_at = lubridate::ymd_hms(event_updated_at),
            event_start = lubridate::ymd_hms(event_start),
            event_end = lubridate::ymd_hms(event_end),
-           subject = as.character(subject)) %>%
+           subject = as.character(subject),
+           user_id = as.character(user_id)) %>%
     dplyr::distinct() %>%
     dplyr::ungroup() %>%
     dplyr::mutate(meeting_id = extract_meeting_id(online_meeting_join_url)) %>%
@@ -120,12 +122,90 @@ update_events <- function(con, all_calendar_events_) {
     dplyr::arrange(msgraph_ical_uid, event_start, is_canceled) %>%  # if is_canceled is sometimes FALSE, take this value
     dplyr::distinct(msgraph_ical_uid, event_start, .keep_all = TRUE)
 
+  user_ids <- msgraph_events_new %>% distinct(user_id) %>% pull(user_id)
+
+  # Calculate endDate (same logic as in retrieve_calendar_events)
+  endDate <- lubridate::today() + 365
+
+  # Load existing events from DB
+  existing_events <- dplyr::tbl(con, I("raw.msgraph_events")) %>%
+    dplyr::collect()
+
+  # Get internal users' email addresses for the specified user_ids
+  internal_users <- dplyr::tbl(con, I("raw.msgraph_users")) %>%
+    dplyr::filter(is_internal & !is_deleted) %>%
+    dplyr::collect()
+
+  # Filter to specific user_ids
+  if (!is.null(user_ids) && length(user_ids) > 0) {
+    internal_users <- internal_users %>%
+      dplyr::filter(msgraph_user_id %in% user_ids)
+  }
+
+  internal_emails <- tolower(internal_users$email)
+  contacts <- dplyr::tbl(con, I("raw.msgraph_contacts")) %>% dplyr::collect()
+
+  # Find events that belong to the specified users (where they are participants)
+  # and are in the date range we're updating
+  event_participants <- dplyr::tbl(con, I("raw.msgraph_event_participants")) %>%
+    dplyr::collect() %>%
+    dplyr::left_join(
+      contacts %>% dplyr::select(id, email),
+      by = c("contact_id" = "id")
+    ) %>%
+    dplyr::filter(tolower(email) %in% internal_emails) %>%
+    dplyr::left_join(
+      existing_events %>% dplyr::select(id, msgraph_ical_uid, event_start),
+      by = c("event_id" = "id")
+    ) %>%
+    dplyr::filter(
+      event_start >= lubridate::ymd(startDate) &
+      event_start <= lubridate::ymd(endDate)
+    )
+
+  # Events in scope: events that belong to the specified users and are in the date range
+  events_in_scope <- event_participants %>%
+    dplyr::distinct(msgraph_ical_uid, event_start)
+
+  # New event identifiers (what we just downloaded)
+  new_event_identifiers <- msgraph_events_new %>%
+    dplyr::distinct(msgraph_ical_uid, event_start)
+
+  # Events to mark as cancelled: in scope but NOT in the new download
+  events_to_cancel <- events_in_scope %>%
+    dplyr::anti_join(new_event_identifiers, by = c("msgraph_ical_uid", "event_start"))
+
+  # Mark events as cancelled
+  existing_events_updated <- existing_events %>%
+    dplyr::left_join(
+      events_to_cancel %>% dplyr::mutate(should_cancel = TRUE),
+      by = c("msgraph_ical_uid", "event_start")
+    ) %>%
+    dplyr::mutate(is_canceled = ifelse(!is.na(should_cancel), TRUE, is_canceled)) %>%
+    dplyr::select(-should_cancel)
+
+  # Remove events that are in the new download from existing events (we'll add the new versions)
+  events_to_keep <- existing_events_updated %>%
+    dplyr::anti_join(new_event_identifiers, by = c("msgraph_ical_uid", "event_start"))
+
+  # Combine: kept events + new events
+  msgraph_events_final <- dplyr::bind_rows(
+    events_to_keep,
+    msgraph_events_new %>% dplyr::select(-user_id)
+  ) %>%
+    select(-id, -created_at, -updated_at) %>%  # Remove internal DB IDs and timestamps to let upsert handle them
+    dplyr::distinct() %>% 
+    group_by(msgraph_ical_uid, event_start) %>%
+    slice_max(event_updated_at, with_ties = FALSE)
+
+  # Write back to DB with delete_missing = FALSE (we're keeping all events)
   Billomatics::postgres_upsert_data(
     con = con,
     schema = "raw",
     table = "msgraph_events",
-    data = msgraph_events,
-    match_cols = c("msgraph_ical_uid", "event_start")
+    data = msgraph_events_final,
+    match_cols = c("msgraph_ical_uid", "event_start"),
+    delete_missing = FALSE # all data should be updated, no missing
   )
 
 }
@@ -163,7 +243,8 @@ update_event_participants <- function(con, msgraph_event_participants) {
   events <- dplyr::tbl(con, I("raw.msgraph_events")) %>% dplyr::collect()
   contacts <- dplyr::tbl(con, I("raw.msgraph_contacts")) %>% dplyr::collect()
 
-  msgraph_event_participants_ <- msgraph_event_participants %>%
+  # Process new event participants
+  msgraph_event_participants_new <- msgraph_event_participants %>%
       dplyr::ungroup() %>%
       dplyr::distinct(event_id, attendees_emailAddress_address, is_organizer, event_start) %>%
       dplyr::left_join(contacts %>% dplyr::select(email, id), by = c("attendees_emailAddress_address" = "email")) %>% dplyr::mutate(contact_id = id) %>% dplyr::select(-id, -attendees_emailAddress_address) %>%
@@ -173,12 +254,35 @@ update_event_participants <- function(con, msgraph_event_participants) {
       dplyr::distinct(contact_id, event_id, .keep_all = TRUE) %>%
       dplyr::select(-event_start)
 
+  # Load existing event participants from DB
+  existing_participants <- dplyr::tbl(con, I("raw.msgraph_event_participants")) %>%
+    dplyr::collect()
+
+  # Get event_ids for the newly downloaded events only
+  # We only want to replace participants for events we just downloaded, not for cancelled events
+  new_event_ids <- msgraph_event_participants_new %>%
+    dplyr::distinct(event_id)
+
+  # Keep all participants EXCEPT those for events we just downloaded (we'll replace those)
+  participants_to_keep <- existing_participants %>%
+    dplyr::anti_join(new_event_ids, by = "event_id")
+
+  # Combine: kept participants + new participants
+  msgraph_event_participants_final <- dplyr::bind_rows(
+    participants_to_keep,
+    msgraph_event_participants_new
+  ) %>%
+    dplyr::distinct() %>% 
+    select(-id, -updated_at, -created_at)
+
+  # Write back to DB with delete_missing = FALSE
   Billomatics::postgres_upsert_data(
     con = con,
     schema = "raw",
     table = "msgraph_event_participants",
-    data = msgraph_event_participants_,
-    match_cols = c("contact_id", "event_id")
+    data = msgraph_event_participants_final,
+    match_cols = c("contact_id", "event_id"),
+    delete_missing = TRUE
   )
 
 }
