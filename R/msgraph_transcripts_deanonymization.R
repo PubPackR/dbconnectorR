@@ -155,17 +155,32 @@ deanonymize_text <- function(con, anonymized_text, transcript_id_var) {
   # Match tokens with placeholders
   for(i in 1:nrow(df)) {
     token_clean <- df$token_clean[i]
+    token_full <- df$token_full[i]
 
-    match <- placeholders %>%
-      dplyr::filter(grepl(token_clean, placeholder))
+    # Step 1: Try exact match first (handles Speaker: prefix correctly)
+    # Build expected placeholder patterns for exact matching
+    exact_patterns <- c(
+      paste0("< ", token_clean, " >"),
+      paste0("< Speaker: ", token_clean, " >")
+    )
+    exact_match <- placeholders %>%
+      dplyr::filter(placeholder %in% exact_patterns)
 
-    # Only apply min() if there are matches
-    if(nrow(match) > 0) {
-      match <- match %>%
-        dplyr::filter(nchar(placeholder) == min(nchar(placeholder)))  # take the shortest match
-      df$actual_value[i] <- match$actual_value[1]
+    if (nrow(exact_match) > 0) {
+      # Exact match found - use it
+      df$actual_value[i] <- exact_match$actual_value[1]
     } else {
-      df$actual_value[i] <- NA
+      # Step 2: Fallback to grepl for partial matches (e.g., City, Street placeholders)
+      partial_match <- placeholders %>%
+        dplyr::filter(grepl(token_clean, placeholder, fixed = TRUE))
+
+      if (nrow(partial_match) > 0) {
+        partial_match <- partial_match %>%
+          dplyr::filter(nchar(placeholder) == min(nchar(placeholder)))
+        df$actual_value[i] <- partial_match$actual_value[1]
+      } else {
+        df$actual_value[i] <- NA
+      }
     }
   }
 
