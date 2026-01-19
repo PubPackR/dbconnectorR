@@ -8,7 +8,7 @@
 #'
 #' @return A list containing updated leads and tasks data.
 #' @export
-crm_update_leads <- function(con, crm_key, is_daily = TRUE) {
+crm_update_leads <- function(con, crm_key, is_daily = TRUE, debug_mode = FALSE) {
 
     last_update_tasks <- dplyr::tbl(con, I("raw.crm_lead_tasks")) %>%
       dplyr::summarise(max_updated_at = max(updated_at, na.rm = TRUE)) %>%
@@ -35,7 +35,7 @@ crm_update_leads <- function(con, crm_key, is_daily = TRUE) {
       dplyr::select("id", "crm_user_id") %>%
       dplyr::collect()
     
-    leads <- download_and_enrich_leads(last_update_tasks, tags_old, crm_key, daily_download = is_daily)
+    leads <- download_and_enrich_leads(last_update_tasks, tags_old, crm_key, daily_download = is_daily, debug_mode = debug_mode)
     
     # Upsert main table
     data <- leads$main_table %>%
@@ -128,7 +128,7 @@ crm_update_leads <- function(con, crm_key, is_daily = TRUE) {
     return(leads)
 }
 
-download_and_enrich_leads <- function(last_update_tasks, tags_old, crm_key, daily_download = TRUE) {
+download_and_enrich_leads <- function(last_update_tasks, tags_old, crm_key, daily_download = TRUE, debug_mode = FALSE) {
 
   leads <- Billomatics::get_central_station_contacts(crm_key)
 
@@ -138,13 +138,18 @@ download_and_enrich_leads <- function(last_update_tasks, tags_old, crm_key, dail
     last_update_tasks <- lubridate::ymd_hms("2018-01-01 00:00:00")
   }
 
+  if(debug_mode) { browser() }
+
   tasks <- get_tasks_from_leads(leads)
 
   task_comments <- import_task_comments(tasks, last_update_tasks, crm_key)
 
+  if (debug_mode) { browser() }
+
   positions <- leads %>%
+    dplyr::mutate(positions = purrr::map(positions, ~ if (length(.x) == 0 || !is.data.frame(.x)) NULL else .x)) %>%
     dplyr::select(positions) %>%
-    tidyr::unnest("positions") %>%
+    tidyr::unnest("positions", keep_empty = FALSE) %>%
     dplyr::select(-account_id) %>%
     dplyr::rename(lead_id = person_id,
            crm_position_id = id,
@@ -161,8 +166,9 @@ download_and_enrich_leads <- function(last_update_tasks, tags_old, crm_key, dail
     dplyr::distinct()
   
   custom_fields <- leads %>%
+    dplyr::mutate(custom_fields = purrr::map(custom_fields, ~ if (length(.x) == 0 || !is.data.frame(.x)) NULL else .x)) %>%
     dplyr::select(custom_fields) %>%
-    tidyr::unnest("custom_fields") %>%
+    tidyr::unnest("custom_fields", keep_empty = FALSE) %>%
     dplyr::select(-attachable_type) %>%
     dplyr::rename(lead_id = attachable_id,
            field_created_at = created_at,
@@ -178,8 +184,9 @@ download_and_enrich_leads <- function(last_update_tasks, tags_old, crm_key, dail
     dplyr::distinct()
   
   current_tags <- leads %>%
+    dplyr::mutate(tags = purrr::map(tags, ~ if (length(.x) == 0 || !is.data.frame(.x)) NULL else .x)) %>%
     dplyr::select(tags) %>%
-    tidyr::unnest("tags") %>%
+    tidyr::unnest("tags", keep_empty = FALSE) %>%
     dplyr::select(crm_tag_id = id, attachable_id, name, updated_at) %>%
     dplyr::rename(lead_id = attachable_id) %>%
     dplyr::mutate(tag_added_at = lubridate::ymd_hms(lubridate::floor_date(lubridate::ymd_hms(updated_at), unit = "second"))) %>%
@@ -206,8 +213,9 @@ download_and_enrich_leads <- function(last_update_tasks, tags_old, crm_key, dail
   changes <- dplyr::bind_rows(new_tags, removed_tags) 
   
   mail_addrs <- leads %>%
+    dplyr::mutate(emails = purrr::map(emails, ~ if (length(.x) == 0 || !is.data.frame(.x)) NULL else .x)) %>%
     dplyr::select(emails) %>%
-    tidyr::unnest("emails") %>%
+    tidyr::unnest("emails", keep_empty = FALSE) %>%
     dplyr::select(-type,
            -attachable_type,
            -name_clean) %>%
@@ -226,8 +234,9 @@ download_and_enrich_leads <- function(last_update_tasks, tags_old, crm_key, dail
     dplyr::distinct()
   
   tels <- leads %>%
+    dplyr::mutate(tels = purrr::map(tels, ~ if (length(.x) == 0 || !is.data.frame(.x)) NULL else .x)) %>%
     dplyr::select(tels) %>%
-    tidyr::unnest("tels") %>%
+    tidyr::unnest("tels", keep_empty = FALSE) %>%
     dplyr::select(-type,
            -attachable_type) %>%
     dplyr::rename(lead_id = attachable_id,
@@ -246,8 +255,9 @@ download_and_enrich_leads <- function(last_update_tasks, tags_old, crm_key, dail
     dplyr::distinct()
   
   addrs <- leads %>%
+    dplyr::mutate(addrs = purrr::map(addrs, ~ if (length(.x) == 0 || !is.data.frame(.x)) NULL else .x)) %>%
     dplyr::select(addrs) %>%
-    tidyr::unnest("addrs") %>%
+    tidyr::unnest("addrs", keep_empty = FALSE) %>%
     dplyr::select(-attachable_type) %>%
     dplyr::rename(lead_id = attachable_id,
            is_primary = primary,
@@ -263,8 +273,9 @@ download_and_enrich_leads <- function(last_update_tasks, tags_old, crm_key, dail
     dplyr::distinct()
        
   homepages <- leads %>%
+    dplyr::mutate(homepages = purrr::map(homepages, ~ if (length(.x) == 0 || !is.data.frame(.x)) NULL else .x)) %>%
     dplyr::select(homepages) %>%
-    tidyr::unnest("homepages") %>%
+    tidyr::unnest("homepages", keep_empty = FALSE) %>%
     dplyr::select(-type,
            -attachable_type,
            -name_clean) %>%
@@ -283,8 +294,9 @@ download_and_enrich_leads <- function(last_update_tasks, tags_old, crm_key, dail
     dplyr::distinct()
   
   social_media_links <- leads %>%
+    dplyr::mutate(sms = purrr::map(sms, ~ if (length(.x) == 0 || !is.data.frame(.x)) NULL else .x)) %>%
     dplyr::select(sms) %>%
-    tidyr::unnest("sms") %>%
+    tidyr::unnest("sms", keep_empty = FALSE) %>%
     dplyr::select(-type,
            -attachable_type,
            -name_clean) %>%
@@ -303,8 +315,9 @@ download_and_enrich_leads <- function(last_update_tasks, tags_old, crm_key, dail
     dplyr::distinct()
 
   connections <- leads %>%
+    dplyr::mutate(connections = purrr::map(connections, ~ if (length(.x) == 0 || !is.data.frame(.x)) NULL else .x)) %>%
     dplyr::select(connections) %>%
-    tidyr::unnest("connections") %>%
+    tidyr::unnest("connections", keep_empty = FALSE) %>%
     dplyr::select(
       crm_connection_id = id,
       lead_id_1 = object_1_id,
@@ -361,6 +374,8 @@ download_and_enrich_leads <- function(last_update_tasks, tags_old, crm_key, dail
                      connections = connections,
                      tasks = tasks,
                      task_comments = task_comments)
+  
+  if (debug_mode) { browser() }
   
   return(new_tables)
   
