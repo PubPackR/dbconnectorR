@@ -4,15 +4,21 @@
 \alias{format_transcript_for_crm}
 \title{Format Transcript Summary for CRM Export}
 \usage{
-format_transcript_for_crm(content)
+format_transcript_for_crm(content, sales_user_names = NULL, wrap_length = 100)
 }
 \arguments{
-\item{content}{Character vector of transcript summary content}
+\item{content}{Character vector of transcript summary content.}
 }
 \value{
-Character vector with applied formatting transformations
+Character vector with applied formatting transformations.
 }
 \description{
-Applies markdown formatting transformations to prepare summaries for CRM
+Applies markdown formatting transformations to prepare transcript summaries for CRM export.
+The function normalizes line endings, standardizes list bullets, removes trailing whitespace,
+fixes bullet point formatting, adds section breaks after bold headers, and replaces underscores
+with dashes to meet CRM style requirements.
 }
-\keyword{internal}
+\examples{
+format_transcript_for_crm(c("**Header**\\\\n- Item 1\\\\n- Item 2"))
+
+}

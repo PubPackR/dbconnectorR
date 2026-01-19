@@ -4,7 +4,11 @@
 \alias{get_latest_corenlp_path}
 \title{Get Latest CoreNLP Path}
 \usage{
-get_latest_corenlp_path()
+get_latest_corenlp_path(force_interactive = NULL)
+}
+\arguments{
+\item{force_interactive}{Logical or NULL. If NULL (default), uses interactive() to determine mode.
+If TRUE, forces interactive mode (uses "opt" path). If FALSE, forces non-interactive mode (uses "/opt" path).}
 }
 \value{
 Character string with path to CoreNLP directory

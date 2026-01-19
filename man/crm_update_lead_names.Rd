@@ -4,7 +4,7 @@
 \alias{crm_update_lead_names}
 \title{Update CRM Lead Names Table}
 \usage{
-crm_update_lead_names(con, crm_key, is_daily)
+crm_update_lead_names(con, crm_key, is_daily = TRUE)
 }
 \arguments{
 \item{con}{A DBI connection object to the PostgreSQL database.}

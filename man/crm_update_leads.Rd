@@ -4,7 +4,7 @@
 \alias{crm_update_leads}
 \title{Import and Upsert CRM Persons Data}
 \usage{
-crm_update_leads(con, crm_key, is_daily)
+crm_update_leads(con, crm_key, is_daily = TRUE, debug_mode = FALSE)
 }
 \arguments{
 \item{con}{A DBI database connection.}

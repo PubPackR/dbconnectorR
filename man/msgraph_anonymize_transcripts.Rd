@@ -6,17 +6,17 @@
 \usage{
 msgraph_anonymize_transcripts(
   con,
-  preserved_names = c("studyflix"),
-  logger = function(msg, level = "INFO") cat(msg, "\\n")
+  logger = function(msg, level = "INFO") cat(msg, "\\n"),
+  force_interactive = NULL
 )
 }
 \arguments{
 \item{con}{Database connection}
 
-\item{preserved_names}{Character vector of names to preserve (e.g., company names).
-Default: c("studyflix", "study flix", "studi flix", "studiflix")}
-
 \item{logger}{Logger function for output messages}
+
+\item{force_interactive}{Logical or NULL. If NULL (default), uses interactive() to determine mode.
+If TRUE, forces interactive mode. If FALSE, forces non-interactive mode.}
 }
 \value{
 Invisible NULL (updates database)
@@ -27,10 +27,7 @@ This is step 2 of the transcript processing pipeline.
 }
 \examples{
 \dontrun{
-msgraph_anonymize_transcripts(
-  con = con,
-  preserved_names = c("studyflix", "competitor_name")
-)
+msgraph_anonymize_transcripts(con = con)
 }
 
 }

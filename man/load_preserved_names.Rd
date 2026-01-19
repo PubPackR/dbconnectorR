@@ -4,17 +4,13 @@
 \alias{load_preserved_names}
 \title{Load Preserved Company Names}
 \usage{
-load_preserved_names(
-  file_path = "../../base-data/msgraph/text_for_summary_prompt/wettbewerber.txt"
-)
-}
-\arguments{
-\item{file_path}{Path to file with company names}
+load_preserved_names()
 }
 \value{
-Character vector of company names
+Character vector of company names. Always includes studyflix variations.
 }
 \description{
 Loads company/brand names to preserve during anonymization
+from a text file containing comma-separated values.
 }
 \keyword{internal}

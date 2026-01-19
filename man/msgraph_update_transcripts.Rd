@@ -13,7 +13,6 @@ msgraph_update_transcripts(
   steps = c("load", "anonymize", "summarize", "deanonymize", "export_to_crm"),
   start_date = NULL,
   end_date = Sys.Date() + 1,
-  preserved_names = c("studyflix", "study flix", "studi flix", "studiflix"),
   use_test_account = FALSE,
   resume = FALSE,
   log_level = "INFO",
@@ -49,9 +48,6 @@ If NULL, automatically determined from last transcript in database.}
 
 \item{end_date}{Optional. Date to end transcript retrieval.
 Default: tomorrow (to include today's transcripts)}
-
-\item{preserved_names}{Character vector of company/brand names to preserve
-during anonymization (e.g., c("studyflix", "competitor_name"))}
 
 \item{use_test_account}{Logical. If TRUE, exports to test CRM account.
 Default: FALSE}
