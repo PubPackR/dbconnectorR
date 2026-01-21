@@ -384,6 +384,7 @@ download_and_enrich_leads <- function(last_update_tasks, tags_old, crm_key, dail
 get_tasks_from_leads <- function(leads) {
 
   persons_tasks_all <- leads %>%
+    dplyr::mutate(tasks = purrr::map(tasks, ~ if (length(.x) == 0 || !is.data.frame(.x)) NULL else .x)) %>%
     tidyr::unnest(tasks, names_sep = "_", keep_empty = TRUE) %>%
     dplyr::mutate(tasks_pending = purrr::map(tasks_pending, ~ if (length(.x) == 0 || !is.data.frame(.x)) NULL else .x)) %>%
     tidyr::unnest(tasks_pending, names_sep = "_", keep_empty = TRUE) %>%
