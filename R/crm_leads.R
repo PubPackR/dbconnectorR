@@ -523,8 +523,8 @@ import_task_comments <- function(tasks, last_update_tasks, crm_key) {
 
     tasks_new <- tasks_new %>%
       dplyr::mutate(comments_count = as.character(comments_count)) %>%
-      dplyr::mutate(comments = purrr::map(comments, ~ if (is.list(.x)) as.data.frame(.x) else .x)) %>%
-      tidyr::unnest(comments, names_sep = "_") %>%
+      dplyr::mutate(comments = purrr::map(comments, ~ if (length(.x) == 0 || !is.data.frame(.x)) NULL else .x)) %>%
+      tidyr::unnest(comments, names_sep = "_", keep_empty = FALSE) %>%
       dplyr::select(-user)
 
     new_comments_available <- nrow(tasks_new) > 0
