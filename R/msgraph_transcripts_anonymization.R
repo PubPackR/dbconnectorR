@@ -429,7 +429,8 @@ process_transcript_placeholders <- function(con, known_information, tokens, cont
     dplyr::distinct() %>%
     dplyr::mutate(nullable_id = dplyr::if_else(is.na(id) & system != "ner", TRUE, FALSE)) %>%
     dplyr::mutate(id = as.integer(dplyr::if_else(is.na(id) & system != "ner", dplyr::row_number(), id))) %>%
-    dplyr::group_by(id) %>%
+    # Use system + id to avoid collisions between different source systems (e.g., msgraph id 96 vs crm_user id 96)
+    dplyr::group_by(system, id) %>%
     dplyr::mutate(person_type = dplyr::last(na.omit(person_type))) %>%
     dplyr::ungroup() %>%
     dplyr::mutate(
@@ -446,7 +447,8 @@ process_transcript_placeholders <- function(con, known_information, tokens, cont
     dplyr::ungroup() %>%
     dplyr::mutate(person_type = dplyr::coalesce(person_type, "Lead")) %>%
     dplyr::filter(!is.na(person_type)) %>%
-    dplyr::group_by(id) %>%
+    # Use system + id to avoid collisions between different source systems
+    dplyr::group_by(system, id) %>%
     dplyr::mutate(formatted_name = ifelse(!is.na(id), dplyr::last(na.omit(formatted_name)), formatted_name)) %>%
     dplyr::ungroup() %>%
     dplyr::group_by(token) %>%
