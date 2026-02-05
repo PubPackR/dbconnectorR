@@ -107,6 +107,11 @@ generate_and_save_transcript_summaries <- function(con, openrouter_model, openro
       row$transcript_content_anonymized <- paste0("Gespräch vom ", row$call_start, "\r\n ", row$transcript_content_anonymized)
       summary_text <- summarize_ts(row$transcript_content_anonymized, paths, openrouter_model, openrouter_key)
 
+      if (is.na(summary_text)) {
+        message(sprintf("Summarization failed for transcript ID: %s - skipping, will retry next run", row$transcript_id))
+        next
+      }
+
       strange_spaces <- "[\u00A0\u202F\u2009\u200A\u200B]"
       summary_text <- stringr::str_replace_all(summary_text, strange_spaces, " ")
 
@@ -215,6 +220,7 @@ summarize_ts <- function(transcript_anonymized, paths, openrouter_model, openrou
   summary <- retry_llm(prompt, chat)
 
   #return(paste(paste(categories_vector, collapse = ", "), summary))
+  if (is.na(summary)) return(NA)
   return(paste(summary))
 }
 
@@ -243,14 +249,14 @@ retry_llm <- function(prompt, chat, max_attempts = 4, wait_base = 2) {
         Sys.sleep(wait_time)
         return(NULL)
       } else {
-        warning("Non-retriable error: ", e$message)
+        message("Non-retriable error: ", e$message)
         return(NA)
       }
     })
     if (!is.null(result)) return(result)
   }
 
-  warning("Max retries exceeded for this transcript.")
+  message("Max retries exceeded for this transcript.")
   return(NA)
 }
 

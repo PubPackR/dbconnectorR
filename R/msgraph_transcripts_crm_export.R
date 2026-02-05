@@ -192,10 +192,10 @@ map_transcripts_to_crm_entities <- function(con, transcript_summaries) {
     ) %>%
     dplyr::select(call_id, organizer_email)
 
-  # Get ALL internal Studyflix participants who actually joined the call
+  # Get ALL internal participants who actually joined the call
   # Exclude event invitees who didn't participate
   all_internal_participants <- call_participants_full %>%
-    dplyr::filter(!is.na(email), grepl("@studyflix\\.de$", email, ignore.case = TRUE)) %>%
+    dplyr::filter(!is.na(email), grepl(get_internal_email_pattern(), email, ignore.case = TRUE)) %>%
     dplyr::filter(participant_source != "event_invite") %>%  # Only actual call participants
     dplyr::arrange(call_id, email) %>%
     dplyr::distinct(call_id, email) %>%
@@ -300,18 +300,18 @@ map_transcripts_to_crm_entities <- function(con, transcript_summaries) {
         dplyr::select(call_id, msgraph_contact_id = contact_id),
       by = "call_id"
     ) %>%
-    # Map msgraph contacts to CRM leads
+    # Map msgraph contacts to CRM leads (include email_source_crm for prioritization)
     dplyr::left_join(
       crm_lead_contact_mapping %>%
-        dplyr::select(msgraph_contact_id, crm_lead_id),
+        dplyr::select(msgraph_contact_id, crm_lead_id, email_source_crm),
       by = "msgraph_contact_id"
     ) %>%
     dplyr::left_join(
       msgraph_contacts %>% dplyr::select(id, email),
       by = c("msgraph_contact_id" = "id")
     ) %>%
-    # Filter out Studyflix emails (keep only external contacts or missing emails)
-    dplyr::filter(is.na(email) | !grepl("@studyflix\\.de$", email, ignore.case = TRUE)) %>%
+    # Filter out internal emails (keep only external contacts or missing emails)
+    dplyr::filter(is.na(email) | !grepl(get_internal_email_pattern(), email, ignore.case = TRUE)) %>%
     # Set attachable type and ID (always people/leads)
     dplyr::mutate(
       crm_lead_id = as.integer(crm_lead_id),
@@ -319,8 +319,13 @@ map_transcripts_to_crm_entities <- function(con, transcript_summaries) {
       attachable_id = crm_lead_id
     ) %>%
     dplyr::filter(!is.na(attachable_id)) %>%
-    # Remove duplicates (one protocol per call)
+    # Remove duplicates (one protocol per call), prioritizing by email source type
+    # Priority: office > office_hq > from_description
     dplyr::group_by(call_id) %>%
+    dplyr::arrange(
+      factor(email_source_crm, levels = c("office", "office_hq", "from_description")),
+      .by_group = TRUE
+    ) %>%
     dplyr::slice_head(n = 1) %>%
     dplyr::ungroup() %>%
     # Add sales users mapping (author_user_id and sales_user_names)
@@ -580,6 +585,176 @@ export_single_protocol_to_crm <- function(con, headers, protocol_data, use_test_
 }
 
 
+#' Export a Single Transcript to CRM
+#'
+#' Manually exports a single transcript summary to CRM as a protocol.
+#' Content can be provided directly as a string or read from the database via transcript_id.
+#' Supports both creating new protocols (POST) and updating existing ones (PUT).
+#'
+#' @param con Database connection
+#' @param crm_api_key CRM API authentication key
+#' @param lead_id CRM lead ID (external person ID)
+#' @param transcript_id Optional transcript ID to read transcript_summary from DB.
+#'   Either transcript_id or content must be provided.
+#' @param content Optional unformatted summary string. Will be formatted via
+#'   format_transcript_for_crm(). Either transcript_id or content must be provided.
+#' @param protocol_id Optional CRM protocol ID for updating an existing protocol (PUT).
+#'   If NULL, a new protocol is created (POST).
+#' @param sales_user_names Optional sales user names to append to content header and protocol name.
+#' @param protocol_name Optional custom protocol name. If NULL, auto-generated as
+#'   "Teams Meeting Summary - {date}".
+#' @param use_test_account Logical, whether to use test CRM account. Default: FALSE
+#'
+#' @return List with success (logical) and error (character or NULL)
+#'
+#' @examples
+#' \dontrun{
+#' # Export from DB by transcript_id
+#' msgraph_export_single_transcript_to_crm(
+#'   con = con,
+#'   crm_api_key = keys$crm,
+#'   lead_id = 27552674,
+#'   transcript_id = 12345
+#' )
+#'
+#' # Export with direct content string
+#' msgraph_export_single_transcript_to_crm(
+#'   con = con,
+#'   crm_api_key = keys$crm,
+#'   lead_id = 27552674,
+#'   content = "### Meeting Summary\n- Punkt 1\n- Punkt 2",
+#'   sales_user_names = "Max Mustermann"
+#' )
+#'
+#' # Update existing protocol
+#' msgraph_export_single_transcript_to_crm(
+#'   con = con,
+#'   crm_api_key = keys$crm,
+#'   lead_id = 27552674,
+#'   content = "### Updated Summary\n- Neuer Punkt",
+#'   protocol_id = 98765
+#' )
+#' }
+#'
+#' @export
+msgraph_export_single_transcript_to_crm <- function(con,
+                                                     crm_api_key,
+                                                     lead_id,
+                                                     transcript_id = NULL,
+                                                     content = NULL,
+                                                     protocol_id = NULL,
+                                                     sales_user_names = NULL,
+                                                     protocol_name = NULL,
+                                                     use_test_account = FALSE) {
+
+  # Validate input: either transcript_id or content must be provided
+  if (is.null(transcript_id) && is.null(content)) {
+    stop("Either 'transcript_id' or 'content' must be provided.")
+  }
+
+  # Determine content source
+  if (!is.null(transcript_id)) {
+    transcript_data <- dplyr::tbl(con, I("processed.msgraph_call_transcripts")) %>%
+      dplyr::filter(id == !!transcript_id | transcript_id == !!transcript_id) %>%
+      dplyr::collect()
+
+    if (nrow(transcript_data) == 0) {
+      stop(sprintf("No transcript found with id/transcript_id: %s", transcript_id))
+    }
+
+    content <- transcript_data$transcript_summary[1]
+    if (is.na(content) || content == "" || content == "NA") {
+      stop(sprintf("Transcript %s has no valid summary (content is NA or empty).", transcript_id))
+    }
+
+    # Auto-generate protocol name from transcript date if not provided
+    if (is.null(protocol_name) && !is.null(transcript_data$transcript_created_at)) {
+      protocol_name <- paste("Teams Meeting Summary -",
+                             format(as.Date(transcript_data$transcript_created_at[1]), "%Y-%m-%d"))
+    }
+  }
+
+  # Format content for CRM
+  formatted_content <- format_transcript_for_crm(content, sales_user_names)
+
+  # Build protocol name
+  if (is.null(protocol_name)) {
+    protocol_name <- paste("Teams Meeting Summary -", format(Sys.Date(), "%Y-%m-%d"))
+  }
+  if (!is.null(sales_user_names) && !is.na(sales_user_names)) {
+    protocol_name <- paste0(protocol_name, " - ", sales_user_names)
+  }
+
+  # Set person_id based on test account flag
+  person_id <- if (use_test_account) 33560961L else as.integer(lead_id)
+
+  # Build JSON payload
+  json_data <- list(
+    protocol = list(
+      user_id = CRM_DEFAULT_AUTHOR_USER_ID,
+      name = protocol_name,
+      confidential = FALSE,
+      content = formatted_content,
+      updated_by_user_id = NULL,
+      account_id = 2582,
+      type = "ProtocolObjectNote",
+      badge = "meeting",
+      person_id = person_id,
+      person_ids = list(person_id),
+      format = "markdown"
+    )
+  )
+
+  body_string <- jsonlite::toJSON(json_data, auto_unbox = TRUE)
+
+  # Set up API headers
+  headers <- c(
+    "content-type" = "application/json",
+    "X-apikey" = crm_api_key,
+    "Accept" = "*/*"
+  )
+
+  # Execute API call: POST (create) or PUT (update)
+  if (is.null(protocol_id)) {
+    # Create new protocol
+    response <- httr::POST(
+      "https://api.centralstationcrm.net/api/protocols?only_object_logging=true",
+      httr::add_headers(headers),
+      body = body_string,
+      encode = "json"
+    )
+    expected_status <- 201
+  } else {
+    # Update existing protocol
+    url <- sprintf("https://api.centralstationcrm.net/api/protocols/%s", protocol_id)
+    response <- httr::PUT(
+      url,
+      httr::add_headers(headers),
+      body = body_string,
+      encode = "json"
+    )
+    expected_status <- 200
+  }
+
+  status_code <- httr::status_code(response)
+
+  if (status_code == expected_status) {
+    action <- if (is.null(protocol_id)) "created" else "updated"
+    message(sprintf("Successfully %s protocol for lead %s", action, lead_id))
+    return(list(success = TRUE, error = NULL))
+  } else {
+    response_text <- tryCatch({
+      httr::content(response, "text")
+    }, error = function(e) {
+      "Unable to read response content"
+    })
+    error_msg <- sprintf("HTTP %d: %s", status_code, response_text)
+    message(sprintf("Failed to export protocol: %s", error_msg))
+    return(list(success = FALSE, error = error_msg))
+  }
+}
+
+
 ################################################################################
 # Helper Functions
 ################################################################################
@@ -672,6 +847,7 @@ get_transcripts_ready_for_export <- function(con) {
     dplyr::filter(
       !is.na(transcript_summary),
       transcript_summary != "",
+      transcript_summary != "NA",
       is.na(exported_to_crm) | exported_to_crm == FALSE,
       # Include if not marked as non-matchable OR if non-matchable but less than 30 days old
       not_matchable_with_crm == FALSE |
