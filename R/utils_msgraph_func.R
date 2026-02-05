@@ -1,3 +1,56 @@
+################################################################################
+# Internal Email Pattern Configuration
+#
+# Central definition of internal email patterns for classification
+################################################################################
+
+#' Internal Email Patterns
+#'
+#' Vector of email patterns considered internal (company emails).
+#' Patterns are matched anywhere in the email address.
+#' Dots are automatically escaped for regex matching.
+#'
+#' @examples
+#' # Domain patterns
+#' INTERNAL_EMAIL_PATTERNS <- c("@studyflix.de", "@tenhil.de")
+#'
+#' # Exchange system addresses
+#' INTERNAL_EMAIL_PATTERNS <- c("@studyflix.de", "/o=exchangelabs")
+#'
+#' @export
+INTERNAL_EMAIL_PATTERNS <- c("@studyflix.de", "/o=exchangelabs", "@bertelsmann.", "@ausbildung.de", "@vocanto.de", "@ad-alliance.de", "@arvato", "@rtl.de", "@rtl.com", "@rtl2.de", "@embrace.")
+
+#' Check if Email is Internal
+#'
+#' Checks whether an email address matches any internal pattern.
+#' Emails without @ are always considered internal (system addresses).
+#'
+#' @param email Character vector of email addresses
+#' @return Logical vector indicating internal emails
+#' @export
+is_internal_email <- function(email) {
+  # Emails without @ are internal (system addresses)
+  no_at <- !stringr::str_detect(email, "@")
+  # Or matches any internal pattern
+  matches_pattern <- stringr::str_detect(tolower(email), get_internal_email_pattern())
+  no_at | matches_pattern
+}
+
+#' Get Internal Email Regex Pattern
+#'
+#' Returns the regex pattern for matching internal emails.
+#' Useful for grepl() calls that don't support vectorized functions.
+#'
+#' @return Character string with regex pattern
+#' @export
+get_internal_email_pattern <- function() {
+  # Escape dots in patterns for regex
+  escaped_patterns <- gsub("\\.", "\\\\.", INTERNAL_EMAIL_PATTERNS)
+  paste0("(", paste(escaped_patterns, collapse = "|"), ")")
+}
+
+################################################################################
+
 fetch_with_retry <- function(url, access_token, query = c(), max_retries = 5, delay = 2) {
   attempt <- 1
   success <- FALSE
@@ -76,8 +129,8 @@ get_call_participants_combined <- function(con, call_ids, include_event_attendee
       participant_source = "actual_call",
       participation_status = "joined",
       email_domain = stringr::str_extract(email, "@(.+)$"),
-      is_studyflix = stringr::str_detect(tolower(email), "@studyflix\\.de$"),
-      is_external = !is_studyflix
+      is_internal = is_internal_email(email),
+      is_external = !is_internal
     )
 
   if (!include_event_attendees) {
@@ -123,8 +176,8 @@ get_call_participants_combined <- function(con, call_ids, include_event_attendee
     dplyr::ungroup() %>%
     dplyr::mutate(
       email_domain = stringr::str_extract(email, "@(.+)$"),
-      is_studyflix = stringr::str_detect(tolower(email), "@studyflix\\.de$"),
-      is_external = !is_studyflix
+      is_internal = is_internal_email(email),
+      is_external = !is_internal
     ) %>%
     dplyr::arrange(call_id, participant_source, email)
 

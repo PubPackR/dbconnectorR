@@ -15,9 +15,9 @@ msgraph_map_calls_events <- function(con) {
   event_participants <- dplyr::tbl(con, I("raw.msgraph_event_participants")) %>% dplyr::collect()
   call_participants <- dplyr::tbl(con, I("raw.msgraph_call_participants")) %>% dplyr::collect()
   intern_contacts <- dplyr::tbl(con, I("raw.msgraph_contacts")) %>%
-    dplyr::filter(grepl("studyflix", email)) %>%
-    dplyr::distinct(id) %>%
-    dplyr::collect()
+    dplyr::collect() %>%
+    dplyr::filter(is_internal_email(email)) %>%
+    dplyr::distinct(id)
 
   calls_with_contacts <- calls %>%
     dplyr::left_join(call_participants %>% dplyr::select(call_id, contact_id), by = c("id" = "call_id")) %>%
