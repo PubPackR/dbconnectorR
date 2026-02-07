@@ -303,12 +303,20 @@ update_call_records_with_caller_data <- function(access_token, call_records_df, 
     tidyr::unnest(identity, names_sep = "_") %>%
     dplyr::filter(identity != "NULL") %>%
     tidyr::unnest_wider(identity, names_sep = "_") %>%
-    # Synthetic email for Guest Users without userPrincipalName
+    # Synthetic email for Guest Users and anonymized external users without email
     dplyr::mutate(
       identity_userPrincipalName = dplyr::case_when(
-        !is.na(identity_userPrincipalName) ~ identity_userPrincipalName,
+        # 1. Real email present -> use it
+        !is.na(identity_userPrincipalName) & identity_userPrincipalName != "" ~
+          identity_userPrincipalName,
+        # 2. Guest identity without email -> synthetic email
         grepl("Guest", `identity_@odata.type`, ignore.case = TRUE) ~
           paste0("guest_", identity_id, "@external.guest"),
+        # 3. External user without email (anonymized tenant) -> synthetic email
+        (is.na(identity_tenantId) | identity_tenantId != internal_tenant_id) &
+          (is.na(identity_userPrincipalName) | identity_userPrincipalName == "") ~
+          paste0("guest_", identity_id, "@external.guest"),
+        # 4. Everything else (e.g. internal user without email) -> NA
         TRUE ~ identity_userPrincipalName
       )
     ) %>%
