@@ -312,6 +312,8 @@ map_transcripts_to_crm_entities <- function(con, transcript_summaries) {
     ) %>%
     # Filter out internal emails (keep only external contacts or missing emails)
     dplyr::filter(is.na(email) | !grepl(get_internal_email_pattern(), email, ignore.case = TRUE)) %>%
+    # Filter out synthetic emails (guest users, external organizers without real email)
+    dplyr::filter(is.na(email) | !is_synthetic_email(email)) %>%
     # Set attachable type and ID (always people/leads)
     dplyr::mutate(
       crm_lead_id = as.integer(crm_lead_id),
