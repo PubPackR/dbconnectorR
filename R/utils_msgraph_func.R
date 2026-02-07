@@ -98,12 +98,19 @@ re_authentication <- function(tenant_id, client_id, client_secret) {
 #' @return Character string with the Azure AD tenant ID.
 #' @keywords internal
 extract_tenant_from_token <- function(access_token) {
-  payload_b64url <- strsplit(access_token, "\\.")[[1]][2]
-  payload_b64 <- chartr("-_", "+/", payload_b64url)
-  mod <- nchar(payload_b64) %% 4
-  if (mod > 0) payload_b64 <- paste0(payload_b64, strrep("=", 4 - mod))
-  claims <- jsonlite::fromJSON(rawToChar(jsonlite::base64_dec(payload_b64)))
-  claims$tid
+  tryCatch({
+    parts <- strsplit(access_token, "\\.")[[1]]
+    if (length(parts) < 2) stop("Invalid JWT structure")
+    payload_b64url <- parts[2]
+    payload_b64 <- chartr("-_", "+/", payload_b64url)
+    mod <- nchar(payload_b64) %% 4
+    if (mod > 0) payload_b64 <- paste0(payload_b64, strrep("=", 4 - mod))
+    claims <- jsonlite::fromJSON(rawToChar(jsonlite::base64_dec(payload_b64)))
+    if (is.null(claims$tid)) stop("Missing tid claim in token")
+    claims$tid
+  }, error = function(e) {
+    stop("Failed to extract tenant ID from access token: ", e$message)
+  })
 }
 
 # Funktion zur Extraktion der Meeting-ID

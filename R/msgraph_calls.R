@@ -224,7 +224,10 @@ add_external_organizer_participants <- function(all_participants_, organizer_dat
 
     participated <- tryCatch(
       check_organizer_participation(access_token, org$call_id, org$call_start, org$call_end),
-      error = function(e) FALSE
+      error = function(e) {
+        message("Session check failed for call ", org$call_id, ": ", e$message)
+        FALSE
+      }
     )
 
     if (participated) {
