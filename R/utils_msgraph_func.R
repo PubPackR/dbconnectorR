@@ -49,6 +49,18 @@ get_internal_email_pattern <- function() {
   paste0("(", paste(escaped_patterns, collapse = "|"), ")")
 }
 
+#' Check if Email is Synthetic
+#'
+#' Checks whether an email address is a synthetic placeholder
+#' (e.g. from guest users or external organizers without real email).
+#'
+#' @param email Character vector of email addresses
+#' @return Logical vector
+#' @export
+is_synthetic_email <- function(email) {
+  grepl("@external\\.(guest|msgraph)$", email, ignore.case = TRUE)
+}
+
 ################################################################################
 
 fetch_with_retry <- function(url, access_token, query = c(), max_retries = 5, delay = 2) {

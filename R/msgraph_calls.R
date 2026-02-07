@@ -48,6 +48,9 @@ msgraph_update_calls <- function(con, access_token) {
 
   }
 
+  # Enrich guest participants with real identity via event matching
+  enrich_guest_participants(con)
+
 }
 
 retrieve_all_call_records <- function(access_token, startDate) {
@@ -288,6 +291,15 @@ update_call_records_with_caller_data <- function(access_token, call_records_df, 
     tidyr::unnest(identity, names_sep = "_") %>%
     dplyr::filter(identity != "NULL") %>%
     tidyr::unnest_wider(identity, names_sep = "_") %>%
+    # Synthetic email for Guest Users without userPrincipalName
+    dplyr::mutate(
+      identity_userPrincipalName = dplyr::case_when(
+        !is.na(identity_userPrincipalName) ~ identity_userPrincipalName,
+        grepl("Guest", `identity_@odata.type`, ignore.case = TRUE) ~
+          paste0("guest_", identity_id, "@external.guest"),
+        TRUE ~ identity_userPrincipalName
+      )
+    ) %>%
     dplyr::mutate(
       intern_call = !(
         is.na(identity_tenantId) |
@@ -397,4 +409,142 @@ update_call_participants <- function(con, call_meeting_record) {
     match_cols = c("contact_id", "call_id")
   )
 
+}
+
+#' Enrich Guest Participants with Real Identity via Event Matching
+#'
+#' Resolves synthetic guest emails (@external.guest) to real identities
+#' by matching unresolved guests against event attendees.
+#' Only resolves when exactly 1 guest and 1 unmatched event attendee exist per call.
+#'
+#' @param con A PostgreSQL database connection object.
+#' @return No return value. Updates contacts in database.
+#' @keywords internal
+enrich_guest_participants <- function(con) {
+
+  # 1. Find contacts with synthetic guest email
+
+  guest_contacts <- dplyr::tbl(con, I("raw.msgraph_contacts")) %>%
+    dplyr::collect() %>%
+    dplyr::filter(grepl("@external\\.guest$", email, ignore.case = TRUE))
+
+  if (nrow(guest_contacts) == 0) return(invisible(NULL))
+
+  # 2. Get their call participations
+  guest_participations <- dplyr::tbl(con, I("raw.msgraph_call_participants")) %>%
+    dplyr::filter(contact_id %in% !!guest_contacts$id) %>%
+    dplyr::collect() %>%
+    dplyr::left_join(guest_contacts %>% dplyr::select(id, email), by = c("contact_id" = "id"))
+
+  if (nrow(guest_participations) == 0) return(invisible(NULL))
+
+  # 3. Find linked events via mapping table
+  call_events <- dplyr::tbl(con, I("mapping.msgraph_call_event")) %>%
+    dplyr::filter(call_id %in% !!guest_participations$call_id) %>%
+    dplyr::select(call_id, event_id) %>%
+    dplyr::collect()
+
+  if (nrow(call_events) == 0) {
+    message("No events found for calls with guest participants")
+    return(invisible(NULL))
+  }
+
+  # 4. Load event attendees with emails
+  event_attendees <- dplyr::tbl(con, I("raw.msgraph_event_participants")) %>%
+    dplyr::filter(event_id %in% !!call_events$event_id) %>%
+    dplyr::left_join(
+      dplyr::tbl(con, I("raw.msgraph_contacts")) %>% dplyr::select(id, email, ms_name),
+      by = c("contact_id" = "id")
+    ) %>%
+    dplyr::collect() %>%
+    dplyr::left_join(call_events, by = "event_id")
+
+  # 5. Load all real (non-guest) call participants per call
+  all_call_participants <- dplyr::tbl(con, I("raw.msgraph_call_participants")) %>%
+    dplyr::filter(call_id %in% !!call_events$call_id) %>%
+    dplyr::left_join(
+      dplyr::tbl(con, I("raw.msgraph_contacts")) %>% dplyr::select(id, email),
+      by = c("contact_id" = "id")
+    ) %>%
+    dplyr::collect() %>%
+    dplyr::filter(!is_synthetic_email(email))
+
+  # 6. Pre-load all existing contacts for potential email matches (avoids N+1 queries)
+  all_attendee_emails <- event_attendees %>%
+    dplyr::filter(!is.na(email) & !is_synthetic_email(email)) %>%
+    dplyr::filter(!is_internal_email(email)) %>%
+    dplyr::pull(email) %>%
+    unique() %>%
+    tolower()
+
+  existing_contacts_lookup <- dplyr::tbl(con, I("raw.msgraph_contacts")) %>%
+    dplyr::filter(email %in% !!all_attendee_emails) %>%
+    dplyr::collect()
+
+  # 7. Per call: match guests to unmatched external event attendees
+  resolved <- 0
+  unresolved <- 0
+  errors <- 0
+
+  for (cid in unique(guest_participations$call_id)) {
+
+    # Guests on this call
+    call_guests <- guest_participations %>%
+      dplyr::filter(call_id == cid)
+
+    # Real participants on this call (emails)
+    real_participant_emails <- all_call_participants %>%
+      dplyr::filter(call_id == cid) %>%
+      dplyr::pull(email) %>%
+      tolower()
+
+    # Event attendees not already in call participants (external only)
+    unmatched_attendees <- event_attendees %>%
+      dplyr::filter(call_id == cid) %>%
+      dplyr::filter(!is.na(email) & !is_synthetic_email(email)) %>%
+      dplyr::filter(!is_internal_email(email)) %>%
+      dplyr::filter(!(tolower(email) %in% real_participant_emails)) %>%
+      dplyr::distinct(email, .keep_all = TRUE)
+
+    # Only resolve if exactly 1 guest and 1 unmatched attendee
+    if (nrow(call_guests) == 1 && nrow(unmatched_attendees) == 1) {
+      guest_contact_id <- call_guests$contact_id[1]
+      real_email <- unmatched_attendees$email[1]
+      real_name <- unmatched_attendees$ms_name[1]
+
+      success <- tryCatch({
+        # Check if a contact with this real email already exists (from pre-loaded lookup)
+        existing_contact <- existing_contacts_lookup %>%
+          dplyr::filter(email == tolower(real_email))
+
+        if (nrow(existing_contact) > 0) {
+          # Contact exists: update call_participant to point to existing contact
+          DBI::dbExecute(con,
+            "UPDATE raw.msgraph_call_participants SET contact_id = $1 WHERE contact_id = $2 AND call_id = $3",
+            params = list(existing_contact$id[1], guest_contact_id, cid)
+          )
+        } else {
+          # Update guest contact with real email and name
+          DBI::dbExecute(con,
+            "UPDATE raw.msgraph_contacts SET email = $1, ms_name = $2 WHERE id = $3",
+            params = list(tolower(real_email), real_name, guest_contact_id)
+          )
+        }
+        TRUE
+      }, error = function(e) {
+        message("Failed to enrich guest contact ", guest_contact_id, " for call ", cid, ": ", e$message)
+        FALSE
+      })
+
+      if (success) {
+        resolved <- resolved + 1
+      } else {
+        errors <- errors + 1
+      }
+    } else {
+      unresolved <- unresolved + nrow(call_guests)
+    }
+  }
+
+  message(paste0("Guest enrichment: ", resolved, " resolved, ", unresolved, " unresolved, ", errors, " errors"))
 }
