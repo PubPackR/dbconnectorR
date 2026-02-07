@@ -425,8 +425,8 @@ enrich_guest_participants <- function(con) {
   # 1. Find contacts with synthetic guest email
 
   guest_contacts <- dplyr::tbl(con, I("raw.msgraph_contacts")) %>%
-    dplyr::filter(grepl("@external.guest", email)) %>%
-    dplyr::collect()
+    dplyr::collect() %>%
+    dplyr::filter(grepl("@external\\.guest$", email, ignore.case = TRUE))
 
   if (nrow(guest_contacts) == 0) return(invisible(NULL))
 
@@ -445,7 +445,7 @@ enrich_guest_participants <- function(con) {
     dplyr::collect()
 
   if (nrow(call_events) == 0) {
-    print("No events found for calls with guest participants")
+    message("No events found for calls with guest participants")
     return(invisible(NULL))
   }
 
@@ -469,9 +469,22 @@ enrich_guest_participants <- function(con) {
     dplyr::collect() %>%
     dplyr::filter(!is_synthetic_email(email))
 
-  # 6. Per call: match guests to unmatched external event attendees
+  # 6. Pre-load all existing contacts for potential email matches (avoids N+1 queries)
+  all_attendee_emails <- event_attendees %>%
+    dplyr::filter(!is.na(email) & !is_synthetic_email(email)) %>%
+    dplyr::filter(!is_internal_email(email)) %>%
+    dplyr::pull(email) %>%
+    unique() %>%
+    tolower()
+
+  existing_contacts_lookup <- dplyr::tbl(con, I("raw.msgraph_contacts")) %>%
+    dplyr::filter(email %in% !!all_attendee_emails) %>%
+    dplyr::collect()
+
+  # 7. Per call: match guests to unmatched external event attendees
   resolved <- 0
   unresolved <- 0
+  errors <- 0
 
   for (cid in unique(guest_participations$call_id)) {
 
@@ -499,34 +512,39 @@ enrich_guest_participants <- function(con) {
       real_email <- unmatched_attendees$email[1]
       real_name <- unmatched_attendees$ms_name[1]
 
-      # Check if a contact with this real email already exists
-      existing_contact <- dplyr::tbl(con, I("raw.msgraph_contacts")) %>%
-        dplyr::filter(email == !!tolower(real_email)) %>%
-        dplyr::collect()
+      success <- tryCatch({
+        # Check if a contact with this real email already exists (from pre-loaded lookup)
+        existing_contact <- existing_contacts_lookup %>%
+          dplyr::filter(email == tolower(real_email))
 
-      if (nrow(existing_contact) > 0) {
-        # Contact exists: update call_participant to point to existing contact
-        DBI::dbExecute(con, paste0(
-          "UPDATE raw.msgraph_call_participants SET contact_id = ",
-          existing_contact$id[1],
-          " WHERE contact_id = ", guest_contact_id,
-          " AND call_id = ", cid
-        ))
+        if (nrow(existing_contact) > 0) {
+          # Contact exists: update call_participant to point to existing contact
+          DBI::dbExecute(con,
+            "UPDATE raw.msgraph_call_participants SET contact_id = $1 WHERE contact_id = $2 AND call_id = $3",
+            params = list(existing_contact$id[1], guest_contact_id, cid)
+          )
+        } else {
+          # Update guest contact with real email and name
+          DBI::dbExecute(con,
+            "UPDATE raw.msgraph_contacts SET email = $1, ms_name = $2 WHERE id = $3",
+            params = list(tolower(real_email), real_name, guest_contact_id)
+          )
+        }
+        TRUE
+      }, error = function(e) {
+        message("Failed to enrich guest contact ", guest_contact_id, " for call ", cid, ": ", e$message)
+        FALSE
+      })
+
+      if (success) {
+        resolved <- resolved + 1
       } else {
-        # Update guest contact with real email and name
-        DBI::dbExecute(con, paste0(
-          "UPDATE raw.msgraph_contacts SET email = ",
-          DBI::dbQuoteString(con, tolower(real_email)),
-          ", ms_name = ",
-          DBI::dbQuoteString(con, real_name),
-          " WHERE id = ", guest_contact_id
-        ))
+        errors <- errors + 1
       }
-      resolved <- resolved + 1
     } else {
       unresolved <- unresolved + nrow(call_guests)
     }
   }
 
-  print(paste0("Guest enrichment: ", resolved, " resolved, ", unresolved, " unresolved"))
+  message(paste0("Guest enrichment: ", resolved, " resolved, ", unresolved, " unresolved, ", errors, " errors"))
 }
