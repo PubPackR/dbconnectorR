@@ -4,12 +4,15 @@
 \alias{msgraph_update_calls}
 \title{Retrieve Call Records from MSGraph and Update Database}
 \usage{
-msgraph_update_calls(con, access_token)
+msgraph_update_calls(con, access_token, days_back = NULL)
 }
 \arguments{
 \item{con}{A PostgreSQL database connection object.}
 
 \item{access_token}{MSGraph API access token.}
+
+\item{days_back}{Number of days to look back from today. If NULL (default),
+uses the last update timestamp from the database.}
 }
 \value{
 No return value. Updates database tables with new call records and participants.
@@ -19,4 +22,5 @@ Retrieves new call records from MSGraph since the last update, processes them, a
 }
 \examples{
 msgraph_update_calls(con, access_token)
+msgraph_update_calls(con, access_token, days_back = 30)
 }

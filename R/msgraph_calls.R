@@ -4,6 +4,8 @@
 #'
 #' @param con A PostgreSQL database connection object.
 #' @param access_token MSGraph API access token.
+#' @param days_back Number of days to look back from today. If NULL (default),
+#'   uses the last update timestamp from the database.
 #'
 #' @return No return value. Updates database tables with new call records and participants.
 #'
@@ -11,11 +13,16 @@
 #'
 #' @examples
 #' msgraph_update_calls(con, access_token)
-msgraph_update_calls <- function(con, access_token) {
+#' msgraph_update_calls(con, access_token, days_back = 30)
+msgraph_update_calls <- function(con, access_token, days_back = NULL) {
 
   old_calls_file <- dplyr::tbl(con, I("raw.msgraph_calls")) %>% dplyr::collect()
 
-  startDate <- as.Date(max(old_calls_file$updated_at)) - 1
+  if (!is.null(days_back)) {
+    startDate <- Sys.Date() - days_back
+  } else {
+    startDate <- as.Date(max(old_calls_file$updated_at)) - 1
+  }
   all_records <- retrieve_all_call_records(access_token, startDate)
   organizer_data <- extract_organizer_data(all_records)
   call_records_df <- as.data.frame(t(sapply(all_records, function(x) if(is.null(x)) NA else x)), stringsAsFactors = FALSE)
@@ -25,15 +32,19 @@ msgraph_update_calls <- function(con, access_token) {
 
     call_records_df <- call_records_df %>%
       dplyr::select(id, type, call_start = startDateTime, call_end = endDateTime, joinWebUrl) %>%
-      dplyr::mutate(id = as.character(id)) %>%
-      dplyr::filter(!(id %in% old_calls_file$msgraph_call_id))
+      dplyr::mutate(id = as.character(id))
 
-    if(nrow(call_records_df) == 0) {
-      print("No new Call Records found!")
-      break
+    # When days_back is set, reprocess all records (overwrite); otherwise only new ones
+    if (is.null(days_back)) {
+      call_records_df <- call_records_df %>%
+        dplyr::filter(!(id %in% old_calls_file$msgraph_call_id))
     }
 
-    print(paste0(nrow(call_records_df), " new Call Records found!"))
+    if(nrow(call_records_df) == 0) {
+      print("All Call Records already in database.")
+    } else {
+
+    print(paste0(nrow(call_records_df), " Call Records to process (", if (!is.null(days_back)) "overwrite mode" else "new only", ")"))
 
     # ----- Get all participants of one Call -----
     call_meeting_record <- update_call_records_with_caller_data(access_token, call_records_df, organizer_data)
@@ -42,6 +53,7 @@ msgraph_update_calls <- function(con, access_token) {
     update_contacts_from_calls(con, call_meeting_record)
     update_call_participants(con, call_meeting_record)
 
+    }
   } else {
 
     print("No new Call Records found!")
