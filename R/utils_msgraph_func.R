@@ -75,12 +75,22 @@ fetch_with_retry <- function(url, access_token, query = c(), max_retries = 5, de
       response <- httr::GET(url, query = query, httr::add_headers(Authorization = paste("Bearer", access_token)))
     }
 
-    # Check if the response is valid JSON
-    if (response$status_code > 500) {
-      message(paste("\nAttempt", attempt, "failed"))
-      success <- FALSE
+    if (response$status_code == 429) {
+      # Rate limited: use Retry-After header or exponential backoff
+      retry_after <- as.numeric(httr::headers(response)$`retry-after`)
+      if (!is.na(retry_after)) {
+        message(paste("Throttled. Retrying after", retry_after, "seconds..."))
+        Sys.sleep(retry_after)
+      } else {
+        backoff_time <- min(delay * 2 ^ (attempt - 1), 60)
+        message(paste("Throttled. Using exponential backoff:", backoff_time, "seconds..."))
+        Sys.sleep(backoff_time)
+      }
       attempt <- attempt + 1
-      Sys.sleep(2)
+    } else if (response$status_code > 500) {
+      message(paste("\nAttempt", attempt, "failed with status", response$status_code))
+      attempt <- attempt + 1
+      Sys.sleep(delay)
     } else if (response$status_code == 404) {
       response_content <- c()
       break
@@ -91,9 +101,9 @@ fetch_with_retry <- function(url, access_token, query = c(), max_retries = 5, de
     }
   }
 
-  # if (!success) {
-  #   stop("Failed to fetch content after", max_retries, "attempts.")
-  # }
+  if (!success && attempt > max_retries) {
+    message(paste("Failed to fetch content after", max_retries, "attempts:", url))
+  }
 
   return(response_content)
 }
