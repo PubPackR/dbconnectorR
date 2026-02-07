@@ -17,6 +17,7 @@ msgraph_update_calls <- function(con, access_token) {
 
   startDate <- as.Date(max(old_calls_file$updated_at)) - 1
   all_records <- retrieve_all_call_records(access_token, startDate)
+  organizer_data <- extract_organizer_data(all_records)
   call_records_df <- as.data.frame(t(sapply(all_records, function(x) if(is.null(x)) NA else x)), stringsAsFactors = FALSE)
   new_call_found <- nrow(call_records_df) >= 5
 
@@ -35,7 +36,7 @@ msgraph_update_calls <- function(con, access_token) {
     print(paste0(nrow(call_records_df), " new Call Records found!"))
 
     # ----- Get all participants of one Call -----
-    call_meeting_record <- update_call_records_with_caller_data(access_token, call_records_df)
+    call_meeting_record <- update_call_records_with_caller_data(access_token, call_records_df, organizer_data)
 
     update_calls(con, call_meeting_record)
     update_contacts_from_calls(con, call_meeting_record)
@@ -124,7 +125,135 @@ retrieve_all_call_records <- function(access_token, startDate) {
   return(all_call_records)
 }
 
-update_call_records_with_caller_data <- function(access_token, call_records_df) {
+extract_organizer_data <- function(all_records) {
+  organizer_list <- lapply(all_records, function(record) {
+    org <- record$organizer$user
+    data.frame(
+      call_id = record$id %||% NA_character_,
+      organizer_id = org$id %||% NA_character_,
+      organizer_name = org$displayName %||% NA_character_,
+      organizer_tenant_id = org$tenantId %||% NA_character_,
+      stringsAsFactors = FALSE
+    )
+  })
+  dplyr::bind_rows(organizer_list)
+}
+
+get_call_sessions <- function(access_token, call_id) {
+  url <- paste0(
+    "https://graph.microsoft.com/v1.0/communications/callRecords/",
+    call_id,
+    "/sessions"
+  )
+  response <- fetch_with_retry(url, access_token)
+
+  if (is.null(response) || is.null(response$value) || length(response$value) == 0) {
+    return(data.frame(startDateTime = character(0), endDateTime = character(0), stringsAsFactors = FALSE))
+  }
+
+  sessions <- lapply(response$value, function(s) {
+    data.frame(
+      startDateTime = s$startDateTime %||% NA_character_,
+      endDateTime = s$endDateTime %||% NA_character_,
+      stringsAsFactors = FALSE
+    )
+  })
+  dplyr::bind_rows(sessions)
+}
+
+check_organizer_participation <- function(access_token, call_id, call_start, call_end) {
+  sessions <- get_call_sessions(access_token, call_id)
+
+  if (nrow(sessions) == 0) return(FALSE)
+
+  session_starts <- lubridate::ymd_hms(sessions$startDateTime, quiet = TRUE)
+  session_ends <- lubridate::ymd_hms(sessions$endDateTime, quiet = TRUE)
+
+  call_start_time <- lubridate::ymd_hms(as.character(call_start), quiet = TRUE)
+  call_end_time <- lubridate::ymd_hms(as.character(call_end), quiet = TRUE)
+
+  if (is.na(call_start_time) || is.na(call_end_time)) return(FALSE)
+
+  min_session_start <- min(session_starts, na.rm = TRUE)
+  max_session_end <- max(session_ends, na.rm = TRUE)
+
+  if (is.infinite(min_session_start) || is.infinite(max_session_end)) return(FALSE)
+
+  diff_start <- as.numeric(difftime(min_session_start, call_start_time, units = "secs"))
+  diff_end <- as.numeric(difftime(call_end_time, max_session_end, units = "secs"))
+
+  return(diff_start > 0 || diff_end > 0)
+}
+
+add_external_organizer_participants <- function(all_participants_, organizer_data,
+                                                internal_tenant_id, access_token,
+                                                call_records_df) {
+  if (is.null(organizer_data) || nrow(organizer_data) == 0) return(all_participants_)
+
+  external_orgs <- organizer_data %>%
+    dplyr::filter(
+      !is.na(organizer_tenant_id) &
+        organizer_tenant_id != internal_tenant_id &
+        !is.na(organizer_id)
+    )
+
+  if (nrow(external_orgs) == 0) return(all_participants_)
+
+  orgs_to_check <- external_orgs %>%
+    dplyr::anti_join(
+      all_participants_ %>% dplyr::select(call_id, identity_id),
+      by = c("call_id" = "call_id", "organizer_id" = "identity_id")
+    )
+
+  if (nrow(orgs_to_check) == 0) return(all_participants_)
+
+  print(paste0(nrow(orgs_to_check), " calls with external organizer not in participants - checking sessions..."))
+
+  # Pre-join call times to avoid repeated filtering inside loop
+  orgs_with_times <- orgs_to_check %>%
+    dplyr::left_join(
+      call_records_df %>% dplyr::select(id, call_start, call_end),
+      by = c("call_id" = "id")
+    ) %>%
+    dplyr::filter(!is.na(call_start))
+
+  organizer_rows <- list()
+
+  for (j in seq_len(nrow(orgs_with_times))) {
+    org <- orgs_with_times[j, ]
+
+    participated <- tryCatch(
+      check_organizer_participation(access_token, org$call_id, org$call_start, org$call_end),
+      error = function(e) {
+        message("Session check failed for call ", org$call_id, ": ", e$message)
+        FALSE
+      }
+    )
+
+    if (participated) {
+      organizer_rows[[length(organizer_rows) + 1]] <- data.frame(
+        call_id = org$call_id,
+        identity_id = org$organizer_id,
+        identity_displayName = org$organizer_name,
+        identity_userPrincipalName = paste0(org$organizer_id, "@external.msgraph"),
+        intern_call = FALSE,
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+
+  if (length(organizer_rows) > 0) {
+    organizer_df <- dplyr::bind_rows(organizer_rows)
+    all_participants_ <- dplyr::bind_rows(all_participants_, organizer_df)
+    print(paste0(nrow(organizer_df), " external organizers confirmed and added as participants"))
+  } else {
+    print("No external organizer participation confirmed via sessions")
+  }
+
+  return(all_participants_)
+}
+
+update_call_records_with_caller_data <- function(access_token, call_records_df, organizer_data = NULL) {
   all_participants <- c()
   counter <- 0
 
@@ -151,6 +280,9 @@ update_call_records_with_caller_data <- function(access_token, call_records_df) 
     }
   }
 
+  # Extract internal tenant ID from the access token (JWT tid claim)
+  internal_tenant_id <- extract_tenant_from_token(access_token)
+
   all_participants_ <- all_participants %>%
     dplyr::mutate(id = as.character(id), call_id = as.character(call_id)) %>%
     tidyr::unnest(identity, names_sep = "_") %>%
@@ -159,7 +291,7 @@ update_call_records_with_caller_data <- function(access_token, call_records_df) 
     dplyr::mutate(
       intern_call = !(
         is.na(identity_tenantId) |
-          identity_tenantId != "f34ad13c-3f44-4e15-b70c-cadfbdb6bfb8"
+          identity_tenantId != internal_tenant_id
       )
     ) %>%
     dplyr::select(-tidyselect::any_of(
@@ -170,6 +302,11 @@ update_call_records_with_caller_data <- function(access_token, call_records_df) 
         "identity_email"
       )
     ))
+
+  # ----- Add external organizers as participants (Sessions check) -----
+  all_participants_ <- add_external_organizer_participants(
+    all_participants_, organizer_data, internal_tenant_id, access_token, call_records_df
+  )
 
   call_meeting_record <- call_records_df %>%
     dplyr::left_join(all_participants_, by = c("id" = "call_id")) %>%
