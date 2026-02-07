@@ -90,6 +90,22 @@ re_authentication <- function(tenant_id, client_id, client_secret) {
   MSGraph::authorize_graph(tenant_id, client_id, client_secret)
 }
 
+#' Extract Tenant ID from MS Graph Access Token
+#'
+#' Decodes the JWT payload of an MS Graph access token and returns the tenant ID (tid claim).
+#'
+#' @param access_token A valid MS Graph API access token (JWT format).
+#' @return Character string with the Azure AD tenant ID.
+#' @keywords internal
+extract_tenant_from_token <- function(access_token) {
+  payload_b64url <- strsplit(access_token, "\\.")[[1]][2]
+  payload_b64 <- chartr("-_", "+/", payload_b64url)
+  mod <- nchar(payload_b64) %% 4
+  if (mod > 0) payload_b64 <- paste0(payload_b64, strrep("=", 4 - mod))
+  claims <- jsonlite::fromJSON(rawToChar(jsonlite::base64_dec(payload_b64)))
+  claims$tid
+}
+
 # Funktion zur Extraktion der Meeting-ID
 extract_meeting_id <- function(url) {
     meeting_id <- stringr::str_split(url, "/", simplify = TRUE)[, 6]
