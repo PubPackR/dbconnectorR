@@ -268,33 +268,80 @@ get_transcript_row <- function(entry,
   creation_datetime_transcript <- lubridate::ymd_hms(entry$createdDateTime)
   transcript_id <- as.character(entry$id)
 
+  message("[DEBUG] === Processing transcript ", transcript_id, " ===")
+  message("[DEBUG] meeting_id: ", meeting_id)
+  message("[DEBUG] created: ", creation_datetime_transcript)
+  message("[DEBUG] transcriptContentUrl present: ", !is.null(entry$transcriptContentUrl))
+
   # Extract organizer ID
   organizer_id <- tryCatch({
     as.character(meeting_metadata$participants$organizer$identity$user$id)
   }, error = function(e) {
     NA_character_
   })
+  message("[DEBUG] organizer_id: ", organizer_id)
 
   # Match to call
   call_id <- get_call_id(meeting_id, creation_datetime_transcript, calls)
+  message("[DEBUG] matched call_id: ", call_id, " (is.na: ", is.na(call_id), ")")
+
+  if (is.na(call_id)) {
+    # Debug: show what calls exist for this meeting_id
+    matching_calls <- calls %>%
+      dplyr::filter(meeting_id == !!meeting_id)
+    message("[DEBUG] calls with same meeting_id: ", nrow(matching_calls))
+    if (nrow(matching_calls) > 0) {
+      for (i in seq_len(nrow(matching_calls))) {
+        message("[DEBUG]   call ", matching_calls$id[i],
+                " | start: ", matching_calls$call_start[i],
+                " | end: ", matching_calls$call_end[i])
+      }
+      message("[DEBUG]   transcript created at: ", creation_datetime_transcript,
+              " (must be between call_start and call_end)")
+    }
+  }
 
   # Find interesting (external) calls
   interesting_calls <- all_events_categorised_df %>%
     dplyr::filter(grepl("extern", event_class)) %>%
     dplyr::distinct(call_id)
 
+  message("[DEBUG] total interesting (extern) calls: ", nrow(interesting_calls))
+
+  if (!is.na(call_id)) {
+    is_interesting <- call_id %in% interesting_calls$call_id
+    message("[DEBUG] call_id ", call_id, " is interesting (extern): ", is_interesting)
+
+    if (!is_interesting) {
+      # Show what event_class this call actually has
+      call_event_class <- all_events_categorised_df %>%
+        dplyr::filter(call_id == !!call_id) %>%
+        dplyr::select(dplyr::any_of(c("call_id", "event_class")))
+      if (nrow(call_event_class) > 0) {
+        message("[DEBUG] actual event_class for call_id ", call_id, ": ",
+                paste(call_event_class$event_class, collapse = ", "))
+      } else {
+        message("[DEBUG] call_id ", call_id, " NOT FOUND in all_events_categorised_df at all!")
+      }
+    }
+  }
+
   # Check if already exists
   if (transcript_id %in% existing_transcript_ids) {
-    message("Skipping transcript ", transcript_id, " - already in database")
+    message("[DEBUG] SKIP: transcript ", transcript_id, " already in database")
     return(NULL)
   }
 
   # Download content if it's an interesting call
   if(!is.na(call_id) & (call_id %in% interesting_calls$call_id)) {
+    message("[DEBUG] DOWNLOADING transcript content...")
 
     transcript_content <- tryCatch({
-      get_content_transcript_url(access_token, entry$transcriptContentUrl)
+      content <- get_content_transcript_url(access_token, entry$transcriptContentUrl)
+      message("[DEBUG] Download SUCCESS, content length: ", nchar(content), " chars")
+      content
     }, error = function(e) {
+      message("[DEBUG] Download FAILED: ", e$message)
       warning("Failed to retrieve transcript content: ", e$message)
       NA
     })
@@ -313,6 +360,11 @@ get_transcript_row <- function(entry,
 
   } else {
 
+    if (is.na(call_id)) {
+      message("[DEBUG] SKIP DOWNLOAD: no matching call_id found (call_id is NA)")
+    } else {
+      message("[DEBUG] SKIP DOWNLOAD: call_id ", call_id, " is not classified as extern")
+    }
     warning("Not interested in call ", call_id)
 
     return(tibble::tibble(
@@ -437,8 +489,13 @@ get_call_id <- function(metadata_meeting_id, creation_datetime_transcript, calls
   call_id <- matched_call$id
 
   if (length(call_id) == 0) {
+    message("[DEBUG get_call_id] NO match for meeting_id=", metadata_meeting_id,
+            " at time=", creation_datetime_transcript,
+            " (total calls in DB: ", nrow(calls), ")")
      return(NA)
   }
+  message("[DEBUG get_call_id] MATCHED call_id=", call_id,
+          " for meeting_id=", metadata_meeting_id)
   return(call_id)
 }
 
