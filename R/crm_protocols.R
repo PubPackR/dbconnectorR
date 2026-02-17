@@ -138,7 +138,7 @@ download_and_enrich_protocols <- function(con, crm_key, last_update_attachments 
   
   attachments <- expand_protocol_attachments(protocols_new, last_update_attachments, crm_key, daily_download = daily_download)
     
-  comment_attachments <- expand_protocol_comment_attachments(crm_key, offers_billomat, confirmations_billomat, daily_download = daily_download)  
+  comment_attachments <- expand_protocol_comment_attachments(crm_key, offers_billomat, confirmations_billomat, daily_download = daily_download)
   
   ################################-
 
@@ -290,6 +290,8 @@ expand_protocol_attachments <- function(protocols_simplified, last_update_attach
 
 expand_protocol_comment_attachments <- function(crm_api_key, offers_billomat, confirmations_billomat, daily_download = TRUE){
 
+  next_year <- as.character(as.integer(format(Sys.Date(), "%Y")) + 1)
+
   offer_numbers <- offers_billomat %>%
     dplyr::distinct(offer_number) %>%
     dplyr::ungroup() %>%
@@ -299,10 +301,26 @@ expand_protocol_comment_attachments <- function(crm_api_key, offers_billomat, co
     dplyr::distinct(offer_number) %>%
     dplyr::arrange(offer_number)
 
+  # Next hundred-prefix: highest current number + 1 hundred-range
+  an_next_prefix <- NULL
+  if (nrow(offer_numbers) > 0) {
+    highest_an <- dplyr::last(offer_numbers$offer_number)
+    an_num <- as.integer(gsub(".*SF", "", highest_an))
+    an_year <- gsub("SF.*", "", gsub("AN", "", highest_an))
+    an_next_prefix <- paste0("AN", an_year, "SF", formatC(an_num + 1, width = 2, flag = "0"))
+  }
+
   if (daily_download) {
     offer_numbers <- offer_numbers %>%
         tail(3)
   }
+
+  # Add next prefix and next year's first prefix
+  offer_numbers <- c(
+    offer_numbers$offer_number,
+    an_next_prefix,
+    paste0("AN", next_year, "SF00")
+  ) %>% unique()
 
   confirmation_numbers <- confirmations_billomat %>%
     dplyr::distinct(confirmation_number) %>%
@@ -313,14 +331,30 @@ expand_protocol_comment_attachments <- function(crm_api_key, offers_billomat, co
     dplyr::distinct(confirmation_number) %>%
     dplyr::arrange(confirmation_number)
 
+  # Next hundred-prefix for ABs
+  ab_next_prefix <- NULL
+  if (nrow(confirmation_numbers) > 0) {
+    highest_ab <- dplyr::last(confirmation_numbers$confirmation_number)
+    ab_num <- as.integer(gsub(".*SF", "", highest_ab))
+    ab_year <- gsub("SF.*", "", gsub("AB", "", highest_ab))
+    ab_next_prefix <- paste0("AB", ab_year, "SF", formatC(ab_num + 1, width = 2, flag = "0"))
+  }
+
   if (daily_download) {
     confirmation_numbers <- confirmation_numbers %>%
         tail(3)
   }
 
+  # Add next prefix and next year's first prefix
+  confirmation_numbers <- c(
+    confirmation_numbers$confirmation_number,
+    ab_next_prefix,
+    paste0("AB", next_year, "SF00")
+  ) %>% unique()
+
   repeat {
-    an_attachments <- get_searched_attachments(crm_api_key, offer_numbers$offer_number)
-    ab_attachments <- get_searched_attachments(crm_api_key, confirmation_numbers$confirmation_number)
+    an_attachments <- get_searched_attachments(crm_api_key, offer_numbers)
+    ab_attachments <- get_searched_attachments(crm_api_key, confirmation_numbers)
 
     comment_attachments_new <- dplyr::bind_rows(an_attachments, ab_attachments) %>%
       tidyr::unnest()
