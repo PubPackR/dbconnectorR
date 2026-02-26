@@ -50,23 +50,24 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NUL
     resolve_user_ids(all_users, "user_id") %>%
     dplyr::distinct(crm_protocol_id, .keep_all = TRUE)
 
+  # Pre-mark: alle Protokolle der leads_to_update als gelöscht setzen.
+  # Muss vor dem if-Block laufen, da auch reine Löschungen (data = leer) erkannt werden sollen.
+  # Der anschließende Upsert setzt is_deleted = FALSE für noch vorhandene zurück.
+  protocol_ids_to_mark <- dplyr::tbl(con, I("raw.crm_lead_protocol_relations")) %>%
+    dplyr::filter(lead_id %in% !!leads_to_update$id) %>%
+    dplyr::select(protocol_id) %>%
+    dplyr::collect() %>%
+    dplyr::pull(protocol_id)
+
+  if (length(protocol_ids_to_mark) > 0) {
+    id_string <- paste(protocol_ids_to_mark, collapse = ", ")
+    DBI::dbExecute(con, sprintf(
+      "UPDATE raw.crm_lead_protocols SET is_deleted = TRUE, updated_at = NOW() WHERE id IN (%s) AND NOT is_deleted",
+      id_string
+    ))
+  }
+
   if(data %>% nrow() > 0) {
-
-    # Pre-mark: alle Protokolle der leads_to_update als gelöscht setzen.
-    # Der anschließende Upsert setzt is_deleted = FALSE für noch vorhandene zurück.
-    protocol_ids_to_mark <- dplyr::tbl(con, I("raw.crm_lead_protocol_relations")) %>%
-      dplyr::filter(lead_id %in% !!leads_to_update$id) %>%
-      dplyr::select(protocol_id) %>%
-      dplyr::collect() %>%
-      dplyr::pull(protocol_id)
-
-    if (length(protocol_ids_to_mark) > 0) {
-      id_string <- paste(protocol_ids_to_mark, collapse = ", ")
-      DBI::dbExecute(con, sprintf(
-        "UPDATE raw.crm_lead_protocols SET is_deleted = TRUE, updated_at = NOW() WHERE id IN (%s) AND NOT is_deleted",
-        id_string
-      ))
-    }
 
     batch_upsert(
       con,
@@ -78,29 +79,19 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NUL
     )
     print("protocols uploaded")
 
-    all_protocols <- dplyr::tbl(con, I("raw.crm_lead_protocols")) %>%
-      dplyr::select(crm_protocol_id, id) %>%
-      dplyr::collect()
+  }
 
-    # Pre-mark: alle Attachments der heruntergeladenen Protokolle als gelöscht setzen.
-    # Der anschließende Upsert setzt is_deleted = FALSE für noch vorhandene zurück.
-    downloaded_protocol_ids <- all_protocols %>%
-      dplyr::filter(crm_protocol_id %in% protocols$main_table$crm_protocol_id) %>%
-      dplyr::pull(id)
+  all_protocols <- dplyr::tbl(con, I("raw.crm_lead_protocols")) %>%
+    dplyr::select(crm_protocol_id, id) %>%
+    dplyr::collect()
 
-    if (length(downloaded_protocol_ids) > 0) {
-      id_string <- paste(downloaded_protocol_ids, collapse = ", ")
-      DBI::dbExecute(con, sprintf(
-        "UPDATE raw.crm_lead_protocol_attachments SET is_deleted = TRUE, updated_at = NOW() WHERE protocol_id IN (%s) AND NOT is_deleted",
-        id_string
-      ))
-    }
+  if(data %>% nrow() > 0) {
 
     data <- protocols$main_table %>%
       tidyr::drop_na(crm_protocol_id) %>%
       resolve_lead_id(all_leads, "lead_id") %>%
       left_join(all_protocols, by = c("crm_protocol_id")) %>% mutate(protocol_id = id) %>% select(-id) %>%
-      drop_na(lead_id) %>% 
+      drop_na(lead_id) %>%
       drop_na(protocol_id) %>%
       dplyr::distinct(protocol_id, lead_id)
 
@@ -119,6 +110,21 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NUL
 
   new_comments <- Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_comments", data, match_cols = c("crm_comment_id"), returning_cols = c("id", "crm_comment_id"), delete_missing = !is_daily)
   print("comments uploaded")
+
+  # Pre-mark: alle Attachments der heruntergeladenen Protokolle als gelöscht setzen.
+  # Läuft unabhängig vom Protocol-Upsert, damit auch Löschungen ohne Protokolländerung erkannt werden.
+  # Der anschließende Upsert setzt is_deleted = FALSE für noch vorhandene zurück.
+  downloaded_protocol_ids <- all_protocols %>%
+    dplyr::filter(crm_protocol_id %in% protocols$main_table$crm_protocol_id) %>%
+    dplyr::pull(id)
+
+  if (length(downloaded_protocol_ids) > 0) {
+    id_string <- paste(downloaded_protocol_ids, collapse = ", ")
+    DBI::dbExecute(con, sprintf(
+      "UPDATE raw.crm_lead_protocol_attachments SET is_deleted = TRUE, updated_at = NOW() WHERE protocol_id IN (%s) AND NOT is_deleted",
+      id_string
+    ))
+  }
 
   data <- protocols$attachments %>%
     tidyr::drop_na(crm_attachment_id) %>%
