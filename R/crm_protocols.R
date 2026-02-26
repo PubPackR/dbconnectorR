@@ -5,24 +5,38 @@
 #' @param con A DBI database connection.
 #' @param keys Authentication keys list containing crm key.
 #' @param is_daily Logical. Whether this is a daily update.
+#' @param override_last_update POSIXct or Date. If provided, overrides both
+#'   \code{last_update_protocols} and \code{last_update_attachments} instead of
+#'   deriving them from the database. Useful for backfilling or manual reruns.
 #'
 #' @return Invisibly returns NULL after successful update.
 #' @export
-crm_update_protocols <- function(con, keys, is_daily) {
+crm_update_protocols <- function(con, keys, is_daily, override_last_update = NULL) {
 
-  last_update_protocols <- dplyr::tbl(con, I("raw.crm_lead_protocols")) %>%
-    dplyr::summarise(max_updated_at = max(updated_at, na.rm = TRUE)) %>%
-    dplyr::collect() %>%
-    dplyr::pull(max_updated_at)
-  last_update_protocols <- last_update_protocols - lubridate::hours(1)
+  if (!is.null(override_last_update)) {
+    last_update_protocols   <- lubridate::as_datetime(override_last_update)
+    last_update_attachments <- lubridate::as_datetime(override_last_update)
+  } else {
+    last_update_protocols <- dplyr::tbl(con, I("raw.crm_lead_protocols")) %>%
+      dplyr::summarise(max_updated_at = max(updated_at, na.rm = TRUE)) %>%
+      dplyr::collect() %>%
+      dplyr::pull(max_updated_at)
+    last_update_protocols <- last_update_protocols - lubridate::hours(1) - lubridate::days(1)
 
-  last_update_attachments <- dplyr::tbl(con, I("raw.crm_lead_protocol_attachments")) %>%
-    dplyr::summarise(max_updated_at = max(updated_at, na.rm = TRUE)) %>%
-    dplyr::collect() %>%
-    dplyr::pull(max_updated_at)
-  last_update_attachments <- last_update_attachments - lubridate::hours(1)
+    last_update_attachments <- dplyr::tbl(con, I("raw.crm_lead_protocol_attachments")) %>%
+      dplyr::summarise(max_updated_at = max(updated_at, na.rm = TRUE)) %>%
+      dplyr::collect() %>%
+      dplyr::pull(max_updated_at)
+    last_update_attachments <- last_update_attachments - lubridate::hours(1)
+  }
 
-  protocols <- download_and_enrich_protocols(con, keys$crm, last_update_attachments, last_update_protocols, daily_download = is_daily)
+  leads_to_update <- dplyr::tbl(con, I("raw.crm_leads")) %>% dplyr::collect()
+  if (is_daily) {
+    leads_to_update <- leads_to_update %>%
+      dplyr::filter(lubridate::as_datetime(lead_updated_at) >= as.Date(last_update_protocols))
+  }
+
+  protocols <- download_and_enrich_protocols(con, keys$crm, last_update_attachments, leads_to_update, daily_download = is_daily)
 
   all_users <- dplyr::tbl(con, I("raw.crm_users")) %>% dplyr::select("id", "crm_user_id") %>% dplyr::collect()
   all_leads <- dplyr::tbl(con, I("raw.crm_leads")) %>% dplyr::select("id", "crm_lead_id") %>% dplyr::collect()
@@ -36,21 +50,23 @@ crm_update_protocols <- function(con, keys, is_daily) {
     resolve_user_ids(all_users, "user_id") %>%
     dplyr::distinct(crm_protocol_id, .keep_all = TRUE)
 
-  if(!is_daily) {
-    protocols_old <- dplyr::tbl(con, I("raw.crm_lead_protocols")) %>%
-      dplyr::filter(!crm_protocol_id %in% protocols$main_table$crm_protocol_id) %>%
-      dplyr::filter(!is_deleted) %>%
-      dplyr::collect()
-
-    id_string <- paste(sprintf("'%s'", protocols_old$crm_protocol_id), collapse = ", ")
-
-    query <- sprintf("UPDATE raw.crm_lead_protocols SET is_deleted = TRUE, updated_at = NOW() WHERE crm_protocol_id IN (%s)", id_string)
-
-    # Ausführen
-    DBI::dbExecute(con, query)
-  }
-
   if(data %>% nrow() > 0) {
+
+    # Pre-mark: alle Protokolle der leads_to_update als gelöscht setzen.
+    # Der anschließende Upsert setzt is_deleted = FALSE für noch vorhandene zurück.
+    protocol_ids_to_mark <- dplyr::tbl(con, I("raw.crm_lead_protocol_relations")) %>%
+      dplyr::filter(lead_id %in% !!leads_to_update$id) %>%
+      dplyr::select(protocol_id) %>%
+      dplyr::collect() %>%
+      dplyr::pull(protocol_id)
+
+    if (length(protocol_ids_to_mark) > 0) {
+      id_string <- paste(protocol_ids_to_mark, collapse = ", ")
+      DBI::dbExecute(con, sprintf(
+        "UPDATE raw.crm_lead_protocols SET is_deleted = TRUE, updated_at = NOW() WHERE id IN (%s) AND NOT is_deleted",
+        id_string
+      ))
+    }
 
     batch_upsert(
       con,
@@ -65,6 +81,20 @@ crm_update_protocols <- function(con, keys, is_daily) {
     all_protocols <- dplyr::tbl(con, I("raw.crm_lead_protocols")) %>%
       dplyr::select(crm_protocol_id, id) %>%
       dplyr::collect()
+
+    # Pre-mark: alle Attachments der heruntergeladenen Protokolle als gelöscht setzen.
+    # Der anschließende Upsert setzt is_deleted = FALSE für noch vorhandene zurück.
+    downloaded_protocol_ids <- all_protocols %>%
+      dplyr::filter(crm_protocol_id %in% protocols$main_table$crm_protocol_id) %>%
+      dplyr::pull(id)
+
+    if (length(downloaded_protocol_ids) > 0) {
+      id_string <- paste(downloaded_protocol_ids, collapse = ", ")
+      DBI::dbExecute(con, sprintf(
+        "UPDATE raw.crm_lead_protocol_attachments SET is_deleted = TRUE, updated_at = NOW() WHERE protocol_id IN (%s) AND NOT is_deleted",
+        id_string
+      ))
+    }
 
     data <- protocols$main_table %>%
       tidyr::drop_na(crm_protocol_id) %>%
@@ -97,7 +127,7 @@ crm_update_protocols <- function(con, keys, is_daily) {
     dplyr::distinct(crm_attachment_id, .keep_all = TRUE) %>%
     tidyr::drop_na(user_id)
 
-  upsert_delete_variable(con, "raw.crm_lead_protocol_attachments", data, match_cols = c("crm_attachment_id"), is_daily = is_daily)
+  upsert_no_delete(con, "raw.crm_lead_protocol_attachments", data, match_cols = c("crm_attachment_id"))
   print("attachments uploaded")
 
   if(new_comments %>% nrow() > 0) {
@@ -114,18 +144,10 @@ crm_update_protocols <- function(con, keys, is_daily) {
   }
 }
 
-download_and_enrich_protocols <- function(con, crm_key, last_update_attachments = NA, last_update_protocols = NA, daily_download = TRUE) {
+download_and_enrich_protocols <- function(con, crm_key, last_update_attachments = NA, leads_to_update, daily_download = TRUE) {
 
   offers_billomat <- dplyr::tbl(con, I("raw.billomat_offers")) %>% dplyr::collect()
   confirmations_billomat <- dplyr::tbl(con, I("raw.billomat_confirmations")) %>% dplyr::collect()
-
-  leads_to_update <- dplyr::tbl(con, I("raw.crm_leads")) %>% dplyr::collect()
-
-  # We only want to download all Protocols from time to time, on a daily basis we only export the persons with changes
-  if(daily_download) {
-    leads_to_update <- leads_to_update %>%
-      dplyr::filter(lubridate::as_datetime(lead_updated_at) >= as.Date(last_update_protocols))
-  }
 
   new_protocols <- import_new_protocols(
       crm_key,
