@@ -4,7 +4,7 @@
 \alias{crm_update_protocols}
 \title{Update CRM Lead Protocols}
 \usage{
-crm_update_protocols(con, keys, is_daily)
+crm_update_protocols(con, keys, is_daily, override_last_update = NULL)
 }
 \arguments{
 \item{con}{A DBI database connection.}
@@ -12,6 +12,10 @@ crm_update_protocols(con, keys, is_daily)
 \item{keys}{Authentication keys list containing crm key.}
 
 \item{is_daily}{Logical. Whether this is a daily update.}
+
+\item{override_last_update}{POSIXct or Date. If provided, overrides both
+\code{last_update_protocols} and \code{last_update_attachments} instead of
+deriving them from the database. Useful for backfilling or manual reruns.}
 }
 \value{
 Invisibly returns NULL after successful update.
