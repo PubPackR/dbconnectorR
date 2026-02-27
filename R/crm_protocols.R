@@ -155,7 +155,10 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NUL
   # Der anschließende Upsert setzt is_deleted = FALSE für noch vorhandene zurück.
   searched_prefixes <- protocols$searched_prefixes
   if (length(searched_prefixes) > 0) {
-    like_conditions <- paste0("filename LIKE '", searched_prefixes, "%'", collapse = " OR ")
+    like_conditions <- paste0(
+      sapply(searched_prefixes, function(p) paste0("filename LIKE ", DBI::dbQuoteLiteral(con, paste0(p, "%")))),
+      collapse = " OR "
+    )
     DBI::dbExecute(con, sprintf(
       "UPDATE raw.crm_lead_protocol_comment_attachments SET is_deleted = TRUE, updated_at = NOW() WHERE (%s) AND NOT is_deleted",
       like_conditions
@@ -353,7 +356,7 @@ expand_protocol_comment_attachments <- function(crm_api_key, offers_billomat, co
     last_update_attachments_comments <- as.Date("2000-01-01") # arbitrary old date to include all attachments if no last update is provided
   }
 
-  last_update_attachments_comments <- pmin(last_update_attachments_comments, Sys.Date() - lubridate::days(7)) # Limit to last 7 days to avoid too many attachments
+  last_update_attachments_comments <- pmin(last_update_attachments_comments, Sys.Date() - lubridate::days(7)) # Ensure minimum 7-day lookback window (pmin picks older date)
 
   offer_numbers <- offers_billomat %>%
     dplyr::group_by(offer_number) %>%
