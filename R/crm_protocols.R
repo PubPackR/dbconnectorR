@@ -13,25 +13,30 @@
 #' @export
 crm_update_protocols <- function(con, keys, is_daily, override_last_update = NULL) {
 
-  if (!is.null(override_last_update)) {
+  if (!is.null(override_last_update) & !is.na(override_last_update)) {
     last_update_protocols   <- lubridate::as_datetime(override_last_update)
     last_update_attachments <- lubridate::as_datetime(override_last_update)
   } else {
-    last_update_protocols <- dplyr::tbl(con, I("raw.crm_lead_protocols")) %>%
-      dplyr::summarise(max_updated_at = max(updated_at, na.rm = TRUE)) %>%
-      dplyr::collect() %>%
-      dplyr::pull(max_updated_at)
-    last_update_protocols <- last_update_protocols - lubridate::hours(1) - lubridate::days(1)
+    if (is_daily) {
+      last_update_protocols <- dplyr::tbl(con, I("raw.crm_lead_protocols")) %>%
+        dplyr::summarise(max_updated_at = max(updated_at, na.rm = TRUE)) %>%
+        dplyr::collect() %>%
+        dplyr::pull(max_updated_at)
+      last_update_protocols <- last_update_protocols - lubridate::hours(1) - lubridate::days(1)
 
-    last_update_attachments <- dplyr::tbl(con, I("raw.crm_lead_protocol_attachments")) %>%
-      dplyr::summarise(max_updated_at = max(updated_at, na.rm = TRUE)) %>%
-      dplyr::collect() %>%
-      dplyr::pull(max_updated_at)
-    last_update_attachments <- last_update_attachments - lubridate::hours(1)
+      last_update_attachments <- dplyr::tbl(con, I("raw.crm_lead_protocol_attachments")) %>%
+        dplyr::summarise(max_updated_at = max(updated_at, na.rm = TRUE)) %>%
+        dplyr::collect() %>%
+        dplyr::pull(max_updated_at)
+      last_update_attachments <- last_update_attachments - lubridate::hours(1)
+    } else {
+      last_update_protocols   <- lubridate::as_datetime(as.Date("2000-01-01"))
+      last_update_attachments <- lubridate::as_datetime(as.Date("2000-01-01"))
+    }
   }
 
-  # override_last_update überschreibt is_daily vollständig
-  effective_daily <- is_daily || !is.null(override_last_update)
+  # override_last_update überschreibt is_daily vollständig (NULL und NA gelten beide als "kein Override")
+  effective_daily <- is_daily || (!is.null(override_last_update) & !is.na(override_last_update))
 
   leads_to_update <- dplyr::tbl(con, I("raw.crm_leads")) %>% dplyr::collect()
   if (effective_daily) {
@@ -39,7 +44,7 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NUL
       dplyr::filter(lubridate::as_datetime(lead_updated_at) >= as.Date(last_update_protocols))
   }
 
-  protocols <- download_and_enrich_protocols(con, keys$crm, last_update_attachments, leads_to_update, daily_download = effective_daily)
+  protocols <- download_and_enrich_protocols(con, crm_key = keys$crm, last_update_attachments, leads_to_update, daily_download = effective_daily)
 
   all_users <- dplyr::tbl(con, I("raw.crm_users")) %>% dplyr::select("id", "crm_user_id") %>% dplyr::collect()
   all_leads <- dplyr::tbl(con, I("raw.crm_leads")) %>% dplyr::select("id", "crm_lead_id") %>% dplyr::collect()
@@ -195,7 +200,7 @@ download_and_enrich_protocols <- function(con, crm_key, last_update_attachments 
   
   attachments <- expand_protocol_attachments(protocols_new, last_update_attachments, crm_key, daily_download = daily_download)
     
-  comment_attachments_result <- expand_protocol_comment_attachments(crm_key, offers_billomat, confirmations_billomat, last_update_attachments)
+  comment_attachments_result <- expand_protocol_comment_attachments(crm_api_key = crm_key, offers_billomat, confirmations_billomat, last_update_attachments)
 
   ################################-
 
