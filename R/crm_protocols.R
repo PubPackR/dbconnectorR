@@ -30,13 +30,16 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NUL
     last_update_attachments <- last_update_attachments - lubridate::hours(1)
   }
 
+  # override_last_update überschreibt is_daily vollständig
+  effective_daily <- is_daily || !is.null(override_last_update)
+
   leads_to_update <- dplyr::tbl(con, I("raw.crm_leads")) %>% dplyr::collect()
-  if (is_daily) {
+  if (effective_daily) {
     leads_to_update <- leads_to_update %>%
       dplyr::filter(lubridate::as_datetime(lead_updated_at) >= as.Date(last_update_protocols))
   }
 
-  protocols <- download_and_enrich_protocols(con, keys$crm, last_update_attachments, leads_to_update, daily_download = is_daily)
+  protocols <- download_and_enrich_protocols(con, keys$crm, last_update_attachments, leads_to_update, daily_download = effective_daily)
 
   all_users <- dplyr::tbl(con, I("raw.crm_users")) %>% dplyr::select("id", "crm_user_id") %>% dplyr::collect()
   all_leads <- dplyr::tbl(con, I("raw.crm_leads")) %>% dplyr::select("id", "crm_lead_id") %>% dplyr::collect()
@@ -108,7 +111,7 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NUL
     dplyr::distinct(crm_comment_id, .keep_all = TRUE) %>%
     tidyr::drop_na(user_id)
 
-  new_comments <- Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_comments", data, match_cols = c("crm_comment_id"), returning_cols = c("id", "crm_comment_id"), delete_missing = !is_daily)
+  new_comments <- Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_comments", data, match_cols = c("crm_comment_id"), returning_cols = c("id", "crm_comment_id"), delete_missing = !effective_daily)
   print("comments uploaded")
 
   # Pre-mark: alle Attachments der heruntergeladenen Protokolle als gelöscht setzen.
@@ -145,7 +148,7 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NUL
       dplyr::distinct(crm_attachment_id, .keep_all = TRUE) %>%
       tidyr::drop_na(user_id)
 
-    upsert_delete_variable(con, "raw.crm_lead_protocol_comment_attachments", data, match_cols = c("crm_attachment_id"), is_daily = is_daily)
+    upsert_delete_variable(con, "raw.crm_lead_protocol_comment_attachments", data, match_cols = c("crm_attachment_id"), is_daily = effective_daily)
     print("comment attachments uploaded")
   }
 }
