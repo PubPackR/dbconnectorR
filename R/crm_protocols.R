@@ -103,6 +103,17 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NUL
 
   }
 
+  # Pre-mark: alle Comments der leads_to_update-Protokolle als gelöscht setzen.
+  # Muss vor dem Upsert laufen, da auch reine Löschungen (data = leer) erkannt werden sollen.
+  # Der anschließende Upsert setzt is_deleted = FALSE für noch vorhandene zurück.
+  if (length(protocol_ids_to_mark) > 0) {
+    protocol_id_string <- paste(protocol_ids_to_mark, collapse = ", ")
+    DBI::dbExecute(con, sprintf(
+      "UPDATE raw.crm_lead_protocol_comments SET is_deleted = TRUE, updated_at = NOW() WHERE protocol_id IN (%s) AND NOT is_deleted",
+      protocol_id_string
+    ))
+  }
+
   data <- protocols$comments %>%
     tidyr::drop_na(crm_comment_id) %>%
     resolve_user_ids(all_users, "user_id") %>%
@@ -111,7 +122,7 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NUL
     dplyr::distinct(crm_comment_id, .keep_all = TRUE) %>%
     tidyr::drop_na(user_id)
 
-  new_comments <- Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_comments", data, match_cols = c("crm_comment_id"), returning_cols = c("id", "crm_comment_id"), delete_missing = !effective_daily)
+  new_comments <- Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_comments", data, match_cols = c("crm_comment_id"), returning_cols = c("id", "crm_comment_id"), delete_missing = FALSE)
   print("comments uploaded")
 
   # Pre-mark: alle Attachments der heruntergeladenen Protokolle als gelöscht setzen.
@@ -139,6 +150,18 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NUL
   upsert_no_delete(con, "raw.crm_lead_protocol_attachments", data, match_cols = c("crm_attachment_id"))
   print("attachments uploaded")
 
+  # Pre-mark: alle DB-Comment-Attachments der gesuchten AN/AB-Prefixe als gelöscht setzen.
+  # Scope: alle DB-Records deren Filename mit einem der gesuchten Prefixe beginnt.
+  # Der anschließende Upsert setzt is_deleted = FALSE für noch vorhandene zurück.
+  searched_prefixes <- protocols$searched_prefixes
+  if (length(searched_prefixes) > 0) {
+    like_conditions <- paste0("filename LIKE '", searched_prefixes, "%'", collapse = " OR ")
+    DBI::dbExecute(con, sprintf(
+      "UPDATE raw.crm_lead_protocol_comment_attachments SET is_deleted = TRUE, updated_at = NOW() WHERE (%s) AND NOT is_deleted",
+      like_conditions
+    ))
+  }
+
   if(new_comments %>% nrow() > 0) {
     data <- protocols$comment_attachments %>%
       tidyr::drop_na(crm_attachment_id) %>%
@@ -148,7 +171,7 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NUL
       dplyr::distinct(crm_attachment_id, .keep_all = TRUE) %>%
       tidyr::drop_na(user_id)
 
-    upsert_delete_variable(con, "raw.crm_lead_protocol_comment_attachments", data, match_cols = c("crm_attachment_id"), is_daily = effective_daily)
+    upsert_no_delete(con, "raw.crm_lead_protocol_comment_attachments", data, match_cols = c("crm_attachment_id"))
     print("comment attachments uploaded")
   }
 }
@@ -169,8 +192,8 @@ download_and_enrich_protocols <- function(con, crm_key, last_update_attachments 
   
   attachments <- expand_protocol_attachments(protocols_new, last_update_attachments, crm_key, daily_download = daily_download)
     
-  comment_attachments <- expand_protocol_comment_attachments(crm_key, offers_billomat, confirmations_billomat, daily_download = daily_download)
-  
+  comment_attachments_result <- expand_protocol_comment_attachments(crm_key, offers_billomat, confirmations_billomat, last_update_attachments)
+
   ################################-
 
   comments <- protocols_new %>%
@@ -254,16 +277,17 @@ download_and_enrich_protocols <- function(con, crm_key, last_update_attachments 
     dplyr::filter(protocol_id %in% main_table$crm_protocol_id) %>%
     dplyr::select(crm_attachment_id = id, user_id, protocol_id, attachment_updated_at = updated_at, attachment_created_at = created_at, filename, content_type, file_size = size, is_deleted)
 
-  comment_attachments <- comment_attachments %>%
+  comment_attachments <- comment_attachments_result$attachments %>%
     dplyr::filter(comment_id %in% comments$crm_comment_id) %>%
     dplyr::select(comment_id, user_id, crm_attachment_id = id, attachment_created_at = created_at, attachment_updated_at = updated_at, filename, content_type, file_size = size, is_deleted)
-  
+
   ################################-
 
   new_tables <- list(main_table = main_table,
                      comments = comments,
                      attachments = attachments,
-                     comment_attachments = comment_attachments)
+                     comment_attachments = comment_attachments,
+                     searched_prefixes = comment_attachments_result$searched_prefixes)
   
   return(new_tables)
   
@@ -319,18 +343,29 @@ expand_protocol_attachments <- function(protocols_simplified, last_update_attach
 
 }
 
-expand_protocol_comment_attachments <- function(crm_api_key, offers_billomat, confirmations_billomat, daily_download = TRUE){
+expand_protocol_comment_attachments <- function(crm_api_key, offers_billomat, confirmations_billomat, last_update_attachments = NA){
 
   next_year <- as.character(as.integer(format(Sys.Date(), "%Y")) + 1)
 
+  if(!is.na(last_update_attachments)) {
+    last_update_attachments_comments <- last_update_attachments
+  } else {
+    last_update_attachments_comments <- as.Date("2000-01-01") # arbitrary old date to include all attachments if no last update is provided
+  }
+
+  last_update_attachments_comments <- pmin(last_update_attachments_comments, Sys.Date() - lubridate::days(7)) # Limit to last 7 days to avoid too many attachments
+
   offer_numbers <- offers_billomat %>%
-    dplyr::distinct(offer_number) %>%
+    dplyr::group_by(offer_number) %>%
+    dplyr::summarise(last_update = max(offer_updated_at, na.rm = TRUE)) %>%
     dplyr::ungroup() %>%
-    dplyr::select(offer_number) %>%
+    dplyr::mutate(in_time_frame = as.Date(last_update) >= as.Date(last_update_attachments_comments)) %>%
     dplyr::filter(grepl("AN20", offer_number)) %>%
     dplyr::mutate(offer_number = substring(offer_number, 1, nchar(offer_number) - 2)) %>%
-    dplyr::distinct(offer_number) %>%
-    dplyr::arrange(offer_number)
+    dplyr::mutate(is_highest_offer_numbers = rank(offer_number, ties.method = "first") > (n() - 3)) %>%
+    dplyr::arrange(offer_number) %>%
+    dplyr::filter(in_time_frame | is_highest_offer_numbers) %>%
+    dplyr::distinct(offer_number)
 
   # Next hundred-prefix: highest current number + 1 hundred-range
   an_next_prefix <- NULL
@@ -341,11 +376,6 @@ expand_protocol_comment_attachments <- function(crm_api_key, offers_billomat, co
     an_next_prefix <- paste0("AN", an_year, "SF", formatC(an_num + 1, width = 2, flag = "0"))
   }
 
-  if (daily_download) {
-    offer_numbers <- offer_numbers %>%
-        tail(3)
-  }
-
   # Add next prefix and next year's first prefix
   offer_numbers <- c(
     offer_numbers$offer_number,
@@ -354,13 +384,16 @@ expand_protocol_comment_attachments <- function(crm_api_key, offers_billomat, co
   ) %>% unique()
 
   confirmation_numbers <- confirmations_billomat %>%
-    dplyr::distinct(confirmation_number) %>%
+    dplyr::group_by(confirmation_number) %>%
+    dplyr::summarise(last_update = max(confirmation_updated_at, na.rm = TRUE)) %>%
     dplyr::ungroup() %>%
-    dplyr::select(confirmation_number) %>%
+    dplyr::mutate(in_time_frame = as.Date(last_update) >= as.Date(last_update_attachments_comments)) %>%
     dplyr::filter(grepl("AB20", confirmation_number)) %>%
     dplyr::mutate(confirmation_number = substring(confirmation_number, 1, nchar(confirmation_number) - 2)) %>%
-    dplyr::distinct(confirmation_number) %>%
-    dplyr::arrange(confirmation_number)
+    dplyr::mutate(is_highest_confirmation_numbers = rank(confirmation_number, ties.method = "first") > (n() - 3)) %>%
+    dplyr::arrange(confirmation_number) %>%
+    dplyr::filter(in_time_frame | is_highest_confirmation_numbers) %>%
+    dplyr::distinct(confirmation_number)
 
   # Next hundred-prefix for ABs
   ab_next_prefix <- NULL
@@ -369,11 +402,6 @@ expand_protocol_comment_attachments <- function(crm_api_key, offers_billomat, co
     ab_num <- as.integer(gsub(".*SF", "", highest_ab))
     ab_year <- gsub("SF.*", "", gsub("AB", "", highest_ab))
     ab_next_prefix <- paste0("AB", ab_year, "SF", formatC(ab_num + 1, width = 2, flag = "0"))
-  }
-
-  if (daily_download) {
-    confirmation_numbers <- confirmation_numbers %>%
-        tail(3)
   }
 
   # Add next prefix and next year's first prefix
@@ -411,7 +439,10 @@ expand_protocol_comment_attachments <- function(crm_api_key, offers_billomat, co
   comment_attachments_new <- comment_attachments_new %>%
     dplyr::select(-tidyselect::any_of(c("attachable_type")))
 
-  return(comment_attachments_new)
+  return(list(
+    attachments = comment_attachments_new,
+    searched_prefixes = c(offer_numbers, confirmation_numbers)
+  ))
 
 }
 
