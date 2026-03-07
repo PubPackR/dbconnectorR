@@ -48,32 +48,31 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NUL
 
   all_users <- dplyr::tbl(con, I("raw.crm_users")) %>% dplyr::select("id", "crm_user_id") %>% dplyr::collect()
   all_leads <- dplyr::tbl(con, I("raw.crm_leads")) %>% dplyr::select("id", "crm_lead_id") %>% dplyr::collect()
-  protocols_old <- dplyr::tbl(con, I("raw.crm_lead_protocols")) %>% dplyr::select(crm_protocol_id, old_updated_at = protocol_updated_at) %>% dplyr::collect()
+  deleted_leads <- dplyr::tbl(con, I("raw.crm_leads")) %>% dplyr::filter(is_deleted) %>% dplyr::select("id", "crm_lead_id") %>% dplyr::collect()
+  main_table <- protocols$main_table
+  attachments <- protocols$attachments
+  comments <- protocols$comments
+  comment_attachments <- protocols$comment_attachments
+  protocol_relations <- dplyr::tbl(con, I("raw.crm_lead_protocol_relations")) %>% dplyr::select("protocol_id", "lead_id") %>% replace_internal_ids_with_external("lead_id", tbl(con, I("raw.crm_leads")), "crm_lead_id")
+  protocols_old <- dplyr::tbl(con, I("raw.crm_lead_protocols")) %>%
+    left_join(protocol_relations, by = c("id" = "protocol_id")) %>%
+    filter(lead_id %in% !!leads_to_update$crm_lead_id) %>%
+    filter(!(crm_protocol_id %in% !!main_table$crm_protocol_id)) %>%
+    filter(lead_id %in% !!deleted_leads$crm_lead_id | lead_id %in% !!main_table$lead_id) %>%
+    select(-id, -updated_at, -created_at) %>% 
+    mutate(is_deleted = TRUE) %>%
+    dplyr::collect()
 
-  data <- protocols$main_table %>%
-    dplyr::left_join(protocols_old, by = "crm_protocol_id") %>%
-    dplyr::filter(is.na(old_updated_at) | protocol_updated_at > old_updated_at) %>%
-    dplyr::select(-lead_id, -old_updated_at) %>%
-    tidyr::drop_na(crm_protocol_id) %>%
+  print(paste0("Number of deleted protocols: ", nrow(protocols_old)))
+
+  data <- main_table %>%
+    drop_na(crm_protocol_id) %>%
+    dplyr::bind_rows(protocols_old) %>% 
     resolve_user_ids(all_users, "user_id") %>%
-    dplyr::distinct(crm_protocol_id, .keep_all = TRUE)
-
-  # Pre-mark: alle Protokolle der leads_to_update als gelöscht setzen.
-  # Muss vor dem if-Block laufen, da auch reine Löschungen (data = leer) erkannt werden sollen.
-  # Der anschließende Upsert setzt is_deleted = FALSE für noch vorhandene zurück.
-  protocol_ids_to_mark <- dplyr::tbl(con, I("raw.crm_lead_protocol_relations")) %>%
-    dplyr::filter(lead_id %in% !!leads_to_update$id) %>%
-    dplyr::select(protocol_id) %>%
-    dplyr::collect() %>%
-    dplyr::pull(protocol_id)
-
-  if (length(protocol_ids_to_mark) > 0) {
-    id_string <- paste(protocol_ids_to_mark, collapse = ", ")
-    DBI::dbExecute(con, sprintf(
-      "UPDATE raw.crm_lead_protocols SET is_deleted = TRUE, updated_at = NOW() WHERE id IN (%s) AND NOT is_deleted",
-      id_string
-    ))
-  }
+    filter(protocol_type != "comment") %>%
+    filter(protocol_type != "protocol_attachment") %>%
+    select(-lead_id) %>%
+    distinct()
 
   if(data %>% nrow() > 0) {
 
@@ -93,33 +92,31 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NUL
     dplyr::select(crm_protocol_id, id) %>%
     dplyr::collect()
 
-  if(data %>% nrow() > 0) {
+  data <- main_table %>%
+    filter(protocol_type != "comment") %>%
+    filter(protocol_type != "protocol_attachment") %>%
+    replace_external_ids_with_internal("lead_id", all_leads, "crm_lead_id") %>%
+    replace_external_ids_with_internal("crm_protocol_id", all_protocols, "crm_protocol_id", "protocol_id")
 
-    data <- protocols$main_table %>%
-      tidyr::drop_na(crm_protocol_id) %>%
-      resolve_lead_id(all_leads, "lead_id") %>%
-      left_join(all_protocols, by = c("crm_protocol_id")) %>% mutate(protocol_id = id) %>% select(-id) %>%
-      drop_na(lead_id) %>%
-      drop_na(protocol_id) %>%
-      dplyr::distinct(protocol_id, lead_id)
+  protocol_relations_filtered <- dplyr::tbl(con, I("raw.crm_lead_protocol_relations")) %>%
+    dplyr::select("protocol_id", "lead_id") %>%
+    filter(!(lead_id %in% !!deleted_leads$id | lead_id %in% !!data$lead_id)) %>%
+    dplyr::collect()
 
-    upsert_no_delete(con, "raw.crm_lead_protocol_relations", data, match_cols = c("protocol_id", "lead_id"))
-    print("protocols mapping uploaded")
+  full_data <- bind_rows(
+    data %>% dplyr::select(protocol_id, lead_id),
+    protocol_relations_filtered
+  ) %>% distinct(protocol_id, lead_id) %>%
+    drop_na(protocol_id, lead_id)
 
-  }
+  pool::poolWithTransaction(con, function(con) {
+    DBI::dbExecute(con, "TRUNCATE raw.crm_lead_protocol_relations")
+    Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_relations", full_data, match_cols = c("protocol_id", "lead_id"))
+  })
+  print("protocols mapping uploaded")
 
-  # Pre-mark: alle Comments der leads_to_update-Protokolle als gelöscht setzen.
-  # Muss vor dem Upsert laufen, da auch reine Löschungen (data = leer) erkannt werden sollen.
-  # Der anschließende Upsert setzt is_deleted = FALSE für noch vorhandene zurück.
-  if (length(protocol_ids_to_mark) > 0) {
-    protocol_id_string <- paste(protocol_ids_to_mark, collapse = ", ")
-    DBI::dbExecute(con, sprintf(
-      "UPDATE raw.crm_lead_protocol_comments SET is_deleted = TRUE, updated_at = NOW() WHERE protocol_id IN (%s) AND NOT is_deleted",
-      protocol_id_string
-    ))
-  }
-
-  data <- protocols$comments %>%
+  # Heruntergeladene Comments aufbereiten
+  downloaded_comments <- comments %>%
     tidyr::drop_na(crm_comment_id) %>%
     resolve_user_ids(all_users, "user_id") %>%
     resolve_protocol_id(all_protocols, "protocol_id") %>%
@@ -127,61 +124,93 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NUL
     dplyr::distinct(crm_comment_id, .keep_all = TRUE) %>%
     tidyr::drop_na(user_id)
 
-  new_comments <- Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_comments", data, match_cols = c("crm_comment_id"), returning_cols = c("id", "crm_comment_id"), delete_missing = FALSE)
+  # Comments aus DB die zu heruntergeladenen oder gelöschten Protokollen gehören,
+  # aber nicht im Download sind → als gelöscht markieren
+  downloaded_protocol_db_ids <- all_protocols %>%
+    dplyr::filter(crm_protocol_id %in% main_table$crm_protocol_id) %>%
+    dplyr::pull(id)
+  deleted_protocol_db_ids <- all_protocols %>%
+    dplyr::filter(crm_protocol_id %in% protocols_old$crm_protocol_id) %>%
+    dplyr::pull(id)
+  affected_protocol_ids <- unique(c(downloaded_protocol_db_ids, deleted_protocol_db_ids))
+
+  comments_old <- dplyr::tbl(con, I("raw.crm_lead_protocol_comments")) %>%
+    dplyr::filter(protocol_id %in% !!affected_protocol_ids) %>%
+    dplyr::filter(!(crm_comment_id %in% !!downloaded_comments$crm_comment_id)) %>%
+    dplyr::select(-id, -updated_at, -created_at) %>%
+    dplyr::mutate(is_deleted = TRUE) %>%
+    dplyr::collect()
+
+  print(paste0("Number of deleted comments: ", nrow(comments_old)))
+
+  data <- downloaded_comments %>%
+    dplyr::bind_rows(comments_old) %>% 
+    drop_na(crm_comment_id) 
+
+  Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_comments", data, match_cols = c("crm_comment_id"), returning_cols = c("id", "crm_comment_id"), delete_missing = FALSE)
   print("comments uploaded")
 
-  # Pre-mark: alle Attachments der heruntergeladenen Protokolle als gelöscht setzen.
-  # Läuft unabhängig vom Protocol-Upsert, damit auch Löschungen ohne Protokolländerung erkannt werden.
-  # Der anschließende Upsert setzt is_deleted = FALSE für noch vorhandene zurück.
-  downloaded_protocol_ids <- all_protocols %>%
-    dplyr::filter(crm_protocol_id %in% protocols$main_table$crm_protocol_id) %>%
-    dplyr::pull(id)
+  all_comments <- dplyr::tbl(con, I("raw.crm_lead_protocol_comments")) %>%
+    dplyr::select(crm_comment_id, id) %>%
+    dplyr::collect()
 
-  if (length(downloaded_protocol_ids) > 0) {
-    id_string <- paste(downloaded_protocol_ids, collapse = ", ")
-    DBI::dbExecute(con, sprintf(
-      "UPDATE raw.crm_lead_protocol_attachments SET is_deleted = TRUE, updated_at = NOW() WHERE protocol_id IN (%s) AND NOT is_deleted",
-      id_string
-    ))
-  }
-
-  data <- protocols$attachments %>%
+  # Heruntergeladene Attachments aufbereiten
+  downloaded_attachments <- attachments %>%
     tidyr::drop_na(crm_attachment_id) %>%
     resolve_user_ids(all_users, "user_id") %>%
     resolve_protocol_id(all_protocols, "protocol_id") %>%
     dplyr::distinct(crm_attachment_id, .keep_all = TRUE) %>%
     tidyr::drop_na(user_id)
 
-  upsert_no_delete(con, "raw.crm_lead_protocol_attachments", data, match_cols = c("crm_attachment_id"))
+  # Attachments aus DB die zu heruntergeladenen oder gelöschten Protokollen gehören,
+  # aber nicht im Download sind → als gelöscht markieren
+  attachments_old <- dplyr::tbl(con, I("raw.crm_lead_protocol_attachments")) %>%
+    dplyr::filter(protocol_id %in% !!affected_protocol_ids) %>%
+    dplyr::filter(!(crm_attachment_id %in% !!downloaded_attachments$crm_attachment_id)) %>%
+    dplyr::select(-id, -updated_at, -created_at) %>%
+    dplyr::mutate(is_deleted = TRUE) %>%
+    dplyr::collect()
+
+  print(paste0("Number of deleted attachments: ", nrow(attachments_old)))
+
+  data <- downloaded_attachments %>%
+    dplyr::bind_rows(attachments_old) %>% 
+    drop_na(crm_attachment_id)
+
+  Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_attachments", data, match_cols = c("crm_attachment_id"))
   print("attachments uploaded")
 
-  # Pre-mark: alle DB-Comment-Attachments der gesuchten AN/AB-Prefixe als gelöscht setzen.
-  # Scope: alle DB-Records deren Filename mit einem der gesuchten Prefixe beginnt.
-  # Der anschließende Upsert setzt is_deleted = FALSE für noch vorhandene zurück.
+  # Heruntergeladene Comment-Attachments aufbereiten
+  downloaded_comment_attachments <- comment_attachments %>%
+    tidyr::drop_na(crm_attachment_id) %>%
+    resolve_user_ids(all_users, "user_id") %>%
+    resolve_comment_ids(all_comments, "comment_id") %>%
+    tidyr::drop_na(comment_id) %>%
+    dplyr::distinct(crm_attachment_id, .keep_all = TRUE) %>%
+    tidyr::drop_na(user_id)
+
+  # Comment-Attachments aus DB deren Prefix gesucht wurde,
+  # aber nicht im Download sind → als gelöscht markieren
   searched_prefixes <- protocols$searched_prefixes
   if (length(searched_prefixes) > 0) {
-    like_conditions <- paste0(
-      sapply(searched_prefixes, function(p) paste0("filename LIKE ", DBI::dbQuoteLiteral(con, paste0(p, "%")))),
-      collapse = " OR "
-    )
-    DBI::dbExecute(con, sprintf(
-      "UPDATE raw.crm_lead_protocol_comment_attachments SET is_deleted = TRUE, updated_at = NOW() WHERE (%s) AND NOT is_deleted",
-      like_conditions
-    ))
+    comment_attachments_old <- dplyr::tbl(con, I("raw.crm_lead_protocol_comment_attachments")) %>%
+      dplyr::collect() %>%
+      dplyr::filter(grepl(paste(searched_prefixes, collapse = "|"), filename)) %>%
+      dplyr::filter(!(crm_attachment_id %in% downloaded_comment_attachments$crm_attachment_id)) %>%
+      dplyr::select(-id, -updated_at, -created_at) %>%
+      dplyr::mutate(is_deleted = TRUE)
+
+    print(paste0("Number of deleted comment attachments: ", nrow(comment_attachments_old)))
+
+    data <- downloaded_comment_attachments %>%
+      dplyr::bind_rows(comment_attachments_old) %>%
+      drop_na(crm_attachment_id)
+  } else {
+    data <- downloaded_comment_attachments
   }
 
-  if(new_comments %>% nrow() > 0) {
-    data <- protocols$comment_attachments %>%
-      tidyr::drop_na(crm_attachment_id) %>%
-      resolve_user_ids(all_users, "user_id") %>%
-      resolve_comment_ids(new_comments, "comment_id") %>%
-      tidyr::drop_na(comment_id) %>%
-      dplyr::distinct(crm_attachment_id, .keep_all = TRUE) %>%
-      tidyr::drop_na(user_id)
-
-    upsert_no_delete(con, "raw.crm_lead_protocol_comment_attachments", data, match_cols = c("crm_attachment_id"))
-    print("comment attachments uploaded")
-  }
+  Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_comment_attachments", data, match_cols = c("crm_attachment_id"))
+  print("comment attachments uploaded")
 }
 
 download_and_enrich_protocols <- function(con, crm_key, last_update_attachments = NA, leads_to_update, daily_download = TRUE) {
@@ -195,10 +224,10 @@ download_and_enrich_protocols <- function(con, crm_key, last_update_attachments 
     ) %>%
     dplyr::mutate(is_user_generated = is.na(user_id) | is.na(name) | (user_id != "199146" & !grepl("Vorlage Note API", name)))
 
-  protocols_new <- simplify_protocols(new_protocols) %>%
+  protocols_new <- simplify_protocols(protocols = new_protocols) %>%
     dplyr::mutate(is_user_generated = is.na(user_id) | is.na(name) | (user_id != "199146" & !grepl("Vorlage Note API", name)))
   
-  attachments <- expand_protocol_attachments(protocols_new, last_update_attachments, crm_key, daily_download = daily_download)
+  attachments <- expand_protocol_attachments(protocols_simplified = protocols_new, crm_api_key = crm_key, daily_download = daily_download)
     
   comment_attachments_result <- expand_protocol_comment_attachments(crm_api_key = crm_key, offers_billomat, confirmations_billomat, last_update_attachments)
 
@@ -286,7 +315,6 @@ download_and_enrich_protocols <- function(con, crm_key, last_update_attachments 
     dplyr::select(crm_attachment_id = id, user_id, protocol_id, attachment_updated_at = updated_at, attachment_created_at = created_at, filename, content_type, file_size = size, is_deleted)
 
   comment_attachments <- comment_attachments_result$attachments %>%
-    dplyr::filter(comment_id %in% comments$crm_comment_id) %>%
     dplyr::select(comment_id, user_id, crm_attachment_id = id, attachment_created_at = created_at, attachment_updated_at = updated_at, filename, content_type, file_size = size, is_deleted)
 
   ################################-
@@ -301,15 +329,10 @@ download_and_enrich_protocols <- function(con, crm_key, last_update_attachments 
   
 }
 
-expand_protocol_attachments <- function(protocols_simplified, last_update_attachments, crm_api_key, daily_download = TRUE){
+expand_protocol_attachments <- function(protocols_simplified, crm_api_key, daily_download = TRUE){
 
   protocols_to_update <- protocols_simplified %>%
     dplyr::filter(attachments_count > 0)
-
-  if (daily_download) {
-    protocols_to_update <- protocols_to_update %>%
-      dplyr::filter(lubridate::as_datetime(updated_at, tz = "CET") >= last_update_attachments)
-  }
 
   print(paste0("Update Protocols for ", nrow(protocols_to_update), " Protocols"))
 
@@ -486,8 +509,8 @@ import_new_protocols <- function(crm_key, leads_to_update) {
   # Check if there are persons to update
   if (nrow(leads_to_update) > 0) {
 
-    # IDs in Batches von 1000 aufteilen
-    id_batches <- split(leads_to_update$crm_lead_id, ceiling(seq_along(leads_to_update$crm_lead_id) / 1000))
+    # IDs in Batches von 100 aufteilen
+    id_batches <- split(leads_to_update$crm_lead_id, ceiling(seq_along(leads_to_update$crm_lead_id) / 100))
 
     # Funktion zur Verarbeitung eines Batches
     process_protocols_batch <- function(id_batch) {
@@ -517,7 +540,20 @@ import_new_protocols <- function(crm_key, leads_to_update) {
     }
 
     # Alle Batches durchlaufen und Ergebnisse sammeln
-    protocols_new_list <- purrr::map(id_batches, process_protocols_batch)
+    n_batches <- length(id_batches)
+    protocols_new_list <- vector("list", n_batches)
+    batch_start_time <- Sys.time()
+
+    for (i in seq_along(id_batches)) {
+      protocols_new_list[[i]] <- process_protocols_batch(id_batches[[i]])
+
+      elapsed <- as.numeric(difftime(Sys.time(), batch_start_time, units = "secs"))
+      avg_per_batch <- elapsed / i
+      remaining <- avg_per_batch * (n_batches - i)
+      eta_min <- round(remaining / 60, 1)
+      cat(sprintf("Batch %d/%d done | ETA: %.1f min\n", i, n_batches, eta_min))
+      flush.console()
+    }
 
     # NULL-Werte entfernen und zusammenführen
     protocols_new <- dplyr::bind_rows(purrr::compact(protocols_new_list))
@@ -651,7 +687,7 @@ simplify_protocols <- function(protocols) {
     tidyr::drop_na(comments) %>% 
     tidyr::unnest_wider(comments) 
   
-  if(nrow(comments_notes) > 0) {
+  if(nrow(comments_notes) > 0 && ncol(comments_notes) > 0) {
     comments_notes <- comments_notes %>% 
       tidyr::unnest() %>%
       dplyr::mutate(id = as.character(id), content = name) %>%
@@ -666,7 +702,7 @@ simplify_protocols <- function(protocols) {
     tidyr::unnest_wider(comments) %>%
     tidyr::unnest()
   
-  if(ncol(protocol_email_comments) > 1) {
+  if(ncol(protocol_email_comments) > 1 && nrow(protocol_email_comments) > 0) {
     protocol_email_comments <- protocol_email_comments %>% 
       dplyr::mutate(id = as.character(id), content = name) %>%
       dplyr::left_join(mails %>% dplyr::select(id, person_ids), by = c("attachable_id" = "id"), relationship = "many-to-many")
@@ -676,7 +712,7 @@ simplify_protocols <- function(protocols) {
     comments <- comments_notes
   }
   
-  if(nrow(comments) > 0) {
+  if(nrow(comments) > 0 && ncol(comments) > 0) {
     comments <- comments %>%
       dplyr::mutate(type = "comment") %>%
       dplyr::select(id, user_id, person_ids, name, content, updated_at, type, attachable_id)
