@@ -67,8 +67,9 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NUL
 
   data <- main_table %>%
     drop_na(crm_protocol_id) %>%
-    dplyr::bind_rows(protocols_old) %>% 
+    dplyr::bind_rows(protocols_old) %>%
     resolve_user_ids(all_users, "user_id") %>%
+    tidyr::drop_na(user_id) %>%
     filter(protocol_type != "comment") %>%
     filter(protocol_type != "protocol_attachment") %>%
     select(-lead_id) %>%
