@@ -28,7 +28,7 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NUL
         dplyr::summarise(max_updated_at = max(updated_at, na.rm = TRUE)) %>%
         dplyr::collect() %>%
         dplyr::pull(max_updated_at)
-      last_update_attachments <- last_update_attachments - lubridate::hours(1)
+      last_update_attachments <- last_update_attachments - lubridate::hours(1) - lubridate::days(1)
     } else {
       last_update_protocols   <- lubridate::as_datetime(as.Date("2000-01-01"))
       last_update_attachments <- lubridate::as_datetime(as.Date("2000-01-01"))
@@ -166,11 +166,12 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NUL
   # Attachments aus DB die zu heruntergeladenen oder gelöschten Protokollen gehören,
   # aber nicht im Download sind → als gelöscht markieren
   attachments_old <- dplyr::tbl(con, I("raw.crm_lead_protocol_attachments")) %>%
-    dplyr::filter(protocol_id %in% !!affected_protocol_ids) %>%
+    collect() %>%
+    left_join(all_protocols %>% select(id, crm_protocol_id), by = c("protocol_id" = "id")) %>%
+    dplyr::filter(crm_protocol_id %in% protocols$attachment_for_protocols$id) %>% 
     dplyr::filter(!(crm_attachment_id %in% !!downloaded_attachments$crm_attachment_id)) %>%
-    dplyr::select(-id, -updated_at, -created_at) %>%
-    dplyr::mutate(is_deleted = TRUE) %>%
-    dplyr::collect()
+    dplyr::select(-id, -updated_at, -created_at, -crm_protocol_id) %>%
+    dplyr::mutate(is_deleted = TRUE)
 
   print(paste0("Number of deleted attachments: ", nrow(attachments_old)))
 
@@ -228,7 +229,7 @@ download_and_enrich_protocols <- function(con, crm_key, last_update_attachments 
   protocols_new <- simplify_protocols(protocols = new_protocols) %>%
     dplyr::mutate(is_user_generated = is.na(user_id) | is.na(name) | (user_id != "199146" & !grepl("Vorlage Note API", name)))
   
-  attachments <- expand_protocol_attachments(protocols_simplified = protocols_new, crm_api_key = crm_key, daily_download = daily_download)
+  attachments <- expand_protocol_attachments(protocols_simplified = protocols_new, crm_api_key = crm_key, last_update_attachments = last_update_attachments, daily_download = daily_download)
     
   comment_attachments_result <- expand_protocol_comment_attachments(crm_api_key = crm_key, offers_billomat, confirmations_billomat, last_update_attachments)
 
@@ -311,7 +312,7 @@ download_and_enrich_protocols <- function(con, crm_key, last_update_attachments 
 
   ################################-
 
-  attachments <- attachments$attachments %>%
+  attachments$attachments <- attachments$attachments %>%
     dplyr::filter(protocol_id %in% main_table$crm_protocol_id) %>%
     dplyr::select(crm_attachment_id = id, user_id, protocol_id, attachment_updated_at = updated_at, attachment_created_at = created_at, filename, content_type, file_size = size, is_deleted)
 
@@ -320,22 +321,24 @@ download_and_enrich_protocols <- function(con, crm_key, last_update_attachments 
 
   ################################-
 
-  new_tables <- list(main_table = main_table,
+  protocols <- list(main_table = main_table,
                      comments = comments,
-                     attachments = attachments,
+                     attachments = attachments$attachments,
+                     attachment_for_protocols = attachments$protocols_to_update,
                      comment_attachments = comment_attachments,
                      searched_prefixes = comment_attachments_result$searched_prefixes)
   
-  return(new_tables)
+  return(protocols)
   
 }
 
-expand_protocol_attachments <- function(protocols_simplified, crm_api_key, daily_download = TRUE){
+expand_protocol_attachments <- function(protocols_simplified, crm_api_key, last_update_attachments = NA, daily_download = TRUE){
 
   protocols_to_update <- protocols_simplified %>%
-    dplyr::filter(attachments_count > 0)
+    dplyr::filter(attachments_count > 0) %>% 
+    dplyr::filter(is.na(last_update_attachments) | as.Date(updated_at) >= as.Date(last_update_attachments))
 
-  print(paste0("Update Protocols for ", nrow(protocols_to_update), " Protocols"))
+  print(paste0("Update Attachments for ", nrow(protocols_to_update), " Protocols"))
 
   if (nrow(protocols_to_update) > 0) {
 
@@ -385,7 +388,7 @@ expand_protocol_comment_attachments <- function(crm_api_key, offers_billomat, co
     last_update_attachments_comments <- as.Date("2000-01-01") # arbitrary old date to include all attachments if no last update is provided
   }
 
-  last_update_attachments_comments <- pmin(last_update_attachments_comments, Sys.Date() - lubridate::days(7)) # Ensure minimum 7-day lookback window (pmin picks older date)
+  last_update_attachments_comments <- pmin(last_update_attachments_comments, Sys.Date() - lubridate::days(3)) # Ensure minimum 3-day lookback window (pmin picks older date)
 
   offer_numbers <- offers_billomat %>%
     dplyr::group_by(offer_number) %>%
@@ -393,10 +396,10 @@ expand_protocol_comment_attachments <- function(crm_api_key, offers_billomat, co
     dplyr::ungroup() %>%
     dplyr::mutate(in_time_frame = as.Date(last_update) >= as.Date(last_update_attachments_comments)) %>%
     dplyr::filter(grepl("AN20", offer_number)) %>%
-    dplyr::mutate(offer_number = substring(offer_number, 1, nchar(offer_number) - 2)) %>%
     dplyr::mutate(is_highest_offer_numbers = rank(offer_number, ties.method = "first") > (n() - 3)) %>%
     dplyr::arrange(offer_number) %>%
     dplyr::filter(in_time_frame | is_highest_offer_numbers) %>%
+    dplyr::mutate(offer_number = ifelse(is_highest_offer_numbers, substring(offer_number, 1, nchar(offer_number) - 2), offer_number)) %>%
     dplyr::distinct(offer_number)
 
   # Next hundred-prefix: highest current number + 1 hundred-range
@@ -408,9 +411,15 @@ expand_protocol_comment_attachments <- function(crm_api_key, offers_billomat, co
     an_next_prefix <- paste0("AN", an_year, "SF", formatC(an_num + 1, width = 2, flag = "0"))
   }
 
+  if (!is.null(an_next_prefix)) {
+    offer_numbers <- offer_numbers %>%
+      filter(!grepl(highest_an, offer_number, fixed = TRUE))
+  }
+
   # Add next prefix and next year's first prefix
   offer_numbers <- c(
     offer_numbers$offer_number,
+    if (!is.null(an_next_prefix)) highest_an,
     an_next_prefix,
     paste0("AN", next_year, "SF00")
   ) %>% unique()
@@ -421,10 +430,10 @@ expand_protocol_comment_attachments <- function(crm_api_key, offers_billomat, co
     dplyr::ungroup() %>%
     dplyr::mutate(in_time_frame = as.Date(last_update) >= as.Date(last_update_attachments_comments)) %>%
     dplyr::filter(grepl("AB20", confirmation_number)) %>%
-    dplyr::mutate(confirmation_number = substring(confirmation_number, 1, nchar(confirmation_number) - 2)) %>%
     dplyr::mutate(is_highest_confirmation_numbers = rank(confirmation_number, ties.method = "first") > (n() - 3)) %>%
     dplyr::arrange(confirmation_number) %>%
     dplyr::filter(in_time_frame | is_highest_confirmation_numbers) %>%
+    dplyr::mutate(confirmation_number = ifelse(is_highest_confirmation_numbers, substring(confirmation_number, 1, nchar(confirmation_number) - 2), confirmation_number)) %>%
     dplyr::distinct(confirmation_number)
 
   # Next hundred-prefix for ABs
@@ -436,9 +445,15 @@ expand_protocol_comment_attachments <- function(crm_api_key, offers_billomat, co
     ab_next_prefix <- paste0("AB", ab_year, "SF", formatC(ab_num + 1, width = 2, flag = "0"))
   }
 
+  if (!is.null(ab_next_prefix)) {
+    confirmation_numbers <- confirmation_numbers %>%
+      filter(!grepl(highest_ab, confirmation_number, fixed = TRUE))
+  }
+
   # Add next prefix and next year's first prefix
   confirmation_numbers <- c(
     confirmation_numbers$confirmation_number,
+    if (!is.null(ab_next_prefix)) highest_ab,
     ab_next_prefix,
     paste0("AB", next_year, "SF00")
   ) %>% unique()
