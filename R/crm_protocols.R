@@ -11,7 +11,7 @@
 #'
 #' @return Invisibly returns NULL after successful update.
 #' @export
-crm_update_protocols <- function(con, keys, is_daily, override_last_update = NULL) {
+crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA) {
 
   if (!is.null(override_last_update) & !is.na(override_last_update)) {
     last_update_protocols   <- lubridate::as_datetime(override_last_update)
