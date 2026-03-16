@@ -97,7 +97,8 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA)
     filter(protocol_type != "comment") %>%
     filter(protocol_type != "protocol_attachment") %>%
     replace_external_ids_with_internal("lead_id", all_leads, "crm_lead_id") %>%
-    replace_external_ids_with_internal("crm_protocol_id", all_protocols, "crm_protocol_id", "protocol_id")
+    replace_external_ids_with_internal("crm_protocol_id", all_protocols, "crm_protocol_id", "protocol_id") %>% 
+    drop_na(protocol_id, lead_id)
 
   protocol_relations_filtered <- dplyr::tbl(con, I("raw.crm_lead_protocol_relations")) %>%
     dplyr::select("protocol_id", "lead_id") %>%
