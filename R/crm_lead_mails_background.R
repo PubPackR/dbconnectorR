@@ -40,7 +40,7 @@ crm_update_lead_mails_background <- function(con) {
       dplyr::tbl(con, I("raw.crm_lead_mail_address")) %>%
         dplyr::filter(!is_deleted) %>%
         dplyr::select(lead_id, mail_address_type, mail_address_name) %>%
-        dplyr::filter(mail_address_type %in% c("office", "office_hq")),
+        dplyr::filter(!(mail_address_type %in% c("from_description"))),
       by = c("id" = "lead_id")
     ) %>%
     dplyr::select(-id) %>%
