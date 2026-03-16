@@ -198,7 +198,7 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA)
   if (length(searched_prefixes) > 0) {
     comment_attachments_old <- dplyr::tbl(con, I("raw.crm_lead_protocol_comment_attachments")) %>%
       dplyr::collect() %>%
-      dplyr::filter(grepl(paste(searched_prefixes, collapse = "|"), filename)) %>%
+      dplyr::filter(grepl_chunked(filename, searched_prefixes)) %>%
       dplyr::filter(!(crm_attachment_id %in% downloaded_comment_attachments$crm_attachment_id)) %>%
       dplyr::select(-id, -updated_at, -created_at) %>%
       dplyr::mutate(is_deleted = TRUE)
@@ -464,7 +464,7 @@ expand_protocol_comment_attachments <- function(crm_api_key, offers_billomat, co
     ab_attachments <- get_searched_attachments(crm_api_key, confirmation_numbers)
 
     comment_attachments_new <- dplyr::bind_rows(an_attachments, ab_attachments) %>%
-      tidyr::unnest()
+      tidyr::unnest(cols = c(id, attachable_id, attachable_type, user_id, name, created_at, updated_at))
 
     if ("attachable_id" %in% names(comment_attachments_new)) {
       break
@@ -759,6 +759,18 @@ simplify_protocols <- function(protocols) {
   }
   
   return(all_protocols)
-  
+
+}
+
+# grepl with a single huge alternation pattern can exceed R's regex memory limit.
+# This helper splits the patterns into chunks and ORs the results together.
+grepl_chunked <- function(x, patterns, chunk_size = 200) {
+  result <- rep(FALSE, length(x))
+  for (i in seq(1, length(patterns), by = chunk_size)) {
+    chunk <- patterns[i:min(i + chunk_size - 1, length(patterns))]
+    pattern <- paste(chunk, collapse = "|")
+    result <- result | grepl(pattern, x)
+  }
+  result
 }
 
