@@ -347,6 +347,38 @@ map_transcripts_to_crm_entities <- function(con, transcript_summaries) {
   unmapped_count <- nrow(transcript_summaries) - nrow(mappable_transcripts)
   if (unmapped_count > 0) {
     message(sprintf("Warning: %d transcript summaries could not be mapped to CRM entities", unmapped_count))
+
+    # Debug: show why each unmapped transcript failed
+    mapped_ids <- unique(mappable_transcripts$id)
+    unmapped <- transcript_summaries %>% dplyr::filter(!id %in% mapped_ids)
+    for (i in seq_len(nrow(unmapped))) {
+      uid_debug <- unmapped$id[i]
+      cid_debug <- unmapped$call_id[i]
+      message(sprintf("  [DEBUG] Unmapped transcript id=%s, call_id=%s:", uid_debug, cid_debug))
+
+      # Show all participants for this call
+      call_parts_debug <- call_participants %>% dplyr::filter(call_id == cid_debug)
+      contacts_debug <- msgraph_contacts %>% dplyr::filter(id %in% call_parts_debug$contact_id)
+      crm_mapped_debug <- crm_lead_contact_mapping %>%
+        dplyr::filter(msgraph_contact_id %in% call_parts_debug$contact_id)
+
+      for (j in seq_len(nrow(contacts_debug))) {
+        em <- contacts_debug$email[j]
+        cid_contact <- contacts_debug$id[j]
+        is_internal <- grepl(get_internal_email_pattern(), em, ignore.case = TRUE)
+        is_synthetic <- is_synthetic_email(em)
+        has_crm <- cid_contact %in% crm_mapped_debug$msgraph_contact_id
+        crm_id <- if (has_crm) {
+          crm_mapped_debug$crm_lead_id[crm_mapped_debug$msgraph_contact_id == cid_contact][1]
+        } else NA
+        reason <- if (is_internal) "INTERNAL" else if (is_synthetic) "SYNTHETIC" else if (!has_crm) "NO_CRM_MAPPING" else "OK"
+        message(sprintf("    contact_id=%s | %s | %s | crm_lead_id=%s",
+                        cid_contact, em, reason, ifelse(is.na(crm_id), "NA", crm_id)))
+      }
+      if (nrow(contacts_debug) == 0) {
+        message("    No contacts found for this call")
+      }
+    }
   }
 
   # Log organizer mapping statistics

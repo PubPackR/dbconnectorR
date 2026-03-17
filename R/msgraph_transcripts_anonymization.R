@@ -213,28 +213,14 @@ anonymize_transcripts <- function(con,
       )
 
       # Update in database
-      if (is.na(anonymized_content)) {
-        # Internal call detected - set both content fields to NULL
-        sql_query <- glue::glue_sql(
-          "
-          UPDATE processed.msgraph_call_transcripts
-          SET transcript_content_anonymized = NULL,
-              transcript_content = NULL
-          WHERE id = {transcripts$id[i]}
-          ",
-          .con = con
-        )
-      } else {
-        # External call - store anonymized content
-        sql_query <- glue::glue_sql(
-          "
-          UPDATE processed.msgraph_call_transcripts
-          SET transcript_content_anonymized = {anonymized_content}
-          WHERE id = {transcripts$id[i]}
-          ",
-          .con = con
-        )
-      }
+      sql_query <- glue::glue_sql(
+        "
+        UPDATE processed.msgraph_call_transcripts
+        SET transcript_content_anonymized = {anonymized_content}
+        WHERE id = {transcripts$id[i]}
+        ",
+        .con = con
+      )
 
       DBI::dbExecute(con, sql_query)
 
@@ -278,7 +264,7 @@ anonymize_content <- function(con, content, positions, contacts, crm_lead_ids, a
 
   if(scope == "call_transcripts") {
     # anonymize all names in <v ... >
-    information_speaker <- anonymize_speaker(con, tokens) # replace with speaker_xxxxxx
+    information_speaker <- anonymize_speaker(con, tokens, all_participants, contacts) # replace with speaker_xxxxxx
     known_information <- dplyr::bind_rows(known_information, information_speaker)
 
     # anonymize employees and customers
@@ -305,10 +291,8 @@ anonymize_content <- function(con, content, positions, contacts, crm_lead_ids, a
     stop(paste("Unknown scope:", scope, ". Only 'call_transcripts' is supported in this module."))
   }
 
-  # Check if process_transcript_placeholders returned NULL (internal call detected)
-  if (is.null(tokens)) {
-    return(NA_character_)
-  }
+  # Note: No longer treating calls without Lead_ placeholders as "internal"
+  # — missing CRM mapping does not mean the call is internal
 
   # choose tokens that should be replace
   tokens$anonymized <- ifelse(
@@ -326,11 +310,17 @@ anonymize_content <- function(con, content, positions, contacts, crm_lead_ids, a
 
 #' Anonymizes speaker tags like <v Max Müller> to SPEAKER/00001 in the NER column
 #'
+#' When a speaker tag contains a placeholder like "@ 1" and there is exactly one
+#' external participant in the call, the placeholder is resolved to that participant's name.
+#'
 #' @param con Database connection
 #' @param tokens A data frame with a column `token` and `NER`
+#' @param all_participants Optional data frame with call participants (id, email, name).
+#'   External participants have name = NA.
+#' @param contacts Optional data frame of contacts (id, ms_name, email)
 #' @return Updated tokens with speaker names anonymized in the NER column
 #' @keywords internal
-anonymize_speaker <- function(con, tokens) {
+anonymize_speaker <- function(con, tokens, all_participants = NULL, contacts = NULL) {
   # Match speaker tags like <v Max Müller>
   speaker_pattern <- "^<v\\s.+\\s?>$"
   speaker_tokens <- unique(na.omit(tokens$token[grepl(
@@ -369,6 +359,38 @@ anonymize_speaker <- function(con, tokens) {
     ) %>%
     dplyr::mutate(name = dplyr::coalesce(name, formatted_name)) %>%
     dplyr::select(-formatted_name, -only_name)
+
+  # Resolve "@ 1" style placeholders when there is exactly one external call participant
+  if (!is.null(all_participants) && !is.null(contacts)) {
+    # Identify unmatched speakers with placeholder names like "@ 1", "@1", "@2" etc.
+    placeholder_pattern <- "^@\\s*\\d+\\s*$"
+    unmatched_mask <- is.na(tokens_with_id$id) &
+      grepl(placeholder_pattern, gsub("^<v\\s+|>$", "", tokens_with_id$token))
+
+    if (any(unmatched_mask)) {
+      # External participants have name = NA (not in msgraph_users)
+      external_participants <- all_participants %>%
+        dplyr::filter(is.na(name))
+
+      if (nrow(external_participants) == 1) {
+        ext_id <- external_participants$id[1]
+        ext_contact <- contacts %>%
+          dplyr::filter(id == ext_id)
+
+        if (nrow(ext_contact) == 1 && !is.na(ext_contact$ms_name[1])) {
+          ext_name <- trimws(ext_contact$ms_name[1])
+          # Handle "Nachname, Vorname" format
+          if (stringr::str_detect(ext_name, ",")) {
+            ext_name <- stringr::str_trim(
+              stringr::str_replace(ext_name, "^([^,]+),\\s*(.*)$", "\\2 \\1")
+            )
+          }
+          tokens_with_id$id[unmatched_mask] <- ext_id
+          tokens_with_id$name[unmatched_mask] <- ext_name
+        }
+      }
+    }
+  }
 
   return(tokens_with_id)
 }
@@ -420,7 +442,7 @@ anonymize_names <- function(participant_ids, contacts, tokens, prefix) {
 #' @param tokens Token dataframe
 #' @param content_id Content ID
 #' @param scope Scope of processing
-#' @return Updated tokens dataframe or NULL if internal call
+#' @return Updated tokens dataframe
 #' @keywords internal
 process_transcript_placeholders <- function(con, known_information, tokens, content_id, scope) {
 
@@ -529,15 +551,7 @@ process_transcript_placeholders <- function(con, known_information, tokens, cont
     dplyr::rename(placeholder = NER) %>%
     dplyr::mutate(transcript_id = content_id)
 
-    # Check if any Lead_ placeholders exist - if not, this is an internal call
-    has_lead_placeholders <- any(grepl("Lead_", used_replacement_tokens$placeholder, fixed = TRUE))
-
-    if (!has_lead_placeholders) {
-      # Internal call detected - don't populate placeholder table and return NULL to indicate early exit
-      return(NULL)
-    }
-
-    # upsert into DB only if external participants (leads) were found
+    # upsert placeholders into DB
     Billomatics::postgres_upsert_data(
       con,
       "processed",

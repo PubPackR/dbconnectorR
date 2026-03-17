@@ -155,7 +155,8 @@ get_and_save_transcript_data <- function(con,
     authentication_msgraph = authentication_msgraph,
     start_date = start_encoded,
     end_date = end_encoded,
-    existing_transcript_ids = existing_transcript_ids
+    existing_transcript_ids = existing_transcript_ids,
+    con = con
   )
 
   # Save to database
@@ -188,8 +189,10 @@ fetch_transcripts_for_all_users <- function(users,
                                             authentication_msgraph,
                                             start_date,
                                             end_date,
-                                            existing_transcript_ids = character(0)) {
+                                            existing_transcript_ids = character(0),
+                                            con = NULL) {
   transcript_rows <- list()
+  processed_transcript_ids <- character(0)  # Track IDs within this batch
 
   # Generate access token
   access_token <- MSGraph::authorize_graph(
@@ -215,12 +218,28 @@ fetch_transcripts_for_all_users <- function(users,
       meeting_metadata <- tryCatch({
         get_meeting_metadata(access_token, user_id, entry$meetingId)
       }, error = function(e) {
-        warning("Failed to retrieve meeting metadata: ", e$message)
+        message("[WARNING] get_meeting_metadata failed for user ", user_id, ": ", e$message)
         NULL
       })
 
+      # Retry with organizer + call participants if primary user failed
+      if (is.null(meeting_metadata) && !is.null(con)) {
+        transcript_time <- lubridate::ymd_hms(entry$createdDateTime)
+        meeting_metadata <- retry_meeting_metadata_with_participants(
+          access_token = access_token,
+          primary_user_id = user_id,
+          meeting_id = entry$meetingId,
+          transcript_created_at = transcript_time,
+          con = con,
+          calls = calls,
+          call_event_mapping = all_events_categorised_df,
+          users = users
+        )
+      }
+
       if (is.null(meeting_metadata)) {
-        warning("No meeting metadata for user ", user_id, " and meeting ", entry$meetingId)
+        message("[WARNING] No meeting metadata for user ", user_id,
+                " and meeting ", entry$meetingId, " (all retries exhausted)")
         next
       }
 
@@ -236,6 +255,12 @@ fetch_transcripts_for_all_users <- function(users,
       )
 
       if (!is.null(transcript)) {
+        tid <- transcript$transcript_id[1]
+        if (tid %in% processed_transcript_ids) {
+          message("[DEBUG] SKIP: transcript ", tid, " already processed in this batch")
+          next
+        }
+        processed_transcript_ids <- c(processed_transcript_ids, tid)
         transcript_rows[[length(transcript_rows) + 1]] <- transcript
       }
     }
@@ -437,13 +462,182 @@ get_meeting_metadata <- function(access_token, user_id, meeting_id) {
   )
 
   if (httr::http_status(response)$category != "Success") {
-    warning("Failed to fetch meeting metadata: ", httr::http_status(response)$message)
+    message("[WARNING] get_meeting_metadata HTTP ", httr::status_code(response),
+            " for user ", user_id, ", meeting ", meeting_id)
     return(NULL)
   }
 
   parsed_response <- httr::content(response, as = "parsed", type = "application/json")
 
   return(parsed_response)
+}
+
+
+#' Retry get_meeting_metadata with Call/Event Participants
+#'
+#' When get_meeting_metadata fails for the primary user, finds the organizer
+#' and other internal participants via DB lookup and retries with them.
+#' Priority: event organizer first, then other event/call participants.
+#'
+#' @param access_token MS Graph API access token
+#' @param primary_user_id The user ID that already failed
+#' @param meeting_id The online meeting ID to query
+#' @param transcript_created_at POSIXct timestamp of the transcript
+#' @param con Database connection
+#' @param calls Data frame of calls (already loaded)
+#' @param call_event_mapping Data frame of call-event mappings (already loaded)
+#' @param users Data frame of internal users (already loaded)
+#'
+#' @return Meeting metadata list or NULL if all retries fail
+#' @keywords internal
+retry_meeting_metadata_with_participants <- function(access_token,
+                                                     primary_user_id,
+                                                     meeting_id,
+                                                     transcript_created_at,
+                                                     con,
+                                                     calls,
+                                                     call_event_mapping,
+                                                     users) {
+
+  # Find candidate calls: prefer exact meeting_id match, then time-window, then same-day
+
+  # 1. Exact match by meeting_id (most reliable)
+  candidate_calls <- calls %>%
+    dplyr::filter(!is.na(meeting_id) & meeting_id == !!meeting_id)
+
+  # 2. Fallback: time-window match
+  if (nrow(candidate_calls) == 0) {
+    candidate_calls <- calls %>%
+      dplyr::filter(
+        call_start < transcript_created_at,
+        call_end > transcript_created_at
+      )
+  }
+
+  # 3. Broader fallback: same day
+  if (nrow(candidate_calls) == 0) {
+    transcript_date <- as.Date(transcript_created_at)
+    candidate_calls <- calls %>%
+      dplyr::filter(as.Date(call_start) == transcript_date)
+    if (nrow(candidate_calls) > 0) {
+      message("[WARNING] Using same-day fallback for retry: ", nrow(candidate_calls),
+              " candidate calls on ", transcript_date)
+    }
+  }
+
+  if (nrow(candidate_calls) == 0) {
+    message("[WARNING] No candidate calls found for meeting metadata retry")
+    return(NULL)
+  }
+
+  candidate_call_ids <- candidate_calls$id
+
+  # Get event_ids from already-loaded call_event_mapping
+  candidate_event_ids <- call_event_mapping %>%
+    dplyr::filter(call_id %in% candidate_call_ids, !is.na(event_id), event_id > 0) %>%
+    dplyr::pull(event_id) %>%
+    unique()
+
+  retry_uids <- character(0)
+
+  # 1. Event organizer (highest priority)
+  if (length(candidate_event_ids) > 0) {
+    organizer_uids <- tryCatch({
+      dplyr::tbl(con, I("raw.msgraph_event_participants")) %>%
+        dplyr::filter(event_id %in% !!candidate_event_ids, is_organizer == TRUE) %>%
+        dplyr::inner_join(
+          dplyr::tbl(con, I("raw.msgraph_contacts")) %>% dplyr::select(id, email),
+          by = c("contact_id" = "id")
+        ) %>%
+        dplyr::inner_join(
+          dplyr::tbl(con, I("raw.msgraph_users")) %>%
+            dplyr::filter(is_internal, !is_deleted) %>%
+            dplyr::select(msgraph_user_id, email),
+          by = "email"
+        ) %>%
+        dplyr::pull(msgraph_user_id) %>%
+        unique()
+    }, error = function(e) {
+      message("[WARNING] Failed to look up event organizer: ", e$message)
+      character(0)
+    })
+    retry_uids <- c(retry_uids, organizer_uids)
+  }
+
+  # 2. Other event participants
+  if (length(candidate_event_ids) > 0) {
+    event_participant_uids <- tryCatch({
+      dplyr::tbl(con, I("raw.msgraph_event_participants")) %>%
+        dplyr::filter(event_id %in% !!candidate_event_ids) %>%
+        dplyr::inner_join(
+          dplyr::tbl(con, I("raw.msgraph_contacts")) %>% dplyr::select(id, email),
+          by = c("contact_id" = "id")
+        ) %>%
+        dplyr::inner_join(
+          dplyr::tbl(con, I("raw.msgraph_users")) %>%
+            dplyr::filter(is_internal, !is_deleted) %>%
+            dplyr::select(msgraph_user_id, email),
+          by = "email"
+        ) %>%
+        dplyr::pull(msgraph_user_id) %>%
+        unique()
+    }, error = function(e) {
+      message("[WARNING] Failed to look up event participants: ", e$message)
+      character(0)
+    })
+    retry_uids <- c(retry_uids, event_participant_uids)
+  }
+
+  # 3. Call participants
+  call_participant_uids <- tryCatch({
+    dplyr::tbl(con, I("raw.msgraph_call_participants")) %>%
+      dplyr::filter(call_id %in% !!candidate_call_ids) %>%
+      dplyr::inner_join(
+        dplyr::tbl(con, I("raw.msgraph_contacts")) %>% dplyr::select(id, email),
+        by = c("contact_id" = "id")
+      ) %>%
+      dplyr::inner_join(
+        dplyr::tbl(con, I("raw.msgraph_users")) %>%
+          dplyr::filter(is_internal, !is_deleted) %>%
+          dplyr::select(msgraph_user_id, email),
+        by = "email"
+      ) %>%
+      dplyr::pull(msgraph_user_id) %>%
+      unique()
+  }, error = function(e) {
+    message("[WARNING] Failed to look up call participants: ", e$message)
+    character(0)
+  })
+  retry_uids <- c(retry_uids, call_participant_uids)
+
+  # Deduplicate and remove the primary user (already tried)
+  retry_uids <- unique(retry_uids)
+  retry_uids <- setdiff(retry_uids, primary_user_id)
+
+  if (length(retry_uids) == 0) {
+    message("[WARNING] No alternative users found for meeting metadata retry")
+    return(NULL)
+  }
+
+  message("[INFO] Retrying get_meeting_metadata with ", length(retry_uids),
+          " alternative user(s) (organizer + participants)")
+
+  for (retry_uid in retry_uids) {
+    metadata <- tryCatch({
+      get_meeting_metadata(access_token, retry_uid, meeting_id)
+    }, error = function(e) NULL)
+
+    if (!is.null(metadata)) {
+      retry_user_name <- users$display_name[users$msgraph_user_id == retry_uid]
+      if (length(retry_user_name) == 0) retry_user_name <- retry_uid
+      message("[INFO] get_meeting_metadata succeeded with user ", retry_user_name[1])
+      return(metadata)
+    }
+  }
+
+  message("[WARNING] get_meeting_metadata failed for all ",
+          length(retry_uids), " alternative users")
+  return(NULL)
 }
 
 
