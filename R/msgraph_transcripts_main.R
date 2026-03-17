@@ -37,6 +37,10 @@
 #'   Default: tomorrow (to include today's transcripts)
 #' @param use_test_account Logical. If TRUE, exports to test CRM account.
 #'   Default: FALSE
+#' @param debug_lead_id Optional integer. CRM lead ID (external) where unmappable
+#'   transcripts should be uploaded for debugging. The debug info (participant details,
+#'   mapping failure reasons) is prepended to the transcript content. Transcripts
+#'   remain marked as not_matchable_with_crm in the database. Default: NULL (disabled)
 #' @param resume Logical. If TRUE, resumes from last successful step.
 #'   Default: FALSE
 #' @param log_level Character string specifying logging verbosity.
@@ -106,6 +110,7 @@ msgraph_update_transcripts <- function(con,
                                        start_date = NULL,
                                        end_date = Sys.Date() + 1,
                                        use_test_account = FALSE,
+                                       debug_lead_id = NULL,
                                        resume = FALSE,
                                        log_level = "INFO",
                                        log_file = NULL) {
@@ -121,6 +126,7 @@ msgraph_update_transcripts <- function(con,
     crm_keys = crm_keys,
     openrouter_model = openrouter_model,
     use_test_account = use_test_account,
+    debug_lead_id = debug_lead_id,
     start_date = start_date,
     end_date = end_date,
     logger = logger,
@@ -243,6 +249,7 @@ execute_transcript_crm_export <- function(con, config) {
     con = con,
     crm_keys = config$crm_keys,
     use_test_account = config$use_test_account,
+    debug_lead_id = config$debug_lead_id,
     logger = config$logger
   )
 }

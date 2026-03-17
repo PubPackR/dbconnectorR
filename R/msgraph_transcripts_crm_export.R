@@ -28,6 +28,9 @@ CRM_DEFAULT_AUTHOR_USER_ID <- 199146L
 #' @param crm_keys CRM API key for protocol creation
 #' @param use_test_account Logical, whether to use test CRM account.
 #'   Default: FALSE
+#' @param debug_lead_id Optional integer. CRM lead ID (external) where unmappable
+#'   transcripts are uploaded with debug info prepended. They remain marked as
+#'   not_matchable_with_crm and are NOT marked as exported. Default: NULL (disabled)
 #' @param logger Logger function for output messages
 #'
 #' @return Invisible NULL (updates database and creates CRM protocols)
@@ -45,6 +48,7 @@ CRM_DEFAULT_AUTHOR_USER_ID <- 199146L
 msgraph_export_transcripts_to_crm <- function(con,
                                           crm_keys,
                                           use_test_account = FALSE,
+                                          debug_lead_id = NULL,
                                           logger = function(msg, level = "INFO") cat(msg, "\n")) {
 
   # Get transcripts ready for export
@@ -89,6 +93,21 @@ msgraph_export_transcripts_to_crm <- function(con,
 
     updated_count <- DBI::dbExecute(con, sql)
     logger(sprintf("Marked %d transcripts as not matchable", updated_count), "INFO")
+  }
+
+  # Export unmappable transcripts to debug lead if configured
+  if (!is.null(debug_lead_id) && length(non_mappable_ids) > 0) {
+    logger(sprintf("Exporting %d unmappable transcripts to debug lead %s",
+                   length(non_mappable_ids), debug_lead_id), "INFO")
+
+    export_unmappable_to_debug_lead(
+      con = con,
+      crm_api_key = crm_keys,
+      unmappable_transcripts = ready_transcripts %>%
+        dplyr::filter(as.character(id) %in% non_mappable_ids),
+      debug_lead_id = debug_lead_id,
+      logger = logger
+    )
   }
 
   if (nrow(transcript_mappings) == 0) {
@@ -919,4 +938,134 @@ mark_transcripts_as_exported <- function(con, transcript_ids) {
   updated_count <- DBI::dbExecute(con, sql)
 
   return(updated_count)
+}
+
+
+#' Export Unmappable Transcripts to Debug CRM Lead
+#'
+#' Uploads transcripts that could not be matched to CRM entities to a debug lead.
+#' The debug info (participant details, mapping failure reasons) is prepended to
+#' the transcript content. These transcripts are NOT marked as exported in the DB.
+#'
+#' @param con Database connection
+#' @param crm_api_key CRM API key
+#' @param unmappable_transcripts Dataframe of transcript records that couldn't be mapped
+#' @param debug_lead_id CRM lead ID (external) for the debug lead
+#' @param logger Logger function
+#' @return Invisible NULL
+#' @keywords internal
+export_unmappable_to_debug_lead <- function(con, crm_api_key, unmappable_transcripts,
+                                            debug_lead_id, logger) {
+
+  if (nrow(unmappable_transcripts) == 0) return(invisible(NULL))
+
+  # Load participant data needed for debug info
+  call_ids <- unique(unmappable_transcripts$call_id)
+  call_participants <- get_call_participants_combined(con, call_ids, include_event_attendees = TRUE)
+
+  relevant_contact_ids <- unique(call_participants$contact_id)
+  relevant_contact_ids <- relevant_contact_ids[!is.na(relevant_contact_ids)]
+
+  msgraph_contacts <- dplyr::tbl(con, I("raw.msgraph_contacts")) %>%
+    dplyr::filter(id %in% !!relevant_contact_ids) %>%
+    dplyr::select(id, email, ms_name) %>%
+    dplyr::collect()
+
+  # Set up API headers
+  headers <- c(
+    "content-type" = "application/json",
+    "X-apikey" = crm_api_key,
+    "Accept" = "*/*"
+  )
+
+  exported_count <- 0
+
+  for (i in seq_len(nrow(unmappable_transcripts))) {
+    transcript <- unmappable_transcripts[i, ]
+
+    # Build debug header with participant info
+    debug_lines <- c(
+      sprintf("Unmapped transcript id=%s, call id=%s", transcript$id, transcript$call_id),
+      ""
+    )
+
+    # Get participants for this call
+    parts <- call_participants %>%
+      dplyr::filter(call_id == transcript$call_id) %>%
+      dplyr::distinct(contact_id)
+
+    contacts_for_call <- msgraph_contacts %>%
+      dplyr::filter(id %in% parts$contact_id)
+
+    if (nrow(contacts_for_call) > 0) {
+      for (j in seq_len(nrow(contacts_for_call))) {
+        em <- contacts_for_call$email[j]
+        is_internal <- !is.na(em) && grepl(get_internal_email_pattern(), em, ignore.case = TRUE)
+        label <- if (is_internal) "INTERNAL" else "EXTERN"
+        debug_lines <- c(debug_lines, sprintf("%s | %s", label, em))
+      }
+    } else {
+      debug_lines <- c(debug_lines, "No contacts found for this call")
+    }
+
+    debug_lines <- c(debug_lines, "", "---", "")
+
+    # Build content: debug header + formatted transcript summary
+    debug_header <- paste(debug_lines, collapse = "\r\n")
+    formatted_summary <- format_transcript_for_crm(transcript$transcript_summary)
+    full_content <- paste0(debug_header, formatted_summary)
+
+    # Build protocol name
+    protocol_name <- paste("Teams Meeting Summary -",
+                           format(as.Date(transcript$transcript_created_at), "%Y-%m-%d"),
+                           "- UNMAPPED")
+
+    # Create JSON payload — always goes to debug_lead_id
+    json_data <- list(
+      protocol = list(
+        user_id = CRM_DEFAULT_AUTHOR_USER_ID,
+        name = protocol_name,
+        confidential = FALSE,
+        content = full_content,
+        updated_by_user_id = NULL,
+        account_id = 2582,
+        type = "ProtocolObjectNote",
+        badge = "meeting",
+        person_id = as.integer(debug_lead_id),
+        person_ids = list(as.integer(debug_lead_id)),
+        format = "markdown"
+      )
+    )
+
+    body_string <- jsonlite::toJSON(json_data, auto_unbox = TRUE)
+
+    tryCatch({
+      response <- httr::POST(
+        "https://api.centralstationcrm.net/api/protocols?only_object_logging=true",
+        httr::add_headers(headers),
+        body = body_string,
+        encode = "json"
+      )
+
+      status_code <- httr::status_code(response)
+      if (status_code == 201) {
+        exported_count <- exported_count + 1
+        logger(sprintf("  Uploaded unmapped transcript id=%s to debug lead %s",
+                        transcript$id, debug_lead_id), "DEBUG")
+      } else {
+        response_text <- tryCatch(httr::content(response, "text"), error = function(e) "")
+        logger(sprintf("  Failed to upload transcript id=%s: HTTP %d %s",
+                        transcript$id, status_code, response_text), "WARNING")
+      }
+    }, error = function(e) {
+      logger(sprintf("  Error uploading transcript id=%s: %s", transcript$id, e$message), "WARNING")
+    })
+
+    # Brief pause to respect rate limits
+    Sys.sleep(0.5)
+  }
+
+  logger(sprintf("Uploaded %d/%d unmappable transcripts to debug lead %s",
+                  exported_count, nrow(unmappable_transcripts), debug_lead_id), "INFO")
+  invisible(NULL)
 }
