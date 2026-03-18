@@ -628,7 +628,7 @@ export_single_protocol_to_crm <- function(con, headers, protocol_data, use_test_
     return(list(success = TRUE, error = NULL))
   } else {
     response_text <- tryCatch({
-      httr::content(response, "text")
+      suppressWarnings(httr::content(response, "text"))
     }, error = function(e) {
       "Unable to read response content"
     })
@@ -797,7 +797,7 @@ msgraph_export_single_transcript_to_crm <- function(con,
     return(list(success = TRUE, error = NULL))
   } else {
     response_text <- tryCatch({
-      httr::content(response, "text")
+      suppressWarnings(httr::content(response, "text"))
     }, error = function(e) {
       "Unable to read response content"
     })
@@ -1053,7 +1053,7 @@ export_unmappable_to_debug_lead <- function(con, crm_api_key, unmappable_transcr
         logger(sprintf("  Uploaded unmapped transcript id=%s to debug lead %s",
                         transcript$id, debug_lead_id), "DEBUG")
       } else {
-        response_text <- tryCatch(httr::content(response, "text"), error = function(e) "")
+        response_text <- tryCatch(suppressWarnings(httr::content(response, "text")), error = function(e) "")
         logger(sprintf("  Failed to upload transcript id=%s: HTTP %d %s",
                         transcript$id, status_code, response_text), "WARNING")
       }
