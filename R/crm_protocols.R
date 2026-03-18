@@ -38,7 +38,9 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA)
   # override_last_update überschreibt is_daily vollständig (NULL und NA gelten beide als "kein Override")
   effective_daily <- is_daily || (!is.null(override_last_update) & !is.na(override_last_update))
 
-  leads_to_update <- dplyr::tbl(con, I("raw.crm_leads")) %>% dplyr::collect()
+  leads_to_update <- dplyr::tbl(con, I("raw.crm_leads")) %>% 
+    filter(!is_deleted) %>%
+    dplyr::collect()
   if (effective_daily) {
     leads_to_update <- leads_to_update %>%
       dplyr::filter(lubridate::as_datetime(lead_updated_at) >= as.Date(last_update_protocols))
@@ -459,20 +461,23 @@ expand_protocol_comment_attachments <- function(crm_api_key, offers_billomat, co
     paste0("AB", next_year, "SF00")
   ) %>% unique()
 
-  repeat {
-    an_attachments <- get_searched_attachments(crm_api_key, offer_numbers)
-    ab_attachments <- get_searched_attachments(crm_api_key, confirmation_numbers)
+  an_attachments <- get_searched_attachments(crm_api_key, offer_numbers)
+  ab_attachments <- get_searched_attachments(crm_api_key, confirmation_numbers)
 
-    comment_attachments_new <- dplyr::bind_rows(an_attachments, ab_attachments) %>%
-      tidyr::unnest(cols = c(id, attachable_id, attachable_type, user_id, name, created_at, updated_at))
+  comment_attachments_new <- dplyr::bind_rows(an_attachments, ab_attachments)
 
-    if ("attachable_id" %in% names(comment_attachments_new)) {
-      break
-    } else {
-      warning("⚠ attachable_id missing, retrying in 5 minutes...")
-      Sys.sleep(5 * 60) # wait 5 minutes before retrying
-    }
+  if (nrow(comment_attachments_new) == 0) {
+    message("No new attachments found for searched prefixes")
+    comment_attachments_new <- tibble::tibble(
+      id = character(), comment_id = character(), user_id = character(),
+      name = character(), created_at = as.POSIXct(character()), updated_at = as.POSIXct(character()),
+      is_deleted = logical()
+    )
+    return(list(attachments = comment_attachments_new, searched_prefixes = c(offer_numbers, confirmation_numbers)))
   }
+
+  comment_attachments_new <- comment_attachments_new %>%
+    tidyr::unnest()
 
   comment_attachments_new <- comment_attachments_new %>%
     dplyr::select(-tidyselect::any_of(c("account_id", "attachment_category_id"))) %>%
@@ -615,30 +620,46 @@ get_searched_attachments <- function(api_key, prefixes) {
   attachments <- tibble::tibble()
 
   for (i in prefixes) {
-    # create an response with httr and the GET function. In the function you paste
-    # url and your endpoint and you also need the headers
     tryCatch({
-      start_time <- Sys.time()
       response <-
         httr::GET(
-          # set url with "page=" so you can add endpoints and defined filter
           paste0(
             "https://api.centralstationcrm.net/api/attachments/search?filename=", i
           ),
           httr::add_headers(headers)
         )
 
-      data <- jsonlite::fromJSON(httr::content(response, "text")) %>%
+      status_code <- httr::status_code(response)
+
+      # Rate limit handling: wait and retry
+      if (status_code == 429) {
+        retry_after <- as.numeric(httr::headers(response)[["Retry-After"]])
+        wait_time <- ifelse(is.na(retry_after), 60, retry_after)
+        warning(sprintf("Rate limited on prefix '%s', waiting %d seconds...", i, wait_time))
+        Sys.sleep(wait_time)
+
+        # Retry once after waiting
+        response <- httr::GET(
+          paste0("https://api.centralstationcrm.net/api/attachments/search?filename=", i),
+          httr::add_headers(headers)
+        )
+        status_code <- httr::status_code(response)
+      }
+
+      if (status_code != 200) {
+        warning(sprintf("API error for prefix '%s': HTTP %d", i, status_code))
+        next
+      }
+
+      data <- jsonlite::fromJSON(suppressWarnings(httr::content(response, "text"))) %>%
         dplyr::select(-data)
-      end_time <- Sys.time()
-      end_time - start_time
       attachments <- dplyr::bind_rows(attachments, data)
     },
     error = function(cond) {
-      # Choose a return value in case of error
-      NA
+      warning(sprintf("Error fetching attachments for prefix '%s': %s", i, cond$message))
     })
     print(i)
+    Sys.sleep(0.5)  # Brief pause between calls to avoid rate limits
   }
 
   return(attachments)
