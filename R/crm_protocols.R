@@ -8,10 +8,12 @@
 #' @param override_last_update POSIXct or Date. If provided, overrides both
 #'   \code{last_update_protocols} and \code{last_update_attachments} instead of
 #'   deriving them from the database. Useful for backfilling or manual reruns.
+#' @param dry_run Logical. If \code{TRUE}, runs the full download and enrichment
+#'   pipeline but skips all database writes. Useful for testing. Default \code{FALSE}.
 #'
 #' @return Invisibly returns NULL after successful update.
 #' @export
-crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA) {
+crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA, dry_run = FALSE) {
 
   if (!is.null(override_last_update) & !is.na(override_last_update)) {
     last_update_protocols   <- lubridate::as_datetime(override_last_update)
@@ -79,15 +81,19 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA)
 
   if(data %>% nrow() > 0) {
 
-    batch_upsert(
-      con,
-      "raw",
-      "crm_lead_protocols",
-      data,
-      match_cols = c("crm_protocol_id"),
-      batch_size = 10000
-    )
-    print("protocols uploaded")
+    if (!dry_run) {
+      batch_upsert(
+        con,
+        "raw",
+        "crm_lead_protocols",
+        data,
+        match_cols = c("crm_protocol_id"),
+        batch_size = 10000
+      )
+      print("protocols uploaded")
+    } else {
+      message(sprintf("[dry_run] Would upsert %d rows to raw.crm_lead_protocols", nrow(data)))
+    }
 
   }
 
@@ -113,11 +119,15 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA)
   ) %>% distinct(protocol_id, lead_id) %>%
     drop_na(protocol_id, lead_id)
 
-  pool::poolWithTransaction(con, function(con) {
-    DBI::dbExecute(con, "TRUNCATE raw.crm_lead_protocol_relations")
-    Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_relations", full_data, match_cols = c("protocol_id", "lead_id"))
-  })
-  print("protocols mapping uploaded")
+  if (!dry_run) {
+    pool::poolWithTransaction(con, function(con) {
+      DBI::dbExecute(con, "TRUNCATE raw.crm_lead_protocol_relations")
+      Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_relations", full_data, match_cols = c("protocol_id", "lead_id"))
+    })
+    print("protocols mapping uploaded")
+  } else {
+    message(sprintf("[dry_run] Would truncate and re-insert %d rows into raw.crm_lead_protocol_relations", nrow(full_data)))
+  }
 
   # Heruntergeladene Comments aufbereiten
   downloaded_comments <- comments %>%
@@ -151,8 +161,12 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA)
     dplyr::bind_rows(comments_old) %>% 
     drop_na(crm_comment_id) 
 
-  Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_comments", data, match_cols = c("crm_comment_id"), returning_cols = c("id", "crm_comment_id"), delete_missing = FALSE)
-  print("comments uploaded")
+  if (!dry_run) {
+    Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_comments", data, match_cols = c("crm_comment_id"), returning_cols = c("id", "crm_comment_id"), delete_missing = FALSE)
+    print("comments uploaded")
+  } else {
+    message(sprintf("[dry_run] Would upsert %d rows to raw.crm_lead_protocol_comments", nrow(data)))
+  }
 
   all_comments <- dplyr::tbl(con, I("raw.crm_lead_protocol_comments")) %>%
     dplyr::select(crm_comment_id, id) %>%
@@ -182,8 +196,12 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA)
     dplyr::bind_rows(attachments_old) %>% 
     drop_na(crm_attachment_id)
 
-  Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_attachments", data, match_cols = c("crm_attachment_id"))
-  print("attachments uploaded")
+  if (!dry_run) {
+    Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_attachments", data, match_cols = c("crm_attachment_id"))
+    print("attachments uploaded")
+  } else {
+    message(sprintf("[dry_run] Would upsert %d rows to raw.crm_lead_protocol_attachments", nrow(data)))
+  }
 
   # Heruntergeladene Comment-Attachments aufbereiten
   downloaded_comment_attachments <- comment_attachments %>%
@@ -214,8 +232,12 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA)
     data <- downloaded_comment_attachments
   }
 
-  Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_comment_attachments", data, match_cols = c("crm_attachment_id"))
-  print("comment attachments uploaded")
+  if (!dry_run) {
+    Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_comment_attachments", data, match_cols = c("crm_attachment_id"))
+    print("comment attachments uploaded")
+  } else {
+    message(sprintf("[dry_run] Would upsert %d rows to raw.crm_lead_protocol_comment_attachments", nrow(data)))
+  }
 }
 
 download_and_enrich_protocols <- function(con, crm_key, last_update_attachments = NA, leads_to_update, daily_download = TRUE) {
@@ -338,28 +360,109 @@ download_and_enrich_protocols <- function(con, crm_key, last_update_attachments 
 expand_protocol_attachments <- function(protocols_simplified, crm_api_key, last_update_attachments = NA, daily_download = TRUE){
 
   protocols_to_update <- protocols_simplified %>%
-    dplyr::filter(attachments_count > 0) %>% 
+    dplyr::filter(attachments_count > 0) %>%
+    dplyr::filter(!type %in% c("comment", "protocol_attachment")) %>%
+    distinct(id, attachments_count, updated_at) %>%
     dplyr::filter(is.na(last_update_attachments) | as.Date(updated_at) >= as.Date(last_update_attachments))
 
   print(paste0("Update Attachments for ", nrow(protocols_to_update), " Protocols"))
 
   if (nrow(protocols_to_update) > 0) {
 
-    # download missing attachments
-    attachments_new <- Billomatics::get_central_station_attachments(crm_api_key, as.vector(protocols_to_update$id)) %>%
-      conditional_unnest("attachment", "_")
+    fetch_attachments <- function(ids) {
+      result <- Billomatics::get_central_station_attachments(crm_api_key, as.vector(ids)) %>%
+        conditional_unnest("attachment", "_")
+      colnames(result) <- gsub("attachment_", "", names(result))
+      result
+    }
 
-    colnames(attachments_new) <- gsub("attachment_", "", names(attachments_new))
+    # Initial download
+    attachments_new <- fetch_attachments(protocols_to_update$id)
 
-    attachments <- attachments_new %>%
-      dplyr::select(-account_id,
-             -attachable_type,
-             -category_id) %>%
-      dplyr::rename(protocol_id = attachable_id) %>%
-      dplyr::mutate(created_at = lubridate::ymd_hms(created_at, tz = "CET"),
-             updated_at = lubridate::ymd_hms(updated_at, tz = "CET"),
-             protocol_id = as.character(protocol_id)) %>%
-      dplyr::mutate(is_deleted = FALSE)
+    # Retry loop: up to 2 retries for protocols where downloaded count != attachments_count
+    for (retry_num in 1:2) {
+      if (!"attachable_id" %in% names(attachments_new)) break
+      downloaded_counts <- attachments_new %>%
+        dplyr::mutate(attachable_id = as.character(attachable_id)) %>%
+        dplyr::count(attachable_id, name = "downloaded") %>%
+        dplyr::right_join(
+          protocols_to_update %>%
+            dplyr::select(id, attachments_count) %>%
+            dplyr::mutate(id = as.character(id)),
+          by = c("attachable_id" = "id")
+        ) %>%
+        dplyr::mutate(downloaded = tidyr::replace_na(downloaded, 0L))
+
+      mismatch_ids <- downloaded_counts %>%
+        dplyr::filter(downloaded != attachments_count) %>%
+        dplyr::pull(attachable_id)
+
+      if (length(mismatch_ids) == 0) break
+
+      warning(sprintf(
+        "Attachment count mismatch (retry %d/2): %d protocols — %s",
+        retry_num, length(mismatch_ids), paste(mismatch_ids, collapse = ", ")
+      ))
+
+      retry_result <- fetch_attachments(mismatch_ids)
+      if ("attachable_id" %in% names(retry_result) && nrow(retry_result) > 0) {
+        attachments_new <- attachments_new %>%
+          dplyr::filter(!(as.character(attachable_id) %in% mismatch_ids)) %>%
+          dplyr::bind_rows(retry_result)
+      }
+    }
+
+    # After retries: if no attachable_id column, no data came back at all
+    if (!"attachable_id" %in% names(attachments_new)) {
+      warning(sprintf(
+        "Excluding all %d protocols from deletion scope: no attachments downloaded at all",
+        nrow(protocols_to_update)
+      ))
+      protocols_to_update <- protocols_to_update[0, ]
+    } else {
+      final_counts <- attachments_new %>%
+        dplyr::mutate(attachable_id = as.character(attachable_id)) %>%
+        dplyr::count(attachable_id, name = "downloaded") %>%
+        dplyr::right_join(
+          protocols_to_update %>%
+            dplyr::select(id, attachments_count) %>%
+            dplyr::mutate(id = as.character(id)),
+          by = c("attachable_id" = "id")
+        ) %>%
+        dplyr::mutate(downloaded = tidyr::replace_na(downloaded, 0L))
+
+      still_mismatching <- final_counts %>%
+        dplyr::filter(downloaded != attachments_count) %>%
+        dplyr::pull(attachable_id)
+
+      if (length(still_mismatching) > 0) {
+        warning(sprintf(
+          "Excluding %d protocols from deletion scope after 2 retries (API count mismatch): %s",
+          length(still_mismatching), paste(still_mismatching, collapse = ", ")
+        ))
+        protocols_to_update <- protocols_to_update %>%
+          dplyr::filter(!as.character(id) %in% still_mismatching)
+      }
+    }
+
+    attachments <- if ("attachable_id" %in% names(attachments_new)) {
+      attachments_new %>%
+        dplyr::select(-account_id,
+               -attachable_type,
+               -category_id) %>%
+        dplyr::rename(protocol_id = attachable_id) %>%
+        dplyr::mutate(created_at = lubridate::ymd_hms(created_at, tz = "CET"),
+               updated_at = lubridate::ymd_hms(updated_at, tz = "CET"),
+               protocol_id = as.character(protocol_id)) %>%
+        dplyr::mutate(is_deleted = FALSE)
+    } else {
+      tibble::tibble(
+        id = character(), user_id = integer(), protocol_id = character(),
+        updated_at = as.POSIXct(character()), created_at = as.POSIXct(character()),
+        filename = character(), content_type = character(), size = integer(),
+        is_deleted = logical()
+      )
+    }
 
   } else {
 
