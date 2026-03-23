@@ -8,12 +8,9 @@
 #' @param override_last_update POSIXct or Date. If provided, overrides both
 #'   \code{last_update_protocols} and \code{last_update_attachments} instead of
 #'   deriving them from the database. Useful for backfilling or manual reruns.
-#' @param dry_run Logical. If \code{TRUE}, runs the full download and enrichment
-#'   pipeline but skips all database writes. Useful for testing. Default \code{FALSE}.
-#'
 #' @return Invisibly returns NULL after successful update.
 #' @export
-crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA, dry_run = FALSE) {
+crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA) {
 
   if (!is.null(override_last_update) & !is.na(override_last_update)) {
     last_update_protocols   <- lubridate::as_datetime(override_last_update)
@@ -81,19 +78,15 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA,
 
   if(data %>% nrow() > 0) {
 
-    if (!dry_run) {
-      batch_upsert(
-        con,
-        "raw",
-        "crm_lead_protocols",
-        data,
-        match_cols = c("crm_protocol_id"),
-        batch_size = 10000
-      )
-      print("protocols uploaded")
-    } else {
-      message(sprintf("[dry_run] Would upsert %d rows to raw.crm_lead_protocols", nrow(data)))
-    }
+    batch_upsert(
+      con,
+      "raw",
+      "crm_lead_protocols",
+      data,
+      match_cols = c("crm_protocol_id"),
+      batch_size = 10000
+    )
+    print("protocols uploaded")
 
   }
 
@@ -108,9 +101,18 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA,
     replace_external_ids_with_internal("crm_protocol_id", all_protocols, "crm_protocol_id", "protocol_id") %>% 
     drop_na(protocol_id, lead_id)
 
+  leads_to_update_internal_ids <- all_leads %>%
+    dplyr::filter(crm_lead_id %in% !!leads_to_update$crm_lead_id) %>%
+    dplyr::pull(id)
+
+  old_in_scope_relations <- dplyr::tbl(con, I("raw.crm_lead_protocol_relations")) %>%
+    dplyr::select("protocol_id", "lead_id") %>%
+    filter(lead_id %in% !!leads_to_update_internal_ids) %>%
+    dplyr::collect()
+
   protocol_relations_filtered <- dplyr::tbl(con, I("raw.crm_lead_protocol_relations")) %>%
     dplyr::select("protocol_id", "lead_id") %>%
-    filter(!(lead_id %in% !!deleted_leads$id | lead_id %in% !!data$lead_id)) %>%
+    filter(!(lead_id %in% !!deleted_leads$id | lead_id %in% !!leads_to_update_internal_ids)) %>%
     dplyr::collect()
 
   full_data <- bind_rows(
@@ -119,15 +121,30 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA,
   ) %>% distinct(protocol_id, lead_id) %>%
     drop_na(protocol_id, lead_id)
 
-  if (!dry_run) {
-    pool::poolWithTransaction(con, function(con) {
-      DBI::dbExecute(con, "TRUNCATE raw.crm_lead_protocol_relations")
-      Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_relations", full_data, match_cols = c("protocol_id", "lead_id"))
-    })
-    print("protocols mapping uploaded")
-  } else {
-    message(sprintf("[dry_run] Would truncate and re-insert %d rows into raw.crm_lead_protocol_relations", nrow(full_data)))
-  }
+  new_relations <- dplyr::anti_join(
+    data %>% dplyr::select(protocol_id, lead_id),
+    old_in_scope_relations,
+    by = c("protocol_id", "lead_id")
+  )
+  removed_relations <- dplyr::anti_join(
+    old_in_scope_relations,
+    data %>% dplyr::select(protocol_id, lead_id),
+    by = c("protocol_id", "lead_id")
+  )
+  message(sprintf(
+    "[relations] scope: %d leads | +%d added, -%d removed | total: %d → %d",
+    length(leads_to_update_internal_ids),
+    nrow(new_relations),
+    nrow(removed_relations),
+    nrow(old_in_scope_relations) + nrow(protocol_relations_filtered),
+    nrow(full_data)
+  ))
+
+  pool::poolWithTransaction(con, function(con) {
+    DBI::dbExecute(con, "TRUNCATE raw.crm_lead_protocol_relations")
+    Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_relations", full_data, match_cols = c("protocol_id", "lead_id"))
+  })
+  print("protocols mapping uploaded")
 
   # Heruntergeladene Comments aufbereiten
   downloaded_comments <- comments %>%
@@ -161,12 +178,8 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA,
     dplyr::bind_rows(comments_old) %>% 
     drop_na(crm_comment_id) 
 
-  if (!dry_run) {
-    Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_comments", data, match_cols = c("crm_comment_id"), returning_cols = c("id", "crm_comment_id"), delete_missing = FALSE)
-    print("comments uploaded")
-  } else {
-    message(sprintf("[dry_run] Would upsert %d rows to raw.crm_lead_protocol_comments", nrow(data)))
-  }
+  Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_comments", data, match_cols = c("crm_comment_id"), returning_cols = c("id", "crm_comment_id"), delete_missing = FALSE)
+  print("comments uploaded")
 
   all_comments <- dplyr::tbl(con, I("raw.crm_lead_protocol_comments")) %>%
     dplyr::select(crm_comment_id, id) %>%
@@ -196,12 +209,8 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA,
     dplyr::bind_rows(attachments_old) %>% 
     drop_na(crm_attachment_id)
 
-  if (!dry_run) {
-    Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_attachments", data, match_cols = c("crm_attachment_id"))
-    print("attachments uploaded")
-  } else {
-    message(sprintf("[dry_run] Would upsert %d rows to raw.crm_lead_protocol_attachments", nrow(data)))
-  }
+  Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_attachments", data, match_cols = c("crm_attachment_id"))
+  print("attachments uploaded")
 
   # Heruntergeladene Comment-Attachments aufbereiten
   downloaded_comment_attachments <- comment_attachments %>%
@@ -232,12 +241,8 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA,
     data <- downloaded_comment_attachments
   }
 
-  if (!dry_run) {
-    Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_comment_attachments", data, match_cols = c("crm_attachment_id"))
-    print("comment attachments uploaded")
-  } else {
-    message(sprintf("[dry_run] Would upsert %d rows to raw.crm_lead_protocol_comment_attachments", nrow(data)))
-  }
+  Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_comment_attachments", data, match_cols = c("crm_attachment_id"))
+  print("comment attachments uploaded")
 }
 
 download_and_enrich_protocols <- function(con, crm_key, last_update_attachments = NA, leads_to_update, daily_download = TRUE) {
