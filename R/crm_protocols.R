@@ -97,6 +97,7 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA)
   data <- main_table %>%
     filter(protocol_type != "comment") %>%
     filter(protocol_type != "protocol_attachment") %>%
+    filter(protocol_type != "user_notes") %>%
     replace_external_ids_with_internal("lead_id", all_leads, "crm_lead_id") %>%
     replace_external_ids_with_internal("crm_protocol_id", all_protocols, "crm_protocol_id", "protocol_id") %>% 
     drop_na(protocol_id, lead_id)
@@ -776,6 +777,7 @@ get_searched_attachments <- function(api_key, prefixes) {
 simplify_protocols <- function(protocols) {
   
   notes <- protocols %>%
+    dplyr::mutate(person_ids = purrr::map(person_ids, ~ as.integer(unlist(.x)))) %>%
     tidyr::unnest(person_ids) %>% 
     dplyr::select(id, user_id, person_ids, name, content, updated_at, attachments_count, created_at) %>% 
     dplyr::mutate(id = as.character(id),
@@ -784,6 +786,7 @@ simplify_protocols <- function(protocols) {
     dplyr::mutate(type = "note")
   
   protocol_attachments <- protocols %>%
+    dplyr::mutate(protocol_attachment_person_ids = purrr::map(protocol_attachment_person_ids, ~ as.integer(unlist(.x)))) %>%
     tidyr::unnest(protocol_attachment_person_ids) %>% 
     dplyr::select(protocol_attachment_id, protocol_attachment_user_id, protocol_attachment_person_ids, protocol_attachment_content, protocol_attachment_name, protocol_attachment_updated_at, protocol_attachment_attachments_count, protocol_attachment_created_at) %>% 
     dplyr::rename(id = protocol_attachment_id,
@@ -799,6 +802,7 @@ simplify_protocols <- function(protocols) {
                   name = as.character(name))
   
   user_notes <- protocols %>%
+    dplyr::mutate(protocol_user_note_person_ids = purrr::map(protocol_user_note_person_ids, ~ as.integer(unlist(.x)))) %>%
     tidyr::unnest(protocol_user_note_person_ids) %>% 
     dplyr::select(protocol_user_note_id, protocol_user_note_user_id, protocol_user_note_person_ids, protocol_user_note_content, protocol_user_note_name, protocol_user_note_updated_at, protocol_user_note_attachments_count, protocol_user_note_created_at) %>% 
     dplyr::rename(id = protocol_user_note_id,
@@ -813,6 +817,7 @@ simplify_protocols <- function(protocols) {
                   id = as.character(id))
     
   mails <- protocols %>%
+    dplyr::mutate(protocol_email_person_ids = purrr::map(protocol_email_person_ids, ~ as.integer(unlist(.x)))) %>%
     tidyr::unnest(protocol_email_person_ids) %>% 
     dplyr::select(protocol_email_id, protocol_email_user_id, protocol_email_person_ids, protocol_email_name, protocol_email_content, protocol_email_updated_at, protocol_email_attachments_count, protocol_email_created_at) %>% 
     dplyr::rename(id = protocol_email_id,
@@ -834,7 +839,8 @@ simplify_protocols <- function(protocols) {
     tidyr::unnest_wider(comments) 
   
   if(nrow(comments_notes) > 0 && ncol(comments_notes) > 0) {
-    comments_notes <- comments_notes %>% 
+    comments_notes <- comments_notes %>%
+      dplyr::mutate(dplyr::across(dplyr::any_of("person_ids"), ~ purrr::map(.x, ~ as.integer(unlist(.x))))) %>%
       tidyr::unnest() %>%
       dplyr::mutate(id = as.character(id), content = name) %>%
       dplyr::left_join(notes %>% dplyr::select(id, person_ids), by = c("attachable_id" = "id"), relationship = "many-to-many")
@@ -846,8 +852,9 @@ simplify_protocols <- function(protocols) {
     tidyr::drop_na(comments) %>% 
     dplyr::filter(comments != "NA") %>%
     tidyr::unnest_wider(comments) %>%
+    dplyr::mutate(dplyr::across(dplyr::any_of("person_ids"), ~ purrr::map(.x, ~ as.integer(unlist(.x))))) %>%
     tidyr::unnest()
-  
+
   if(ncol(protocol_email_comments) > 1 && nrow(protocol_email_comments) > 0) {
     protocol_email_comments <- protocol_email_comments %>% 
       dplyr::mutate(id = as.character(id), content = name) %>%
