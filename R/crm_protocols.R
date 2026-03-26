@@ -122,14 +122,15 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA)
   ) %>% distinct(protocol_id, lead_id) %>%
     drop_na(protocol_id, lead_id)
 
+  old_full_relations <- dplyr::bind_rows(old_in_scope_relations, protocol_relations_filtered)
   new_relations <- dplyr::anti_join(
-    data %>% dplyr::select(protocol_id, lead_id),
-    old_in_scope_relations,
+    full_data,
+    old_full_relations,
     by = c("protocol_id", "lead_id")
   )
   removed_relations <- dplyr::anti_join(
-    old_in_scope_relations,
-    data %>% dplyr::select(protocol_id, lead_id),
+    old_full_relations,
+    full_data,
     by = c("protocol_id", "lead_id")
   )
   message(sprintf(
