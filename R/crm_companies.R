@@ -79,6 +79,7 @@ crm_update_companies <- function(
   # Upsert Company Lead Positions
   data <- positions %>%
     resolve_company_ids(all_companies) %>%
+    dplyr::filter(!is.na(company_id)) %>%
     resolve_lead_id(all_leads)
   upsert_delete_missing(
     con,
