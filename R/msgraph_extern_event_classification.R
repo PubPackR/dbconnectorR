@@ -21,7 +21,7 @@
 #' @examples
 #' update_extern_event_classification(con)
 #' update_extern_event_classification(con, min_date = as.Date("2025-05-01"))
-update_extern_event_classification <- function(con, min_date = Sys.Date() - 90) {
+update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, use_date_filter = FALSE) {
 
   # === 1. EVENTS LADEN & MAPPING-DEDUP ========================================
 
@@ -29,18 +29,26 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90) 
 
   # Alle extern_planned Events im Zeitraum.
   # Deduplizierung: Bei mehreren Mapping-Eintraegen pro Event (mehrere Calls)
-  # den besten behalten (erfolgreich > no-show). arrange() sortiert FALSE vor TRUE,
-  # d.h. nicht-no-show vor no-show -> distinct() behaelt den erfolgreichen Eintrag.
+  # den besten behalten: 1) erfolgreich > no-show, 2) laengster Call.
+  # arrange() sortiert FALSE vor TRUE (nicht-no-show zuerst), dann absteigend nach Dauer.
+  call_durations <- dplyr::tbl(con, I("raw.msgraph_calls")) %>%
+    dplyr::select(id, call_start, call_end) %>%
+    dplyr::collect() %>%
+    dplyr::mutate(call_duration_sec = as.numeric(difftime(call_end, call_start, units = "secs"))) %>%
+    dplyr::select(call_id = id, call_duration_sec)
+
   events_classified <- dplyr::tbl(con, I("mapping.msgraph_call_event")) %>%
-    dplyr::filter(event_date >= !!min_date) %>%
+    {if (use_date_filter) dplyr::filter(., event_date >= !!min_date) else .} %>%
     dplyr::collect() %>%
     dplyr::filter(grepl("extern_planned", event_class, ignore.case = TRUE)) %>%
+    dplyr::left_join(call_durations, by = "call_id") %>%
     dplyr::mutate(
-      is_no_show_class = grepl("no_call|intern_call", event_class, ignore.case = TRUE)
+      is_no_show_class = grepl("no_call|intern_call", event_class, ignore.case = TRUE),
+      call_duration_sec = dplyr::if_else(is.na(call_duration_sec), 0, call_duration_sec)
     ) %>%
-    dplyr::arrange(event_id, is_no_show_class) %>%
+    dplyr::arrange(event_id, is_no_show_class, dplyr::desc(call_duration_sec)) %>%
     dplyr::distinct(event_id, .keep_all = TRUE) %>%
-    dplyr::select(-is_no_show_class)
+    dplyr::select(-is_no_show_class, -call_duration_sec)
 
   message(paste0("  ", nrow(events_classified), " Events geladen (nach Mapping-Dedup)"))
 
@@ -48,7 +56,6 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90) 
     message("Keine Events gefunden. Abbruch.")
     return(invisible(NULL))
   }
-
   # === 2. ORIGINAL_CREATED_AT BERECHNEN =======================================
 
   message("2. Original_created_at berechnen...")
