@@ -242,14 +242,16 @@ retry_llm <- function(prompt, chat, max_attempts = 4, wait_base = 2) {
     result <- tryCatch({
     chat$chat(prompt)
     }, error = function(e) {
+      error_msg <- conditionMessage(e)
+      error_class <- paste(class(e), collapse = "/")
       # Only retry on 503 / 429 or general transient failures
-      if (grepl("503|429", e$message)) {
+      if (grepl("503|429", error_msg)) {
         wait_time <- wait_base ^ i
-        message(sprintf("Attempt %d failed with %s. Retrying in %d seconds...", i, e$message, wait_time))
+        message(sprintf("Attempt %d failed with %s. Retrying in %d seconds...", i, error_msg, wait_time))
         Sys.sleep(wait_time)
         return(NULL)
       } else {
-        message("Non-retriable error: ", e$message)
+        message(sprintf("Non-retriable error [%s]: %s", error_class, error_msg))
         return(NA)
       }
     })
