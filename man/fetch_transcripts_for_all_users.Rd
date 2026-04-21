@@ -11,7 +11,8 @@ fetch_transcripts_for_all_users(
   authentication_msgraph,
   start_date,
   end_date,
-  existing_transcript_ids = character(0)
+  existing_transcript_ids = character(0),
+  con = NULL
 )
 }
 \description{

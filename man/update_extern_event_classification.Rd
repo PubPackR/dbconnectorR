@@ -4,7 +4,11 @@
 \alias{update_extern_event_classification}
 \title{Classify External Events with Original Creation Date}
 \usage{
-update_extern_event_classification(con, min_date = Sys.Date() - 90)
+update_extern_event_classification(
+  con,
+  min_date = Sys.Date() - 90,
+  use_date_filter = FALSE
+)
 }
 \arguments{
 \item{con}{A PostgreSQL database connection object.}

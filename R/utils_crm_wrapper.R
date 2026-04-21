@@ -112,6 +112,10 @@ resolve_comment_ids <- function(df, comments_df, col = "comment_id") {
   )
 }
 
+resolve_group_id <- function(df, groups_df, col = "group_id") {
+  replace_ids(df, groups_df, cols_df = col, join_cols_ref = "group_id")
+}
+
 batch_upsert <- function(
   con,
   schema,

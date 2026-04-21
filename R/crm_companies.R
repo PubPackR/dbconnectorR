@@ -19,6 +19,9 @@ crm_update_companies <- function(
 ) {
   companies <- download_and_enrich_companies(crm_key)
 
+  # Ensure unknown CRM group_ids exist as stubs in raw.crm_groups; returns mapping
+  all_groups <- crm_update_groups(con, companies$main_table$group_id)
+
   # Upsert Companies
   data <- companies$main_table %>%
     resolve_user_ids(
@@ -28,7 +31,8 @@ crm_update_companies <- function(
         "updated_by_user_id",
         "responsible_user_id"
       )
-    )
+    ) %>%
+    resolve_group_id(all_groups)
   upsert_delete_missing(
     con,
     "raw.crm_companies",
@@ -211,7 +215,6 @@ download_and_enrich_companies <- function(crm_key) {
   main_table <- companies %>%
     dplyr::select(
       -account_id,
-      -group_id,
       -custom_fields,
       -addrs,
       -tels,
@@ -229,7 +232,8 @@ download_and_enrich_companies <- function(crm_key) {
       company_name = name,
       company_created_at = created_at,
       company_updated_at = updated_at,
-      company_background = background
+      company_background = background,
+      group_id
     )
 
   new_tables <- list(

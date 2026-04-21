@@ -3,6 +3,7 @@
 export(INTERNAL_EMAIL_PATTERNS)
 export(crm_update_cal_events)
 export(crm_update_companies)
+export(crm_update_groups)
 export(crm_update_lead_mails_background)
 export(crm_update_lead_names)
 export(crm_update_leads)

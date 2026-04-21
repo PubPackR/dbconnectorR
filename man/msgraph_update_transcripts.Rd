@@ -14,6 +14,7 @@ msgraph_update_transcripts(
   start_date = NULL,
   end_date = Sys.Date() + 1,
   use_test_account = FALSE,
+  debug_lead_id = NULL,
   resume = FALSE,
   log_level = "INFO",
   log_file = NULL
@@ -51,6 +52,11 @@ Default: tomorrow (to include today's transcripts)}
 
 \item{use_test_account}{Logical. If TRUE, exports to test CRM account.
 Default: FALSE}
+
+\item{debug_lead_id}{Optional integer. CRM lead ID (external) where unmappable
+transcripts should be uploaded for debugging. The debug info (participant details,
+mapping failure reasons) is prepended to the transcript content. Transcripts
+remain marked as not_matchable_with_crm in the database. Default: NULL (disabled)}
 
 \item{resume}{Logical. If TRUE, resumes from last successful step.
 Default: FALSE}

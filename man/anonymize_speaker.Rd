@@ -4,17 +4,23 @@
 \alias{anonymize_speaker}
 \title{Anonymizes speaker tags like <v Max Müller> to SPEAKER/00001 in the NER column}
 \usage{
-anonymize_speaker(con, tokens)
+anonymize_speaker(con, tokens, all_participants = NULL, contacts = NULL)
 }
 \arguments{
 \item{con}{Database connection}
 
 \item{tokens}{A data frame with a column \code{token} and \code{NER}}
+
+\item{all_participants}{Optional data frame with call participants (id, email, name).
+External participants have name = NA.}
+
+\item{contacts}{Optional data frame of contacts (id, ms_name, email)}
 }
 \value{
 Updated tokens with speaker names anonymized in the NER column
 }
 \description{
-Anonymizes speaker tags like <v Max Müller> to SPEAKER/00001 in the NER column
+When a speaker tag contains a placeholder like "@ 1" and there is exactly one
+external participant in the call, the placeholder is resolved to that participant's name.
 }
 \keyword{internal}

@@ -4,7 +4,7 @@
 \alias{crm_update_protocols}
 \title{Update CRM Lead Protocols}
 \usage{
-crm_update_protocols(con, keys, is_daily, override_last_update = NULL)
+crm_update_protocols(con, keys, is_daily, override_last_update = NA)
 }
 \arguments{
 \item{con}{A DBI database connection.}

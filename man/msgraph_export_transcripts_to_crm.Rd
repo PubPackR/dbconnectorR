@@ -8,6 +8,7 @@ msgraph_export_transcripts_to_crm(
   con,
   crm_keys,
   use_test_account = FALSE,
+  debug_lead_id = NULL,
   logger = function(msg, level = "INFO") cat(msg, "\\n")
 )
 }
@@ -18,6 +19,10 @@ msgraph_export_transcripts_to_crm(
 
 \item{use_test_account}{Logical, whether to use test CRM account.
 Default: FALSE}
+
+\item{debug_lead_id}{Optional integer. CRM lead ID (external) where unmappable
+transcripts are uploaded with debug info prepended. They remain marked as
+not_matchable_with_crm and are NOT marked as exported. Default: NULL (disabled)}
 
 \item{logger}{Logger function for output messages}
 }

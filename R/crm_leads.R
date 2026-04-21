@@ -36,10 +36,14 @@ crm_update_leads <- function(con, crm_key, is_daily = TRUE, debug_mode = FALSE) 
       dplyr::collect()
     
     leads <- download_and_enrich_leads(last_update_tasks, tags_old, crm_key, daily_download = is_daily, debug_mode = debug_mode)
-    
+
+    # Ensure unknown CRM group_ids exist as stubs in raw.crm_groups; returns mapping
+    all_groups <- crm_update_groups(con, leads$main_table$group_id)
+
     # Upsert main table
     data <- leads$main_table %>%
-      resolve_user_ids(all_users, c("responsible_user_id", "created_by_user_id", "updated_by_user_id"))
+      resolve_user_ids(all_users, c("responsible_user_id", "created_by_user_id", "updated_by_user_id")) %>%
+      resolve_group_id(all_groups)
     upsert_delete_missing(con, "raw.crm_leads", data, match_cols = c("crm_lead_id"))
     all_leads <- dplyr::tbl(con, I("raw.crm_leads")) %>%
       dplyr::select("id", "crm_lead_id") %>%
@@ -340,7 +344,6 @@ download_and_enrich_leads <- function(last_update_tasks, tags_old, crm_key, dail
     dplyr::select(-tidyselect::where(is.list)) %>%
     dplyr::select(
       -account_id,
-      -group_id,
       -salutation_official,
       -salutation_formal,
       -salutation_informal,

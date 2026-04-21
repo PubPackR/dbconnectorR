@@ -24,7 +24,7 @@ process_transcript_placeholders(
 \item{scope}{Scope of processing}
 }
 \value{
-Updated tokens dataframe or NULL if internal call
+Updated tokens dataframe
 }
 \description{
 Processes transcript placeholders
