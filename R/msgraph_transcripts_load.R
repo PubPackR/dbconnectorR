@@ -715,7 +715,10 @@ get_latest_transcript_timestamp <- function(con) {
     return("2025-05-25T00:00:00Z")
   }
 
-  # Return beginning of the day
-  latest_date <- as.Date(as.POSIXct(latest, tz = "UTC"))
+  # Return beginning of the previous day so the load window spans the last two
+  # days. This gives placeholder rows from yesterday a chance to be re-evaluated
+  # against the now-up-to-date mapping. Re-scanning is cheap because every
+  # downstream step is idempotent (skips anything already processed/exported).
+  latest_date <- as.Date(as.POSIXct(latest, tz = "UTC")) - 1
   format(as.POSIXct(paste0(latest_date, " 00:00:00"), tz = "UTC"), "%Y-%m-%dT%H:%M:%SZ")
 }
