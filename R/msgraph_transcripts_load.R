@@ -123,12 +123,16 @@ get_and_save_transcript_data <- function(con,
          ") is earlier than start_date (", format(start_date, "%Y-%m-%dT%H:%M:%SZ"), ").")
   }
 
-  # Get existing transcript IDs (for deduplication)
+  # Get existing transcript IDs that already have content (for deduplication).
+  # Placeholder rows with NULL content are intentionally excluded so they get
+  # re-evaluated against an updated mapping on the next run (self-heals the
+  # race condition where a call was not yet classified as extern at first load).
   existing_transcript_ids <- tryCatch({
     dplyr::tbl(con, I("processed.msgraph_call_transcripts")) %>%
       dplyr::filter(
         transcript_created_at >= !!start_date,
-        !is.na(call_id)
+        !is.na(call_id),
+        !is.na(transcript_content)
       ) %>%
       dplyr::select(transcript_id) %>%
       dplyr::collect() %>%
@@ -138,7 +142,7 @@ get_and_save_transcript_data <- function(con,
     character(0)
   })
 
-  message("Found ", length(existing_transcript_ids), " existing transcript(s) with call_id in DB")
+  message("Found ", length(existing_transcript_ids), " existing transcript(s) with content in DB")
 
   # Format and URL-encode timestamps for API
   start_encoded <- utils::URLencode(format(start_date, "%Y-%m-%dT%H:%M:%SZ"), reserved = TRUE)
