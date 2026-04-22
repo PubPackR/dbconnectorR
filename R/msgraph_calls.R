@@ -423,8 +423,8 @@ update_call_participants <- function(con, call_meeting_record) {
       dplyr::distinct(callId, call_identity_mail) %>%
       dplyr::left_join(contacts %>% dplyr::select(email, id), by = c("call_identity_mail" = "email")) %>% dplyr::mutate(contact_id = id) %>% dplyr::select(-id, -call_identity_mail) %>%
       dplyr::left_join(calls %>% dplyr::select(msgraph_call_id, id), by = c("callId" = "msgraph_call_id")) %>% dplyr::mutate(call_id = id) %>% dplyr::select(-id, -callId) %>%
-      dplyr::filter(!is.na(contact_id) & contact_id != "") %>%
-      dplyr::filter(!is.na(call_id) & call_id != "") %>%
+      dplyr::filter(!is.na(contact_id)) %>%
+      dplyr::filter(!is.na(call_id)) %>%
       dplyr::distinct(contact_id, call_id, .keep_all = TRUE),
     match_cols = c("contact_id", "call_id")
   )

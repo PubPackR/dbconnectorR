@@ -5,7 +5,9 @@
 #' @param con A PostgreSQL database connection object.
 #' @param access_token MSGraph API access token.
 #' @param startDate Date from which to retrieve calendar events.
-#' @param user_id Optional. Specific user ID (intern ID) to filter calendar events.
+#' @param user_id Optional. Internal user ID(s) to filter calendar events. Accepts a
+#'   single value or a vector. If `NULL` (default), all internal, non-deleted users
+#'   from `raw.msgraph_users` are processed.
 #'
 #' @return No return value. Updates database tables with new calendar events and participants.
 #'
@@ -14,12 +16,13 @@
 #' @examples
 #' msgraph_update_events(con, access_token, startDate)
 #' msgraph_update_events(con, access_token, startDate, user_id = 23)
+#' msgraph_update_events(con, access_token, startDate, user_id = c(23, 47, 89))
 msgraph_update_events <- function(con, access_token, startDate, user_id = NULL) {
 
   all_users <- dplyr::tbl(con, I("raw.msgraph_users")) %>%
     dplyr::filter(is_internal & !is_deleted)
   if (!is.null(user_id)) {
-    all_users <- all_users %>% dplyr::filter(id == user_id)
+    all_users <- all_users %>% dplyr::filter(id %in% user_id)
   }
   all_users <- dplyr::collect(all_users %>% dplyr::mutate(id = msgraph_user_id))
 
@@ -249,8 +252,8 @@ update_event_participants <- function(con, msgraph_event_participants) {
       dplyr::distinct(event_id, attendees_emailAddress_address, is_organizer, event_start) %>%
       dplyr::left_join(contacts %>% dplyr::select(email, id), by = c("attendees_emailAddress_address" = "email")) %>% dplyr::mutate(contact_id = id) %>% dplyr::select(-id, -attendees_emailAddress_address) %>%
       dplyr::left_join(events %>% dplyr::select(msgraph_ical_uid, event_start, id), by = c("event_id" = "msgraph_ical_uid", "event_start")) %>% dplyr::mutate(event_id = id) %>% dplyr::select(-id) %>%
-      dplyr::filter(!is.na(contact_id) & contact_id != "") %>%
-      dplyr::filter(!is.na(event_id) & event_id != "") %>%
+      dplyr::filter(!is.na(contact_id)) %>%
+      dplyr::filter(!is.na(event_id)) %>%
       dplyr::distinct(contact_id, event_id, .keep_all = TRUE) %>%
       dplyr::select(-event_start)
 
