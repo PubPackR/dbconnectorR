@@ -6,6 +6,11 @@
 #' @param access_token MSGraph API access token.
 #' @param days_back Number of days to look back from today. If NULL (default),
 #'   uses the last update timestamp from the database.
+#' @param user_id Optional. Integer vector of internal user IDs
+#'   (raw.msgraph_users.id) to filter which calls are written to the database.
+#'   Calls are retrieved tenant-wide from the API and then reduced to those
+#'   where at least one participant matches one of the given users. If NULL
+#'   (default), all retrieved calls are written.
 #'
 #' @return No return value. Updates database tables with new call records and participants.
 #'
@@ -14,7 +19,8 @@
 #' @examples
 #' msgraph_update_calls(con, access_token)
 #' msgraph_update_calls(con, access_token, days_back = 30)
-msgraph_update_calls <- function(con, access_token, days_back = NULL) {
+#' msgraph_update_calls(con, access_token, user_id = c(23, 47, 89))
+msgraph_update_calls <- function(con, access_token, days_back = NULL, user_id = NULL) {
 
   old_calls_file <- dplyr::tbl(con, I("raw.msgraph_calls")) %>% dplyr::collect()
 
@@ -49,9 +55,32 @@ msgraph_update_calls <- function(con, access_token, days_back = NULL) {
     # ----- Get all participants of one Call -----
     call_meeting_record <- update_call_records_with_caller_data(access_token, call_records_df, organizer_data)
 
-    update_calls(con, call_meeting_record)
-    update_contacts_from_calls(con, call_meeting_record)
-    update_call_participants(con, call_meeting_record)
+    # Optional filter: keep only calls with at least one participant in user_id.
+    # user_id is an internal raw.msgraph_users.id vector; translate to the
+    # msgraph_user_id values used in call_identity_id.
+    if (!is.null(user_id)) {
+      target_msgraph_ids <- dplyr::tbl(con, I("raw.msgraph_users")) %>%
+        dplyr::filter(id %in% !!user_id) %>%
+        dplyr::pull(msgraph_user_id)
+
+      matching_call_ids <- call_meeting_record %>%
+        dplyr::filter(call_identity_id %in% target_msgraph_ids) %>%
+        dplyr::pull(callId) %>%
+        unique()
+
+      call_meeting_record <- call_meeting_record %>%
+        dplyr::filter(callId %in% matching_call_ids)
+
+      print(paste0(length(matching_call_ids), " calls kept after user_id filter"))
+    }
+
+    if (nrow(call_meeting_record) == 0) {
+      print("No calls to upsert after filtering.")
+    } else {
+      update_calls(con, call_meeting_record)
+      update_contacts_from_calls(con, call_meeting_record)
+      update_call_participants(con, call_meeting_record)
+    }
 
     }
   } else {
