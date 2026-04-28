@@ -659,7 +659,15 @@ get_content_transcript_url <- function(access_token, content_url) {
   )
 
   if (httr::http_status(response)$category != "Success") {
-    stop("Failed to fetch transcript content.")
+    body <- tryCatch(
+      httr::content(response, as = "text", encoding = "UTF-8"),
+      error = function(e) "<no body>"
+    )
+    stop(sprintf(
+      "Failed to fetch transcript content (HTTP %d): %s",
+      httr::status_code(response),
+      substr(body, 1, 300)
+    ))
   }
 
   content_text <- httr::content(response, as = "text", encoding = "UTF-8")
