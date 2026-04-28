@@ -309,7 +309,10 @@ download_and_enrich_protocols <- function(con, crm_key, last_update_attachments 
     main_table <- protocols_new %>%
       dplyr::mutate(protocol_created_at  = lubridate::ymd_hms(created_at,  tz = "CET"),
              protocol_updated_at  = lubridate::ymd_hms(updated_at,  tz = "CET"),
-             protocol_occurred_at = lubridate::ymd_hms(occurred_at, tz = "CET")) %>%
+             protocol_occurred_at = dplyr::coalesce(
+               lubridate::ymd_hms(occurred_at, tz = "CET"),
+               protocol_created_at
+             )) %>%
       dplyr::mutate(is_deleted = FALSE) %>%
       dplyr::select(
         crm_protocol_id = id,
