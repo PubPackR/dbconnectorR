@@ -307,8 +307,9 @@ download_and_enrich_protocols <- function(con, crm_key, last_update_attachments 
   if(nrow(protocols_new) > 0) {
 
     main_table <- protocols_new %>%
-      dplyr::mutate(protocol_created_at = lubridate::ymd_hms(created_at, tz = "CET"),
-             protocol_updated_at = lubridate::ymd_hms(updated_at, tz = "CET")) %>%
+      dplyr::mutate(protocol_created_at  = lubridate::ymd_hms(created_at,  tz = "CET"),
+             protocol_updated_at  = lubridate::ymd_hms(updated_at,  tz = "CET"),
+             protocol_occurred_at = lubridate::ymd_hms(occurred_at, tz = "CET")) %>%
       dplyr::mutate(is_deleted = FALSE) %>%
       dplyr::select(
         crm_protocol_id = id,
@@ -318,6 +319,7 @@ download_and_enrich_protocols <- function(con, crm_key, last_update_attachments 
         protocol_content = content,
         protocol_updated_at,
         protocol_created_at,
+        protocol_occurred_at,
         attachments_count,
         protocol_type = type,
         is_user_generated,
@@ -334,6 +336,7 @@ download_and_enrich_protocols <- function(con, crm_key, last_update_attachments 
       protocol_content = character(),
       protocol_updated_at = as.POSIXct(character()),
       protocol_created_at = as.POSIXct(character()),
+      protocol_occurred_at = as.POSIXct(character()),
       attachments_count = integer(),
       protocol_type = character(),
       is_user_generated = logical(),
@@ -612,22 +615,22 @@ expand_protocol_comment_attachments <- function(crm_api_key, offers_billomat, co
 import_new_protocols <- function(crm_key, leads_to_update) {
   
   column_names <- c(
-    "id", "user_id", "attachments_count", "comments_count", "name", "confidential", "format", "content", "updated_by_user_id", "created_at", "updated_at", "data_hash",
+    "id", "user_id", "attachments_count", "comments_count", "name", "confidential", "format", "content", "updated_by_user_id", "created_at", "updated_at", "occurred_at", "data_hash",
     "account_id", "type", "badge", "person_ids", "company_ids", "deal_ids", "project_ids", "person_id", "company_id", "comments", "protocol_attachment_id",
     "protocol_attachment_user_id", "protocol_attachment_attachments_count", "protocol_attachment_comments_count", "protocol_attachment_name",
     "protocol_attachment_confidential", "protocol_attachment_format", "protocol_attachment_content", "protocol_attachment_updated_by_user_id",
-    "protocol_attachment_created_at", "protocol_attachment_updated_at", "protocol_attachment_data_hash", "protocol_attachment_account_id",
+    "protocol_attachment_created_at", "protocol_attachment_updated_at", "protocol_attachment_occurred_at", "protocol_attachment_data_hash", "protocol_attachment_account_id",
     "protocol_attachment_type", "protocol_attachment_badge", "protocol_attachment_person_ids", "protocol_attachment_company_ids",
     "protocol_attachment_deal_ids", "protocol_attachment_project_ids", "protocol_attachment_person_id", "protocol_attachment_company_id",
     "protocol_attachment_comments", "protocol_email_id", "protocol_email_user_id", "protocol_email_attachments_count", "protocol_email_comments_count",
     "protocol_email_name", "protocol_email_confidential", "protocol_email_format", "protocol_email_content", "protocol_email_updated_by_user_id",
-    "protocol_email_created_at", "protocol_email_updated_at", "protocol_email_data_hash_from", "protocol_email_data_hash_to",
+    "protocol_email_created_at", "protocol_email_updated_at", "protocol_email_occurred_at", "protocol_email_data_hash_from", "protocol_email_data_hash_to",
     "protocol_email_data_hash_cc", "protocol_email_data_hash_bcc", "protocol_email_data_hash_subject", "protocol_email_data_hash_time",
     "protocol_email_data_hash_inbound_email_id", "protocol_email_data_hash_mail_part", "protocol_email_account_id", "protocol_email_type", "protocol_email_badge",
     "protocol_email_person_ids", "protocol_email_company_ids", "protocol_email_deal_ids", "protocol_email_project_ids", "protocol_email_person_id", "protocol_email_company_id",
     "protocol_email_comments", "protocol_user_note_id", "protocol_user_note_user_id", "protocol_user_note_attachments_count", "protocol_user_note_comments_count",
     "protocol_user_note_name", "protocol_user_note_confidential", "protocol_user_note_format", "protocol_user_note_content",
-    "protocol_user_note_updated_by_user_id", "protocol_user_note_created_at", "protocol_user_note_updated_at", "protocol_user_note_data_hash",
+    "protocol_user_note_updated_by_user_id", "protocol_user_note_created_at", "protocol_user_note_updated_at", "protocol_user_note_occurred_at", "protocol_user_note_data_hash",
     "protocol_user_note_account_id", "protocol_user_note_type", "protocol_user_note_badge", "protocol_user_note_person_ids",
     "protocol_user_note_company_ids", "protocol_user_note_deal_ids", "protocol_user_note_project_ids", "protocol_user_note_person_id",
     "protocol_user_note_company_id", "protocol_user_note_comments", "protocol_user_note", "user_generated"
@@ -779,17 +782,18 @@ simplify_protocols <- function(protocols) {
   
   notes <- protocols %>%
     dplyr::mutate(person_ids = purrr::map(person_ids, ~ as.integer(unlist(.x)))) %>%
-    tidyr::unnest(person_ids) %>% 
-    dplyr::select(id, user_id, person_ids, name, content, updated_at, attachments_count, created_at) %>% 
+    tidyr::unnest(person_ids) %>%
+    dplyr::select(id, user_id, person_ids, name, content, updated_at, attachments_count, created_at, occurred_at) %>%
     dplyr::mutate(id = as.character(id),
            created_at = as.character(created_at),
-           updated_at = as.character(updated_at)) %>% 
+           updated_at = as.character(updated_at),
+           occurred_at = as.character(occurred_at)) %>%
     dplyr::mutate(type = "note")
   
   protocol_attachments <- protocols %>%
     dplyr::mutate(protocol_attachment_person_ids = purrr::map(protocol_attachment_person_ids, ~ as.integer(unlist(.x)))) %>%
-    tidyr::unnest(protocol_attachment_person_ids) %>% 
-    dplyr::select(protocol_attachment_id, protocol_attachment_user_id, protocol_attachment_person_ids, protocol_attachment_content, protocol_attachment_name, protocol_attachment_updated_at, protocol_attachment_attachments_count, protocol_attachment_created_at) %>% 
+    tidyr::unnest(protocol_attachment_person_ids) %>%
+    dplyr::select(protocol_attachment_id, protocol_attachment_user_id, protocol_attachment_person_ids, protocol_attachment_content, protocol_attachment_name, protocol_attachment_updated_at, protocol_attachment_attachments_count, protocol_attachment_created_at, protocol_attachment_occurred_at) %>%
     dplyr::rename(id = protocol_attachment_id,
            user_id = protocol_attachment_user_id,
            person_ids = protocol_attachment_person_ids,
@@ -797,6 +801,7 @@ simplify_protocols <- function(protocols) {
            content = protocol_attachment_content,
            created_at = protocol_attachment_created_at,
            updated_at = protocol_attachment_updated_at,
+           occurred_at = protocol_attachment_occurred_at,
            attachments_count = protocol_attachment_attachments_count) %>%
     dplyr::mutate(type = "protocol_attachment",
                   id = as.character(id),
@@ -804,8 +809,8 @@ simplify_protocols <- function(protocols) {
   
   user_notes <- protocols %>%
     dplyr::mutate(protocol_user_note_person_ids = purrr::map(protocol_user_note_person_ids, ~ as.integer(unlist(.x)))) %>%
-    tidyr::unnest(protocol_user_note_person_ids) %>% 
-    dplyr::select(protocol_user_note_id, protocol_user_note_user_id, protocol_user_note_person_ids, protocol_user_note_content, protocol_user_note_name, protocol_user_note_updated_at, protocol_user_note_attachments_count, protocol_user_note_created_at) %>% 
+    tidyr::unnest(protocol_user_note_person_ids) %>%
+    dplyr::select(protocol_user_note_id, protocol_user_note_user_id, protocol_user_note_person_ids, protocol_user_note_content, protocol_user_note_name, protocol_user_note_updated_at, protocol_user_note_attachments_count, protocol_user_note_created_at, protocol_user_note_occurred_at) %>%
     dplyr::rename(id = protocol_user_note_id,
            user_id = protocol_user_note_user_id,
            person_ids = protocol_user_note_person_ids,
@@ -813,14 +818,15 @@ simplify_protocols <- function(protocols) {
            content = protocol_user_note_content,
            created_at = protocol_user_note_created_at,
            updated_at = protocol_user_note_updated_at,
+           occurred_at = protocol_user_note_occurred_at,
            attachments_count = protocol_user_note_attachments_count) %>%
     dplyr::mutate(type = "user_notes",
                   id = as.character(id))
     
   mails <- protocols %>%
     dplyr::mutate(protocol_email_person_ids = purrr::map(protocol_email_person_ids, ~ as.integer(unlist(.x)))) %>%
-    tidyr::unnest(protocol_email_person_ids) %>% 
-    dplyr::select(protocol_email_id, protocol_email_user_id, protocol_email_person_ids, protocol_email_name, protocol_email_content, protocol_email_updated_at, protocol_email_attachments_count, protocol_email_created_at) %>% 
+    tidyr::unnest(protocol_email_person_ids) %>%
+    dplyr::select(protocol_email_id, protocol_email_user_id, protocol_email_person_ids, protocol_email_name, protocol_email_content, protocol_email_updated_at, protocol_email_attachments_count, protocol_email_created_at, protocol_email_occurred_at) %>%
     dplyr::rename(id = protocol_email_id,
            user_id = protocol_email_user_id,
            person_ids = protocol_email_person_ids,
@@ -828,7 +834,8 @@ simplify_protocols <- function(protocols) {
            content = protocol_email_content,
            created_at = protocol_email_created_at,
            updated_at = protocol_email_updated_at,
-           attachments_count = protocol_email_attachments_count) %>% 
+           occurred_at = protocol_email_occurred_at,
+           attachments_count = protocol_email_attachments_count) %>%
     dplyr::mutate(id = as.character(id)) %>%
     dplyr::mutate(type = "email")
   
