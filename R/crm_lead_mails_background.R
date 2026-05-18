@@ -249,16 +249,21 @@ crm_update_lead_mails_background <- function(con) {
     dplyr::group_by(crm_lead_id) %>%
     dplyr::mutate(
       lead_has_office = any(email_source_crm %in% c("office")),
-      lead_has_office_hq = any(email_source_crm %in% c("office_hq"))
+      lead_has_office_hq = any(email_source_crm %in% c("office_hq")),
+      lead_has_other_private = any(email_source_crm %in% c("other", "private"))
     ) %>%
     dplyr::ungroup() %>%
     dplyr::mutate(
       is_primary = dplyr::case_when(
         email_source_crm == "office" ~ TRUE,
         email_source_crm == "office_hq" & !lead_has_office ~ TRUE,
-        email_source_crm == "from_description" &
+        email_source_crm %in% c("other", "private") &
           !lead_has_office &
           !lead_has_office_hq ~ TRUE,
+        email_source_crm == "from_description" &
+          !lead_has_office &
+          !lead_has_office_hq &
+          !lead_has_other_private ~ TRUE,
         TRUE ~ FALSE
       )
     )
@@ -332,12 +337,17 @@ crm_update_lead_mails_background <- function(con) {
     dplyr::group_by(mail_address_name) %>%
     dplyr::mutate(
       has_office_full_mail = any(email_source_crm %in% c("office")),
-      has_office_hq_full_mail = any(email_source_crm %in% c("office_hq"))
+      has_office_hq_full_mail = any(email_source_crm %in% c("office_hq")),
+      has_other_private_full_mail = any(email_source_crm %in% c("other", "private"))
     ) %>%
     dplyr::ungroup() %>%
     dplyr::filter(!(has_office_full_mail & email_source_crm != "office")) %>%
     dplyr::filter(
-      !(has_office_hq_full_mail & email_source_crm == "from_description")
+      !(has_office_hq_full_mail &
+          email_source_crm %in% c("from_description", "other", "private"))
+    ) %>%
+    dplyr::filter(
+      !(has_other_private_full_mail & email_source_crm == "from_description")
     )
 
   all_mails_office <- all_mails_compact %>%
@@ -365,8 +375,12 @@ crm_update_lead_mails_background <- function(con) {
     dplyr::mutate(has_office_hq = if_else(has_office, FALSE, TRUE)) %>%
     dplyr::mutate(matched_through_compact_mail = has_office)
 
-  all_mails_description <- all_mails_compact %>%
-    dplyr::filter(email_source_crm == "from_description") %>%
+  # New tier: "other" / "private" CRM mail types — between office_hq and
+  # from_description. Same upgrade mechanic: if a compact-equivalent mail exists
+  # as office or office_hq on another lead, re-point this row's crm_lead_id to
+  # that lead and upgrade email_source_crm accordingly.
+  all_mails_other_private <- all_mails_compact %>%
+    dplyr::filter(email_source_crm %in% c("other", "private")) %>%
     dplyr::left_join(
       all_mails_office %>%
         dplyr::select(
@@ -396,22 +410,89 @@ crm_update_lead_mails_background <- function(con) {
     ) %>%
     dplyr::mutate(
       crm_lead_id = if_else(
-        is.na(has_office) & has_office_hq,
+        !has_office & has_office_hq,
         lead_id_overwrite_hq,
         crm_lead_id
       )
     ) %>%
     dplyr::mutate(
       email_source_crm = if_else(
-        is.na(has_office) & has_office_hq,
+        !has_office & has_office_hq,
         "office_hq",
         email_source_crm
       )
     ) %>%
     dplyr::mutate(matched_through_compact_mail = has_office | has_office_hq)
 
+  all_mails_description <- all_mails_compact %>%
+    dplyr::filter(email_source_crm == "from_description") %>%
+    dplyr::left_join(
+      all_mails_office %>%
+        dplyr::select(
+          has_office,
+          compact_mail,
+          lead_id_overwrite = crm_lead_id
+        ),
+      by = "compact_mail"
+    ) %>%
+    dplyr::mutate(has_office = dplyr::coalesce(has_office, FALSE)) %>%
+    dplyr::left_join(
+      all_mails_office_hq %>%
+        dplyr::filter(has_office_hq) %>%
+        dplyr::select(
+          has_office_hq,
+          compact_mail,
+          lead_id_overwrite_hq = crm_lead_id
+        ),
+      by = "compact_mail"
+    ) %>%
+    dplyr::mutate(has_office_hq = dplyr::coalesce(has_office_hq, FALSE)) %>%
+    dplyr::left_join(
+      all_mails_other_private %>%
+        dplyr::filter(!matched_through_compact_mail) %>%
+        dplyr::select(
+          compact_mail,
+          lead_id_overwrite_other = crm_lead_id
+        ) %>%
+        dplyr::mutate(has_other_private = TRUE) %>%
+        dplyr::distinct(compact_mail, lead_id_overwrite_other, has_other_private),
+      by = "compact_mail"
+    ) %>%
+    dplyr::mutate(has_other_private = dplyr::coalesce(has_other_private, FALSE)) %>%
+    dplyr::mutate(
+      crm_lead_id = if_else(has_office, lead_id_overwrite, crm_lead_id)
+    ) %>%
+    dplyr::mutate(
+      email_source_crm = if_else(has_office, "office", email_source_crm)
+    ) %>%
+    dplyr::mutate(
+      crm_lead_id = if_else(
+        !has_office & has_office_hq,
+        lead_id_overwrite_hq,
+        crm_lead_id
+      )
+    ) %>%
+    dplyr::mutate(
+      email_source_crm = if_else(
+        !has_office & has_office_hq,
+        "office_hq",
+        email_source_crm
+      )
+    ) %>%
+    dplyr::mutate(
+      crm_lead_id = if_else(
+        !has_office & !has_office_hq & has_other_private,
+        lead_id_overwrite_other,
+        crm_lead_id
+      )
+    ) %>%
+    dplyr::mutate(
+      matched_through_compact_mail = has_office | has_office_hq | has_other_private
+    )
+
   all_mails <- all_mails_office %>%
     dplyr::bind_rows(all_mails_office_hq) %>%
+    dplyr::bind_rows(all_mails_other_private) %>%
     dplyr::bind_rows(all_mails_description) %>%
     dplyr::mutate(
       matched_through_compact_mail = dplyr::coalesce(
@@ -422,10 +503,13 @@ crm_update_lead_mails_background <- function(con) {
     dplyr::select(
       -lead_id_overwrite,
       -lead_id_overwrite_hq,
+      -dplyr::any_of("lead_id_overwrite_other"),
       -has_office,
       -has_office_hq,
+      -dplyr::any_of("has_other_private"),
       -has_office_full_mail,
       -has_office_hq_full_mail,
+      -dplyr::any_of("has_other_private_full_mail"),
       -lead_first_name,
       -lead_name,
       -salutation

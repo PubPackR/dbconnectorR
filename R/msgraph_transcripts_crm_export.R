@@ -341,10 +341,13 @@ map_transcripts_to_crm_entities <- function(con, transcript_summaries) {
     ) %>%
     dplyr::filter(!is.na(attachable_id)) %>%
     # Remove duplicates (one protocol per call), prioritizing by email source type
-    # Priority: office > office_hq > from_description
+    # Priority: office > office_hq > other / private > from_description
     dplyr::group_by(call_id) %>%
     dplyr::arrange(
-      factor(email_source_crm, levels = c("office", "office_hq", "from_description")),
+      factor(
+        email_source_crm,
+        levels = c("office", "office_hq", "other", "private", "from_description")
+      ),
       .by_group = TRUE
     ) %>%
     dplyr::slice_head(n = 1) %>%
