@@ -4,7 +4,7 @@
 \alias{msgraph_update_calls}
 \title{Retrieve Call Records from MSGraph and Update Database}
 \usage{
-msgraph_update_calls(con, access_token, days_back = NULL)
+msgraph_update_calls(con, access_token, days_back = NULL, user_id = NULL)
 }
 \arguments{
 \item{con}{A PostgreSQL database connection object.}
@@ -13,6 +13,12 @@ msgraph_update_calls(con, access_token, days_back = NULL)
 
 \item{days_back}{Number of days to look back from today. If NULL (default),
 uses the last update timestamp from the database.}
+
+\item{user_id}{Optional. Integer vector of internal user IDs
+(raw.msgraph_users.id) to filter which calls are written to the database.
+Calls are retrieved tenant-wide from the API and then reduced to those
+where at least one participant matches one of the given users. If NULL
+(default), all retrieved calls are written.}
 }
 \value{
 No return value. Updates database tables with new call records and participants.
@@ -23,4 +29,5 @@ Retrieves new call records from MSGraph since the last update, processes them, a
 \examples{
 msgraph_update_calls(con, access_token)
 msgraph_update_calls(con, access_token, days_back = 30)
+msgraph_update_calls(con, access_token, user_id = c(23, 47, 89))
 }

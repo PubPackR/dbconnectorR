@@ -8,7 +8,7 @@ msgraph_update_mails(
   con,
   msgraph_keys,
   start_date = NULL,
-  user_filter = NULL,
+  user_id = NULL,
   max_retries = 3
 )
 }
@@ -30,8 +30,9 @@ construct this list manually with all three elements.
 If NULL, automatically determined from last update in database.
 Format: Date object or character string in format "YYYY-MM-DD"}
 
-\item{user_filter}{Optional. Character vector of user IDs to process.
-If NULL, all internal non-deleted users are processed.}
+\item{user_id}{Optional. Integer vector of internal user IDs
+(raw.msgraph_users.id) to process. If NULL, all internal non-deleted
+users are processed.}
 
 \item{max_retries}{Integer. Maximum number of retry attempts for users
 with empty results. Default: 3. Set to 1 to disable retries.}
@@ -76,7 +77,7 @@ msgraph_update_mails(
   start_date = "2025-01-01"
 )
 
-# Process specific users only
+# Process specific users only (internal IDs from raw.msgraph_users.id)
 msgraph_update_mails(
   con,
   msgraph_keys = list(
@@ -84,7 +85,7 @@ msgraph_update_mails(
     client_id = "your-client-id",
     client_secret = keys$msgraph
   ),
-  user_filter = c("user-id-1", "user-id-2")
+  user_id = c(23, 47, 89)
 )
 }
 
