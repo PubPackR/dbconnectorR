@@ -577,3 +577,73 @@ appointments_to_event_dataframes <- function(appointments, staff_lookup, existin
   list(events = events_df, participants = parts)
 }
 
+#' Retrieve and Update Booking Appointments From MSGraph
+#'
+#' Retrieves Microsoft Bookings appointments for all booking businesses in the
+#' tenant, converts them to the same shape as regular calendar events, and
+#' writes them through the existing `update_events()`,
+#' `update_contacts_from_events()`, and `update_event_participants()` pipeline.
+#'
+#' Externe Kunden (`customers` in der Bookings-API) erscheinen damit in
+#' `raw.msgraph_event_participants` — was über die `calendarView`-API nicht
+#' möglich ist, weil Kunden dort nicht im `attendees`-Feld stehen.
+#'
+#' Match zu bestehenden Calendar-Events erfolgt über die Teams-`meeting_id`;
+#' wenn kein Match → neue Event-Row mit `msgraph_ical_uid = "booking:<id>"`.
+#'
+#' @param con A PostgreSQL database connection object.
+#' @param access_token MSGraph API access token.
+#' @param startDate Date from which to retrieve appointments.
+#'
+#' @return No return value. Updates database tables.
+#' @export
+#'
+#' @examples
+#' msgraph_update_booking_appointments(con, access_token, startDate)
+msgraph_update_booking_appointments <- function(con, access_token, startDate) {
+  # ---- start ---- #
+
+  # 1. List businesses
+  biz_resp <- fetch_with_retry(
+    "https://graph.microsoft.com/v1.0/solutions/bookingBusinesses",
+    access_token, max_retries = 3, delay = 2
+  )
+  biz_ids <- vapply(biz_resp$value %||% list(), function(b) b$id, character(1))
+  if (length(biz_ids) == 0) {
+    print("No booking businesses accessible.")
+    return(invisible(NULL))
+  }
+  print(paste0("Booking businesses: ", paste(biz_ids, collapse = ", ")))
+
+  # 2. Staff lookup
+  staff_lookup <- build_staff_lookup(con, access_token, biz_ids)
+  print(paste0("Staff lookup rows: ", nrow(staff_lookup),
+               " (", sum(is.na(staff_lookup$msgraph_user_id)), " ohne user-match)"))
+
+  # 3. Existing events (für meeting_id-Match)
+  existing_events <- dplyr::tbl(con, I("raw.msgraph_events")) %>% dplyr::collect()
+
+  # 4. Pro Business Appointments holen und konvertieren
+  all_events_df <- NULL
+  all_parts_df  <- NULL
+  for (b in biz_ids) {
+    appts <- retrieve_booking_appointments(access_token, b, startDate)
+    print(paste0("  ", b, ": ", length(appts), " appointments"))
+    if (length(appts) == 0) next
+    out <- appointments_to_event_dataframes(appts, staff_lookup, existing_events)
+    all_events_df <- dplyr::bind_rows(all_events_df, out$events)
+    all_parts_df  <- dplyr::bind_rows(all_parts_df,  out$participants)
+  }
+
+  if (is.null(all_events_df) || nrow(all_events_df) == 0) {
+    print("No booking appointments to process.")
+    return(invisible(NULL))
+  }
+
+  update_events(con, all_events_df, startDate)
+  update_contacts_from_events(con, all_parts_df)
+  update_event_participants(con, all_parts_df)
+
+  invisible(NULL)
+}
+
