@@ -319,3 +319,42 @@ retrieve_calendar_events <- function(access_token, user, startDate) {
 
   return(all_call_records)
 }
+
+#' Retrieve Booking Appointments for a Business
+#'
+#' Fetches all appointments of a single Microsoft Bookings business from a given
+#' start date until today + 365 days, following @odata.nextLink pagination.
+#'
+#' @param access_token MSGraph API access token.
+#' @param biz_id Booking business identifier (e.g. "Studyflix@studyf.onmicrosoft.com").
+#' @param startDate Date object — earliest appointment start date to include.
+#' @return List of raw appointment objects from the API.
+#' @keywords internal
+retrieve_booking_appointments <- function(access_token, biz_id, startDate) {
+  # ---- start ---- #
+  endDate <- lubridate::today() + 365
+
+  url <- paste0(
+    "https://graph.microsoft.com/v1.0/solutions/bookingBusinesses/",
+    utils::URLencode(biz_id, reserved = TRUE),
+    "/appointments",
+    "?$filter=start/dateTime ge '", startDate, "T00:00:00Z'",
+    " and start/dateTime le '", endDate, "T23:59:59Z'",
+    "&$top=400"
+  )
+
+  all_appointments <- list()
+  repeat {
+    page <- fetch_with_retry(url, access_token, max_retries = 3, delay = 2)
+    if (!is.null(page$value)) {
+      all_appointments <- c(all_appointments, page$value)
+    }
+    if (!is.null(page$`@odata.nextLink`)) {
+      url <- page$`@odata.nextLink`
+    } else {
+      break
+    }
+  }
+
+  return(all_appointments)
+}
