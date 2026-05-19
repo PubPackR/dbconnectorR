@@ -13,7 +13,9 @@ msgraph_update_events(con, access_token, startDate, user_id = NULL)
 
 \item{startDate}{Date from which to retrieve calendar events.}
 
-\item{user_id}{Optional. Specific user ID (intern ID) to filter calendar events.}
+\item{user_id}{Optional. Internal user ID(s) to filter calendar events. Accepts a
+single value or a vector. If \code{NULL} (default), all internal, non-deleted users
+from \code{raw.msgraph_users} are processed.}
 }
 \value{
 No return value. Updates database tables with new calendar events and participants.
@@ -24,4 +26,5 @@ Retrieves calendar events for users from MSGraph since a given start date, proce
 \examples{
 msgraph_update_events(con, access_token, startDate)
 msgraph_update_events(con, access_token, startDate, user_id = 23)
+msgraph_update_events(con, access_token, startDate, user_id = c(23, 47, 89))
 }
