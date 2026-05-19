@@ -424,3 +424,156 @@ build_staff_lookup <- function(con, access_token, biz_ids) {
 
   dplyr::left_join(staff_all, users, by = c("staff_email" = "email"))
 }
+
+#' Convert Booking Appointments to Event + Participant Data Frames
+#'
+#' Maps raw booking appointments to the same dataframe shape that
+#' `msgraph_update_events()` produces, so that the downstream
+#' `update_events()` / `update_contacts_from_events()` /
+#' `update_event_participants()` functions can be reused as-is.
+#'
+#' Matching of an appointment to an existing calendar-event row happens via the
+#' Teams meeting_id extracted from `joinWebUrl`. If a match is found the
+#' existing `msgraph_ical_uid` + `event_start` are reused and the appointment
+#' only enriches the participants. If no match exists a new event row is
+#' created with `msgraph_ical_uid = paste0("booking:", appointment$id)`.
+#'
+#' Customers without an email address get a synthetic address
+#' `<bookingId>-<idx>@external.guest`, analog to the guest-handling in
+#' `msgraph_calls.R`.
+#'
+#' `update_events()` calls `dplyr::select(-attendees, -organizer)` on its
+#' input, so placeholder `NA` columns are added to keep the shape compatible.
+#'
+#' @param appointments List of raw appointment objects (from `retrieve_booking_appointments`).
+#' @param staff_lookup Data frame produced by `build_staff_lookup()`.
+#' @param existing_events Data frame from `dplyr::collect(dplyr::tbl(con, I("raw.msgraph_events")))`.
+#' @return Named list with two data frames: `events` (shape of `all_calendar_events_`) and `participants` (shape of `msgraph_event_participants`).
+#' @keywords internal
+appointments_to_event_dataframes <- function(appointments, staff_lookup, existing_events) {
+  # ---- start ---- #
+  if (length(appointments) == 0) {
+    return(list(events = NULL, participants = NULL))
+  }
+
+  # ---- one-row-per-appointment frame with everything we need ----
+  appt_df <- do.call(rbind, lapply(seq_along(appointments), function(i) {
+    a <- appointments[[i]]
+    join_url <- a$joinWebUrl %||% a$onlineMeetingUrl %||% NA_character_
+    meeting_id <- if (!is.na(join_url)) extract_meeting_id(join_url) else NA_character_
+    data.frame(
+      appt_idx       = i,
+      appt_id        = a$id %||% NA_character_,
+      service_name   = a$serviceName %||% NA_character_,
+      start_dt       = a$start$dateTime %||% NA_character_,
+      end_dt         = a$end$dateTime %||% NA_character_,
+      join_url       = join_url,
+      meeting_id     = meeting_id,
+      stringsAsFactors = FALSE
+    )
+  }))
+
+  # ---- match against existing events via meeting_id ----
+  existing_lookup <- existing_events %>%
+    dplyr::filter(!is.na(meeting_id) & meeting_id != "") %>%
+    dplyr::distinct(meeting_id, msgraph_ical_uid, event_start)
+
+  appt_df <- appt_df %>%
+    dplyr::left_join(existing_lookup, by = "meeting_id") %>%
+    dplyr::mutate(
+      msgraph_ical_uid = ifelse(
+        is.na(msgraph_ical_uid),
+        paste0("booking:", appt_id),
+        msgraph_ical_uid
+      ),
+      event_start_dt = ifelse(
+        is.na(event_start),
+        start_dt,
+        as.character(event_start)
+      )
+    )
+
+  # ---- events dataframe (shape of all_calendar_events_) ----
+  # Placeholder columns attendees/organizer/id are required because
+  # update_events() calls select(-attendees, -organizer) and mutate(id = as.character(id)).
+  events_df <- data.frame(
+    id                   = NA_character_,          # placeholder; update_events drops this via select()
+    iCalUId              = appt_df$msgraph_ical_uid,
+    createdDateTime      = appt_df$start_dt,       # Bookings has no createdDateTime; reuse start
+    lastModifiedDateTime = appt_df$start_dt,
+    subject              = appt_df$service_name,   # fallback; existing subjects preserved via slice_max(event_updated_at)
+    type                 = "singleInstance",
+    isOnlineMeeting      = !is.na(appt_df$meeting_id),
+    onlineMeeting_joinUrl = appt_df$join_url,
+    start_dateTime       = appt_df$event_start_dt,
+    end_dateTime         = appt_df$end_dt,
+    isCancelled          = FALSE,
+    is_canceled          = FALSE,
+    isOrganizer          = TRUE,
+    attendees            = NA,                     # placeholder; dropped by update_events()
+    organizer            = NA,                     # placeholder; dropped by update_events()
+    user_id              = NA_character_,          # filled below
+    stringsAsFactors = FALSE
+  )
+
+  # primary staff -> user_id
+  primary_user <- vapply(seq_along(appointments), function(i) {
+    a <- appointments[[i]]
+    sids <- a$staffMemberIds %||% character(0)
+    if (length(sids) == 0) return(NA_character_)
+    hit <- staff_lookup %>% dplyr::filter(staff_id == sids[[1]])
+    if (nrow(hit) == 0 || is.na(hit$msgraph_user_id[1])) NA_character_ else hit$msgraph_user_id[1]
+  }, character(1))
+  events_df$user_id <- primary_user
+
+  # ---- participants dataframe (shape of msgraph_event_participants) ----
+  parts <- do.call(rbind, lapply(seq_along(appointments), function(i) {
+    a <- appointments[[i]]
+    ical <- appt_df$msgraph_ical_uid[i]
+    ev_start <- appt_df$event_start_dt[i]
+
+    # Customers
+    custs <- a$customers %||% list()
+    cust_rows <- if (length(custs) == 0) NULL else do.call(rbind, lapply(seq_along(custs), function(j) {
+      cust <- custs[[j]]
+      email_raw <- cust$emailAddress %||% NA_character_
+      email <- if (is.null(email_raw) || is.na(email_raw) || email_raw == "") {
+        paste0(a$id, "-", j, "@external.guest")
+      } else {
+        tolower(email_raw)
+      }
+      data.frame(
+        event_id                       = ical,
+        event_start                    = ev_start,
+        attendees_emailAddress_name    = cust$name %||% NA_character_,
+        attendees_emailAddress_address = email,
+        is_organizer                   = FALSE,
+        stringsAsFactors = FALSE
+      )
+    }))
+
+    # Staff (all as organizers, analog to msgraph_event_organizers in msgraph_update_events)
+    sids <- a$staffMemberIds %||% character(0)
+    staff_rows <- if (length(sids) == 0) NULL else do.call(rbind, lapply(sids, function(sid) {
+      hit <- staff_lookup %>% dplyr::filter(staff_id == sid)
+      if (nrow(hit) == 0 || is.na(hit$staff_email[1])) return(NULL)
+      data.frame(
+        event_id                       = ical,
+        event_start                    = ev_start,
+        attendees_emailAddress_name    = hit$staff_name[1] %||% NA_character_,
+        attendees_emailAddress_address = tolower(hit$staff_email[1]),
+        is_organizer                   = TRUE,
+        stringsAsFactors = FALSE
+      )
+    }))
+
+    rbind(cust_rows, staff_rows)
+  }))
+
+  # Convert event_start to POSIXct for downstream consistency
+  parts$event_start <- lubridate::ymd_hms(parts$event_start)
+  events_df$start_dateTime <- as.character(events_df$start_dateTime)
+
+  list(events = events_df, participants = parts)
+}
+
