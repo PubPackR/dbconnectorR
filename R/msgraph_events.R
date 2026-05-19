@@ -484,9 +484,14 @@ appointments_to_event_dataframes <- function(appointments, staff_lookup, existin
   }))
 
   # ---- match against existing events via meeting_id ----
+  # Carry subject/created/updated through the join so matched events keep
+  # their original calendarView-derived subject (which is descriptive, e.g.
+  # "Booking: Studyflix Beratungsgespräch - Foo Bar") instead of being
+  # overwritten with the generic Bookings serviceName ("Beratungsgespräch").
   existing_lookup <- existing_events %>%
     dplyr::filter(!is.na(meeting_id) & meeting_id != "") %>%
-    dplyr::distinct(meeting_id, msgraph_ical_uid, event_start) %>%
+    dplyr::distinct(meeting_id, msgraph_ical_uid, event_start,
+                    subject, event_created_at, event_updated_at) %>%
     dplyr::group_by(meeting_id) %>%
     dplyr::slice_max(event_start, n = 1, with_ties = FALSE) %>%
     dplyr::ungroup()
@@ -503,7 +508,11 @@ appointments_to_event_dataframes <- function(appointments, staff_lookup, existin
         is.na(event_start),
         start_dt,
         as.character(event_start)
-      )
+      ),
+      # Prefer existing event metadata when matched; fall back to Bookings data
+      subject_final = ifelse(is.na(subject), service_name, subject),
+      created_final = ifelse(is.na(event_created_at), start_dt, as.character(event_created_at)),
+      updated_final = ifelse(is.na(event_updated_at), start_dt, as.character(event_updated_at))
     )
 
   # ---- events dataframe (shape of all_calendar_events_) ----
@@ -512,9 +521,9 @@ appointments_to_event_dataframes <- function(appointments, staff_lookup, existin
   events_df <- data.frame(
     id                   = NA_character_,          # placeholder; update_events drops this via select()
     iCalUId              = appt_df$msgraph_ical_uid,
-    createdDateTime      = appt_df$start_dt,       # Bookings has no createdDateTime; reuse start
-    lastModifiedDateTime = appt_df$start_dt,
-    subject              = appt_df$service_name,   # fallback; existing subjects preserved via slice_max(event_updated_at)
+    createdDateTime      = appt_df$created_final,  # matched: existing event_created_at, fallback: start
+    lastModifiedDateTime = appt_df$updated_final,  # matched: existing event_updated_at, fallback: start
+    subject              = appt_df$subject_final,  # matched: existing subject, fallback: serviceName
     type                 = "singleInstance",
     isOnlineMeeting      = !is.na(appt_df$meeting_id),
     onlineMeeting_joinUrl = appt_df$join_url,
