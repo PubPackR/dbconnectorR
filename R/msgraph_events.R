@@ -337,13 +337,13 @@ retrieve_booking_appointments <- function(access_token, biz_id, startDate) {
   url <- paste0(
     "https://graph.microsoft.com/v1.0/solutions/bookingBusinesses/",
     utils::URLencode(biz_id, reserved = TRUE),
-    "/appointments"
+    "/calendarView"
   )
 
   query_params <- list(
-    "$filter" = paste0("start/dateTime ge '", startDate, "T00:00:00Z'",
-                       " and start/dateTime le '", endDate, "T23:59:59Z'"),
-    "$top"    = 400
+    start  = paste0(startDate, "T00:00:00Z"),
+    end    = paste0(endDate,   "T23:59:59Z"),
+    `$top` = 400
   )
 
   all_appointments <- list()
