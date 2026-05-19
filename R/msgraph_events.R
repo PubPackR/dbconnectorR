@@ -358,3 +358,37 @@ retrieve_booking_appointments <- function(access_token, biz_id, startDate) {
 
   return(all_appointments)
 }
+
+
+#' Retrieve Staff Members of a Booking Business
+#'
+#' Fetches the staffMembers collection of a Microsoft Bookings business.
+#'
+#' @param access_token MSGraph API access token.
+#' @param biz_id Booking business identifier.
+#' @return Data frame with columns `biz_id`, `staff_id`, `staff_email`, `staff_name`.
+#' @keywords internal
+retrieve_booking_staff <- function(access_token, biz_id) {
+  # ---- start ---- #
+  url <- paste0(
+    "https://graph.microsoft.com/v1.0/solutions/bookingBusinesses/",
+    utils::URLencode(biz_id, reserved = TRUE), "/staffMembers"
+  )
+  resp <- fetch_with_retry(url, access_token, max_retries = 3, delay = 2)
+  if (is.null(resp$value) || length(resp$value) == 0) {
+    return(data.frame(
+      biz_id      = character(0),
+      staff_id    = character(0),
+      staff_email = character(0),
+      staff_name  = character(0),
+      stringsAsFactors = FALSE
+    ))
+  }
+  data.frame(
+    biz_id      = biz_id,
+    staff_id    = vapply(resp$value, function(s) s$id %||% NA_character_, character(1)),
+    staff_email = tolower(vapply(resp$value, function(s) s$emailAddress %||% NA_character_, character(1))),
+    staff_name  = vapply(resp$value, function(s) s$displayName %||% NA_character_, character(1)),
+    stringsAsFactors = FALSE
+  )
+}
