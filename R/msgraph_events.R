@@ -392,3 +392,35 @@ retrieve_booking_staff <- function(access_token, biz_id) {
     stringsAsFactors = FALSE
   )
 }
+
+#' Build a Lookup From Booking Staff to Internal User IDs
+#'
+#' For all given booking businesses, fetches their staff members and joins them
+#' against `raw.msgraph_users` by email to resolve each `staff_id` to the
+#' canonical `msgraph_user_id` of an internal user. Booking-businesses whose
+#' Staff lists overlap (a user is staff in multiple businesses) are kept as
+#' separate rows.
+#'
+#' @param con A PostgreSQL database connection object.
+#' @param access_token MSGraph API access token.
+#' @param biz_ids Character vector of booking business identifiers.
+#' @return Data frame with columns `biz_id`, `staff_id`, `staff_email`, `staff_name`, `msgraph_user_id`.
+#' @keywords internal
+build_staff_lookup <- function(con, access_token, biz_ids) {
+  # ---- start ---- #
+  staff_all <- do.call(
+    rbind,
+    lapply(biz_ids, function(b) retrieve_booking_staff(access_token, b))
+  )
+
+  if (nrow(staff_all) == 0) {
+    return(cbind(staff_all, msgraph_user_id = character(0)))
+  }
+
+  users <- dplyr::tbl(con, I("raw.msgraph_users")) %>%
+    dplyr::select(msgraph_user_id, email) %>%
+    dplyr::collect() %>%
+    dplyr::mutate(email = tolower(email))
+
+  dplyr::left_join(staff_all, users, by = c("staff_email" = "email"))
+}
