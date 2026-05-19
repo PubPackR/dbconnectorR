@@ -469,6 +469,7 @@ appointments_to_event_dataframes <- function(appointments, staff_lookup, existin
       end_dt         = a$end$dateTime %||% NA_character_,
       join_url       = join_url,
       meeting_id     = meeting_id,
+      status         = a$status %||% NA_character_,
       stringsAsFactors = FALSE
     )
   }))
@@ -476,7 +477,10 @@ appointments_to_event_dataframes <- function(appointments, staff_lookup, existin
   # ---- match against existing events via meeting_id ----
   existing_lookup <- existing_events %>%
     dplyr::filter(!is.na(meeting_id) & meeting_id != "") %>%
-    dplyr::distinct(meeting_id, msgraph_ical_uid, event_start)
+    dplyr::distinct(meeting_id, msgraph_ical_uid, event_start) %>%
+    dplyr::group_by(meeting_id) %>%
+    dplyr::slice_max(event_start, n = 1, with_ties = FALSE) %>%
+    dplyr::ungroup()
 
   appt_df <- appt_df %>%
     dplyr::left_join(existing_lookup, by = "meeting_id") %>%
@@ -507,8 +511,8 @@ appointments_to_event_dataframes <- function(appointments, staff_lookup, existin
     onlineMeeting_joinUrl = appt_df$join_url,
     start_dateTime       = appt_df$event_start_dt,
     end_dateTime         = appt_df$end_dt,
-    isCancelled          = FALSE,
-    is_canceled          = FALSE,
+    isCancelled          = vapply(appt_df$status, function(s) isTRUE(s %in% c("cancelled", "noShow")), logical(1)),
+    is_canceled          = vapply(appt_df$status, function(s) isTRUE(s %in% c("cancelled", "noShow")), logical(1)),
     isOrganizer          = TRUE,
     attendees            = NA,                     # placeholder; dropped by update_events()
     organizer            = NA,                     # placeholder; dropped by update_events()
@@ -641,8 +645,11 @@ msgraph_update_booking_appointments <- function(con, access_token, startDate) {
   }
 
   update_events(con, all_events_df, startDate)
-  update_contacts_from_events(con, all_parts_df)
-  update_event_participants(con, all_parts_df)
+
+  if (!is.null(all_parts_df) && nrow(all_parts_df) > 0) {
+    update_contacts_from_events(con, all_parts_df)
+    update_event_participants(con, all_parts_df)
+  }
 
   invisible(NULL)
 }
