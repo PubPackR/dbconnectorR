@@ -337,20 +337,29 @@ retrieve_booking_appointments <- function(access_token, biz_id, startDate) {
   url <- paste0(
     "https://graph.microsoft.com/v1.0/solutions/bookingBusinesses/",
     utils::URLencode(biz_id, reserved = TRUE),
-    "/appointments",
-    "?$filter=start/dateTime ge '", startDate, "T00:00:00Z'",
-    " and start/dateTime le '", endDate, "T23:59:59Z'",
-    "&$top=400"
+    "/appointments"
+  )
+
+  query_params <- list(
+    "$filter" = paste0("start/dateTime ge '", startDate, "T00:00:00Z'",
+                       " and start/dateTime le '", endDate, "T23:59:59Z'"),
+    "$top"    = 400
   )
 
   all_appointments <- list()
+  first_page <- TRUE
   repeat {
-    page <- fetch_with_retry(url, access_token, max_retries = 3, delay = 2)
+    page <- fetch_with_retry(
+      url, access_token,
+      query = if (first_page) query_params else c(),
+      max_retries = 3, delay = 2
+    )
     if (!is.null(page$value)) {
       all_appointments <- c(all_appointments, page$value)
     }
     if (!is.null(page$`@odata.nextLink`)) {
       url <- page$`@odata.nextLink`
+      first_page <- FALSE
     } else {
       break
     }
