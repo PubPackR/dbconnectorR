@@ -529,8 +529,8 @@ appointments_to_event_dataframes <- function(appointments, staff_lookup, existin
     onlineMeeting_joinUrl = appt_df$join_url,
     start_dateTime       = appt_df$event_start_dt,
     end_dateTime         = appt_df$end_dt,
-    isCancelled          = vapply(appt_df$status, function(s) isTRUE(s %in% c("cancelled", "noShow")), logical(1)),
-    is_canceled          = vapply(appt_df$status, function(s) isTRUE(s %in% c("cancelled", "noShow")), logical(1)),
+    isCancelled          = appt_df$status %in% c("cancelled", "noShow"),
+    is_canceled          = appt_df$status %in% c("cancelled", "noShow"),
     isOrganizer          = TRUE,
     attendees            = NA,                     # placeholder; dropped by update_events()
     organizer            = NA,                     # placeholder; dropped by update_events()
