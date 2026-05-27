@@ -1,7 +1,9 @@
 #' Retrieve and upsert all users from MS Graph to PostgreSQL
 #'
 #' @param con PostgreSQL connection object
-#' @param access_token MS Graph access token
+#' @param access_token MS Graph access token. Either a raw token string or a
+#'   token provider closure produced by [msgraph_make_token_provider()]. A
+#'   provider is auto-refreshed before expiry and on 401 responses.
 #'
 #' @return NULL. Upserts user data into the database.
 #'
@@ -47,7 +49,7 @@ retrieve_all_users <- function(access_token) {
   repeat {
 
     # Send the GET request for the current page
-    response <- httr::GET(user_records_url, httr::add_headers(Authorization = paste("Bearer", access_token)))
+    response <- httr::GET(user_records_url, httr::add_headers(Authorization = paste("Bearer", resolve_token(access_token))))
 
     # Parse the response
     user_records <- httr::content(response, as = "parsed", type = "application/json")

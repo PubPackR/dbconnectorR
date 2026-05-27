@@ -9,7 +9,9 @@ msgraph_update_booking_appointments(con, access_token, startDate)
 \arguments{
 \item{con}{A PostgreSQL database connection object.}
 
-\item{access_token}{MSGraph API access token.}
+\item{access_token}{MSGraph API access token. Either a raw token string or
+a token provider closure produced by \code{\link[=msgraph_make_token_provider]{msgraph_make_token_provider()}}. A
+provider is auto-refreshed before expiry and on 401 responses.}
 
 \item{startDate}{Date from which to retrieve appointments.}
 }

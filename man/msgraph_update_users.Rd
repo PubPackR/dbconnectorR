@@ -9,7 +9,9 @@ msgraph_update_users(con, access_token)
 \arguments{
 \item{con}{PostgreSQL connection object}
 
-\item{access_token}{MS Graph access token}
+\item{access_token}{MS Graph access token. Either a raw token string or a
+token provider closure produced by \code{\link[=msgraph_make_token_provider]{msgraph_make_token_provider()}}. A
+provider is auto-refreshed before expiry and on 401 responses.}
 }
 \value{
 NULL. Upserts user data into the database.

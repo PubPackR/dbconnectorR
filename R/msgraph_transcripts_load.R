@@ -430,7 +430,7 @@ retrieve_transcript_metadata <- function(access_token, user_id, start_date, end_
     "',startDateTime=", start_date, ",endDateTime=", end_date, ")"
   )
 
-  response <- httr::GET(url, httr::add_headers(Authorization = paste("Bearer", access_token)))
+  response <- httr::GET(url, httr::add_headers(Authorization = paste("Bearer", resolve_token(access_token))))
 
   status <- httr::http_status(response)
 
@@ -462,7 +462,7 @@ get_meeting_metadata <- function(access_token, user_id, meeting_id) {
 
   response <- httr::GET(
     url,
-    httr::add_headers(Authorization = paste("Bearer", access_token))
+    httr::add_headers(Authorization = paste("Bearer", resolve_token(access_token)))
   )
 
   if (httr::http_status(response)$category != "Success") {
@@ -653,7 +653,7 @@ get_content_transcript_url <- function(access_token, content_url) {
   response <- httr::GET(
     content_url,
     httr::add_headers(
-      Authorization = paste("Bearer", access_token),
+      Authorization = paste("Bearer", resolve_token(access_token)),
       Accept = "text/vtt"
     )
   )

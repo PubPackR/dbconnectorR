@@ -3,7 +3,9 @@
 #' Retrieves calendar events for users from MSGraph since a given start date, processes them, and updates relevant database tables.
 #'
 #' @param con A PostgreSQL database connection object.
-#' @param access_token MSGraph API access token.
+#' @param access_token MSGraph API access token. Either a raw token string or
+#'   a token provider closure produced by [msgraph_make_token_provider()]. A
+#'   provider is auto-refreshed before expiry and on 401 responses.
 #' @param startDate Date from which to retrieve calendar events.
 #' @param user_id Optional. Internal user ID(s) to filter calendar events. Accepts a
 #'   single value or a vector. If `NULL` (default), all internal, non-deleted users
@@ -614,7 +616,9 @@ appointments_to_event_dataframes <- function(appointments, staff_lookup, existin
 #' wenn kein Match → neue Event-Row mit `msgraph_ical_uid = "booking:<id>"`.
 #'
 #' @param con A PostgreSQL database connection object.
-#' @param access_token MSGraph API access token.
+#' @param access_token MSGraph API access token. Either a raw token string or
+#'   a token provider closure produced by [msgraph_make_token_provider()]. A
+#'   provider is auto-refreshed before expiry and on 401 responses.
 #' @param startDate Date from which to retrieve appointments.
 #'
 #' @return No return value. Updates database tables.

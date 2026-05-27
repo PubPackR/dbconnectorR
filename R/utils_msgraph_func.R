@@ -63,19 +63,107 @@ is_synthetic_email <- function(email) {
 
 ################################################################################
 
+#' Create a Self-Refreshing MS Graph Token Provider
+#'
+#' Returns a closure that lazily fetches an MS Graph access token and caches it
+#' until shortly before its JWT `exp` claim, then transparently refreshes it.
+#' The returned closure can be passed wherever the package expects an
+#' `access_token` argument — `fetch_with_retry()` and the direct `httr::GET`
+#' calls in the `msgraph_update_*` functions resolve it on demand and also
+#' force-refresh on a 401 response.
+#'
+#' @param tenant_id Azure AD tenant ID.
+#' @param client_id Application (client) ID.
+#' @param client_secret App registration client secret.
+#' @param refresh_buffer_seconds Refresh the cached token when fewer than this
+#'   many seconds remain until expiry. Default 300 (5 minutes).
+#'
+#' @return A function `function(force_refresh = FALSE)` returning a valid access
+#'   token string. Call with `force_refresh = TRUE` to bypass the cache.
+#'
+#' @examples
+#' \dontrun{
+#' token_provider <- msgraph_make_token_provider(
+#'   tenant_id     = "f34ad13c-...",
+#'   client_id     = "128a9a89-...",
+#'   client_secret = keys$msgraph
+#' )
+#' msgraph_update_events(con, token_provider, startDate = Sys.Date() - 50)
+#' }
+#' @export
+msgraph_make_token_provider <- function(tenant_id, client_id, client_secret,
+                                        refresh_buffer_seconds = 300) {
+  cache <- new.env(parent = emptyenv())
+  cache$token <- NULL
+  cache$exp <- as.POSIXct(NA)
+
+  function(force_refresh = FALSE) {
+    now <- Sys.time()
+    needs_refresh <- force_refresh ||
+      is.null(cache$token) ||
+      is.na(cache$exp) ||
+      as.numeric(difftime(cache$exp, now, units = "secs")) < refresh_buffer_seconds
+
+    if (needs_refresh) {
+      cache$token <- MSGraph::authorize_graph(tenant_id, client_id, client_secret)
+      cache$exp <- tryCatch(
+        extract_token_exp(cache$token),
+        error = function(e) {
+          # If exp cannot be decoded, assume a conservative 50 minute lifetime
+          Sys.time() + 50 * 60
+        }
+      )
+    }
+    cache$token
+  }
+}
+
+#' Resolve a Token Argument to a Bearer String
+#'
+#' Internal helper. `access_token` may be either a raw token string (legacy
+#' usage) or a provider closure produced by [msgraph_make_token_provider()].
+#' This function returns the current token string in either case, optionally
+#' forcing a refresh when the provider supports it.
+#'
+#' @param access_token Either a character string or a function.
+#' @param force_refresh If TRUE and `access_token` is a provider closure,
+#'   forces re-authentication.
+#' @return Character scalar with the active access token.
+#' @keywords internal
+resolve_token <- function(access_token, force_refresh = FALSE) {
+  if (is.function(access_token)) {
+    fmls <- names(formals(access_token))
+    if ("force_refresh" %in% fmls) {
+      access_token(force_refresh = force_refresh)
+    } else {
+      access_token()
+    }
+  } else {
+    access_token
+  }
+}
+
 fetch_with_retry <- function(url, access_token, query = c(), max_retries = 5, delay = 2) {
   attempt <- 1
   success <- FALSE
   response_content <- NULL
+  auth_refresh_done <- FALSE
 
   while (attempt <= max_retries && !success) {
+    bearer <- resolve_token(access_token)
     if (length(query) == 0) {
-      response <- httr::GET(url, httr::add_headers(Authorization = paste("Bearer", access_token)))
+      response <- httr::GET(url, httr::add_headers(Authorization = paste("Bearer", bearer)))
     } else {
-      response <- httr::GET(url, query = query, httr::add_headers(Authorization = paste("Bearer", access_token)))
+      response <- httr::GET(url, query = query, httr::add_headers(Authorization = paste("Bearer", bearer)))
     }
 
-    if (response$status_code == 429) {
+    if (response$status_code == 401 && !auth_refresh_done && is.function(access_token)) {
+      message("Got 401 — forcing token refresh and retrying once")
+      resolve_token(access_token, force_refresh = TRUE)
+      auth_refresh_done <- TRUE
+      # Don't count this against max_retries
+      next
+    } else if (response$status_code == 429) {
       # Rate limited: use Retry-After header or exponential backoff
       retry_after <- as.numeric(httr::headers(response)$`retry-after`)
       if (!is.na(retry_after)) {
@@ -112,6 +200,24 @@ re_authentication <- function(tenant_id, client_id, client_secret) {
   MSGraph::authorize_graph(tenant_id, client_id, client_secret)
 }
 
+#' Decode JWT Payload Claims from an MS Graph Access Token
+#'
+#' Internal helper that base64url-decodes the JWT payload and returns the
+#' parsed claims list.
+#'
+#' @param access_token A valid MS Graph API access token (JWT format).
+#' @return Named list of JWT claims.
+#' @keywords internal
+decode_jwt_claims <- function(access_token) {
+  parts <- strsplit(access_token, "\\.")[[1]]
+  if (length(parts) < 2) stop("Invalid JWT structure")
+  payload_b64url <- parts[2]
+  payload_b64 <- chartr("-_", "+/", payload_b64url)
+  mod <- nchar(payload_b64) %% 4
+  if (mod > 0) payload_b64 <- paste0(payload_b64, strrep("=", 4 - mod))
+  jsonlite::fromJSON(rawToChar(jsonlite::base64_dec(payload_b64)))
+}
+
 #' Extract Tenant ID from MS Graph Access Token
 #'
 #' Decodes the JWT payload of an MS Graph access token and returns the tenant ID (tid claim).
@@ -121,18 +227,25 @@ re_authentication <- function(tenant_id, client_id, client_secret) {
 #' @keywords internal
 extract_tenant_from_token <- function(access_token) {
   tryCatch({
-    parts <- strsplit(access_token, "\\.")[[1]]
-    if (length(parts) < 2) stop("Invalid JWT structure")
-    payload_b64url <- parts[2]
-    payload_b64 <- chartr("-_", "+/", payload_b64url)
-    mod <- nchar(payload_b64) %% 4
-    if (mod > 0) payload_b64 <- paste0(payload_b64, strrep("=", 4 - mod))
-    claims <- jsonlite::fromJSON(rawToChar(jsonlite::base64_dec(payload_b64)))
+    claims <- decode_jwt_claims(access_token)
     if (is.null(claims$tid)) stop("Missing tid claim in token")
     claims$tid
   }, error = function(e) {
     stop("Failed to extract tenant ID from access token: ", e$message)
   })
+}
+
+#' Extract Expiry Timestamp from MS Graph Access Token
+#'
+#' Decodes the JWT `exp` claim (seconds since epoch) into a POSIXct.
+#'
+#' @param access_token A valid MS Graph API access token (JWT format).
+#' @return POSIXct expiry timestamp (UTC).
+#' @keywords internal
+extract_token_exp <- function(access_token) {
+  claims <- decode_jwt_claims(access_token)
+  if (is.null(claims$exp)) stop("Missing exp claim in token")
+  as.POSIXct(as.numeric(claims$exp), origin = "1970-01-01", tz = "UTC")
 }
 
 # Funktion zur Extraktion der Meeting-ID

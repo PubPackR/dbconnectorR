@@ -3,7 +3,9 @@
 #' Retrieves new call records from MSGraph since the last update, processes them, and updates relevant database tables.
 #'
 #' @param con A PostgreSQL database connection object.
-#' @param access_token MSGraph API access token.
+#' @param access_token MSGraph API access token. Either a raw token string or
+#'   a token provider closure produced by [msgraph_make_token_provider()]. A
+#'   provider is auto-refreshed before expiry and on 401 responses.
 #' @param days_back Number of days to look back from today. If NULL (default),
 #'   uses the last update timestamp from the database.
 #' @param user_id Optional. Integer vector of internal user IDs
@@ -108,7 +110,7 @@ retrieve_all_call_records <- function(access_token, startDate) {
     repeat {
       # Send the GET request for the current page
       response <- httr::GET(call_records_url, query = query,
-                      httr::add_headers(Authorization = paste("Bearer", access_token)))
+                      httr::add_headers(Authorization = paste("Bearer", resolve_token(access_token))))
 
       if (httr::status_code(response) == 401) {
         print("Access Token is not valid")
@@ -307,7 +309,7 @@ update_call_records_with_caller_data <- function(access_token, call_records_df, 
       i,
       "/participants_v2"
     )
-    response <- httr::GET(call_records_url, httr::add_headers(Authorization = paste("Bearer", access_token)))
+    response <- httr::GET(call_records_url, httr::add_headers(Authorization = paste("Bearer", resolve_token(access_token))))
     participants <- httr::content(response, as = "parsed", type = "application/json")
     participants_df <- as.data.frame(t(sapply(participants$value, function(x)
       if (is.null(x))
@@ -325,7 +327,7 @@ update_call_records_with_caller_data <- function(access_token, call_records_df, 
   }
 
   # Extract internal tenant ID from the access token (JWT tid claim)
-  internal_tenant_id <- extract_tenant_from_token(access_token)
+  internal_tenant_id <- extract_tenant_from_token(resolve_token(access_token))
 
   all_participants_ <- all_participants %>%
     dplyr::mutate(id = as.character(id), call_id = as.character(call_id)) %>%
