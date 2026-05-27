@@ -630,9 +630,18 @@ msgraph_update_booking_appointments <- function(con, access_token, startDate) {
     "https://graph.microsoft.com/v1.0/solutions/bookingBusinesses",
     access_token, max_retries = 3, delay = 2
   )
+  if (is.null(biz_resp)) {
+    stop("bookingBusinesses request failed (likely throttled or 5xx) ",
+         "— see fetch_with_retry messages")
+  }
+  if (!is.null(biz_resp$error)) {
+    stop("bookingBusinesses returned error: ",
+         biz_resp$error$code %||% "", " - ",
+         biz_resp$error$message %||% "")
+  }
   biz_ids <- vapply(biz_resp$value %||% list(), function(b) b$id, character(1))
   if (length(biz_ids) == 0) {
-    print("No booking businesses accessible.")
+    print("No booking businesses accessible (API returned empty list).")
     return(invisible(NULL))
   }
   print(paste0("Booking businesses: ", paste(biz_ids, collapse = ", ")))
