@@ -90,9 +90,9 @@ msgraph_update_events <- function(con, access_token, startDate, user_id = NULL) 
     dplyr::summarise(is_organizer = any(is_organizer)) %>%
     dplyr::ungroup()
 
-  update_events(con, all_calendar_events_, startDate)
+  update_events(con, all_calendar_events_, startDate, source = "calendar")
   update_contacts_from_events(con, msgraph_event_participants)
-  update_event_participants(con, msgraph_event_participants)
+  update_event_participants(con, msgraph_event_participants, source = "calendar")
 }
 
 update_events <- function(con, all_calendar_events_, startDate,
@@ -257,7 +257,10 @@ update_contacts_from_events <- function(con, msgraph_event_participants) {
 
 }
 
-update_event_participants <- function(con, msgraph_event_participants) {
+update_event_participants <- function(con, msgraph_event_participants,
+                                       source = c("calendar", "booking")) {
+  source <- match.arg(source)
+  source_tag <- source  # alias to avoid shadowing the `source` column in dplyr expressions
 
   events <- dplyr::tbl(con, I("raw.msgraph_events")) %>% dplyr::collect()
   contacts <- dplyr::tbl(con, I("raw.msgraph_contacts")) %>% dplyr::collect()
@@ -271,30 +274,35 @@ update_event_participants <- function(con, msgraph_event_participants) {
       dplyr::filter(!is.na(contact_id)) %>%
       dplyr::filter(!is.na(event_id)) %>%
       dplyr::distinct(contact_id, event_id, .keep_all = TRUE) %>%
-      dplyr::select(-event_start)
+      dplyr::select(-event_start) %>%
+      dplyr::mutate(source = source_tag)
 
   # Load existing event participants from DB
   existing_participants <- dplyr::tbl(con, I("raw.msgraph_event_participants")) %>%
     dplyr::collect()
 
-  # Get event_ids for the newly downloaded events only
-  # We only want to replace participants for events we just downloaded, not for cancelled events
   new_event_ids <- msgraph_event_participants_new %>%
-    dplyr::distinct(event_id)
+    dplyr::distinct(event_id) %>%
+    dplyr::pull(event_id)
 
-  # Keep all participants EXCEPT those for events we just downloaded (we'll replace those)
+  # Keep:
+  #  - all rows from OTHER sources (we never touch what another flow wrote), AND
+  #  - rows from THIS source for events NOT in the current batch.
+  # Only rows from THIS source for events in the current batch get replaced.
   participants_to_keep <- existing_participants %>%
-    dplyr::anti_join(new_event_ids, by = "event_id")
+    dplyr::filter(!(source == source_tag & event_id %in% new_event_ids))
 
-  # Combine: kept participants + new participants
+  # Combine: kept + new. On (contact_id, event_id) collision (e.g. staff present
+  # in both calendar attendees and Bookings staff), the existing-row tag wins so
+  # a participant first added by booking stays tagged "booking" and remains
+  # protected from future calendar wipes.
   msgraph_event_participants_final <- dplyr::bind_rows(
     participants_to_keep,
     msgraph_event_participants_new
   ) %>%
-    dplyr::distinct() %>% 
-    select(-id, -updated_at, -created_at)
+    dplyr::distinct(contact_id, event_id, .keep_all = TRUE) %>%
+    dplyr::select(-id, -updated_at, -created_at)
 
-  # Write back to DB with delete_missing = FALSE
   Billomatics::postgres_upsert_data(
     con = con,
     schema = "raw",
@@ -701,7 +709,7 @@ msgraph_update_booking_appointments <- function(con, access_token, startDate) {
 
   if (!is.null(all_parts_df) && nrow(all_parts_df) > 0) {
     update_contacts_from_events(con, all_parts_df)
-    update_event_participants(con, all_parts_df)
+    update_event_participants(con, all_parts_df, source = "booking")
   }
 
   invisible(NULL)
