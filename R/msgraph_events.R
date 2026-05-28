@@ -95,7 +95,10 @@ msgraph_update_events <- function(con, access_token, startDate, user_id = NULL) 
   update_event_participants(con, msgraph_event_participants)
 }
 
-update_events <- function(con, all_calendar_events_, startDate) {
+update_events <- function(con, all_calendar_events_, startDate,
+                          source = c("calendar", "booking")) {
+  source <- match.arg(source)
+
 
   # Process new calendar events - KEEP user_id for now to track which events came from which calendars
   msgraph_events_new <- all_calendar_events_ %>%
@@ -171,6 +174,17 @@ update_events <- function(con, all_calendar_events_, startDate) {
   # Events in scope: events that belong to the specified users and are in the date range
   events_in_scope <- event_participants %>%
     dplyr::distinct(msgraph_ical_uid, event_start)
+
+  # Restrict cancellation to events from the same source. calendarView never
+  # returns booking-only rows (msgraph_ical_uid = "booking:..."), so without
+  # this filter a calendar run would mark every booking row in the window as
+  # canceled. Same problem in reverse for the booking flow against calendar
+  # rows.
+  events_in_scope <- if (source == "booking") {
+    events_in_scope %>% dplyr::filter(startsWith(msgraph_ical_uid, "booking:"))
+  } else {
+    events_in_scope %>% dplyr::filter(!startsWith(msgraph_ical_uid, "booking:"))
+  }
 
   # New event identifiers (what we just downloaded)
   new_event_identifiers <- msgraph_events_new %>%
@@ -356,6 +370,14 @@ retrieve_booking_appointments <- function(access_token, biz_id, startDate) {
       query = if (first_page) query_params else c(),
       max_retries = 3, delay = 2
     )
+    if (is.null(page)) {
+      stop("Booking appointments fetch failed for business ", biz_id,
+           " (max retries exceeded)")
+    }
+    if (!is.null(page$error)) {
+      stop("Booking appointments returned error for business ", biz_id, ": ",
+           page$error$code %||% "", " - ", page$error$message %||% "")
+    }
     if (!is.null(page$value)) {
       all_appointments <- c(all_appointments, page$value)
     }
@@ -675,7 +697,7 @@ msgraph_update_booking_appointments <- function(con, access_token, startDate) {
     return(invisible(NULL))
   }
 
-  update_events(con, all_events_df, startDate)
+  update_events(con, all_events_df, startDate, source = "booking")
 
   if (!is.null(all_parts_df) && nrow(all_parts_df) > 0) {
     update_contacts_from_events(con, all_parts_df)

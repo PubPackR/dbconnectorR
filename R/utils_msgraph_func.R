@@ -183,6 +183,10 @@ fetch_with_retry <- function(url, access_token, query = c(), max_retries = 5, de
       response_content <- c()
       break
     } else {
+      if (response$status_code == 401) {
+        message("401 Unauthorized — token appears expired. ",
+                "Use msgraph_make_token_provider() instead of a raw token for auto-refresh.")
+      }
       # Parse the content
       response_content <- httr::content(response, as = "parsed", type = "application/json")
       success <- TRUE
