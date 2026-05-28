@@ -14,7 +14,10 @@ update_extern_event_classification(
 \item{con}{A PostgreSQL database connection object.}
 
 \item{min_date}{Date. Only process events from this date onwards.
-Defaults to 90 days ago.}
+Defaults to 90 days ago. Only used when \code{use_date_filter = TRUE}.}
+
+\item{use_date_filter}{Logical. If TRUE, restrict processing to events with
+\code{event_date >= min_date}. Default FALSE (full table).}
 }
 \value{
 No return value. Updates database table \code{processed.msgraph_extern_event_classification}.
@@ -33,6 +36,16 @@ Key features:
 \item is_short_lived_event flag: events canceled < 24h after creation
 \item Rescheduled meeting detection: same lead, < 2 days apart, no meeting_id
 }
+
+Before writing, the function builds a sync-set as the union of (a) the freshly
+computed classifications for events in this run and (b) the existing active
+rows for events outside the run's scope. It then calls
+\code{Billomatics::postgres_upsert_data(..., delete_missing = TRUE)}, which
+soft-deletes any active row not in the sync-set. The net effect: stale
+\code{(call_event_mapping_id, contact_id)} rows from earlier runs — where the
+dedup later picked a different winning mapping_id for the same event — are
+marked as deleted, while classifications for events outside the date window
+(\code{use_date_filter = TRUE}) are preserved untouched.
 }
 \examples{
 update_extern_event_classification(con)

@@ -13,9 +13,22 @@
 #'
 #' @param con A PostgreSQL database connection object.
 #' @param min_date Date. Only process events from this date onwards.
-#'   Defaults to 90 days ago.
+#'   Defaults to 90 days ago. Only used when `use_date_filter = TRUE`.
+#' @param use_date_filter Logical. If TRUE, restrict processing to events with
+#'   `event_date >= min_date`. Default FALSE (full table).
 #'
 #' @return No return value. Updates database table `processed.msgraph_extern_event_classification`.
+#'
+#' @details
+#' Before writing, the function builds a sync-set as the union of (a) the freshly
+#' computed classifications for events in this run and (b) the existing active
+#' rows for events outside the run's scope. It then calls
+#' `Billomatics::postgres_upsert_data(..., delete_missing = TRUE)`, which
+#' soft-deletes any active row not in the sync-set. The net effect: stale
+#' `(call_event_mapping_id, contact_id)` rows from earlier runs — where the
+#' dedup later picked a different winning mapping_id for the same event — are
+#' marked as deleted, while classifications for events outside the date window
+#' (`use_date_filter = TRUE`) are preserved untouched.
 #'
 #' @export
 #' @examples
@@ -424,19 +437,67 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
   message(paste0("  ", sum(result$is_no_show & !result$excluded), " No-Shows (aktiv)"))
   message(paste0("  ", length(unique(result$call_event_mapping_id)), " eindeutige Events"))
 
-  # === 10. UPSERT IN DB ========================================================
+  # === 10. SYNC-SET BAUEN + UPSERT IN DB ======================================
 
-  message("10. Upsert in DB...")
+  message("10. Sync-Set aus aktuellem result + Out-of-Scope-Bestand bauen...")
+
+  # Sanity-Checks am result.
+  if (nrow(result) == 0) {
+    stop("update_extern_event_classification: result ist leer. Abbruch.")
+  }
+  if (anyDuplicated(result[c("call_event_mapping_id", "contact_id")])) {
+    stop("update_extern_event_classification: result enthaelt duplizierte ",
+         "(call_event_mapping_id, contact_id) Kombinationen. Bug in Pipeline.")
+  }
+
+  # Spalten der Klassifikations-Tabelle, die wir in beiden Teilen des Sync-Sets
+  # (result + out_of_scope) konsistent fuehren muessen. Einmal definiert, damit
+  # spaetere Schema-Erweiterungen nicht stillschweigend in out_of_scope wegfallen
+  # und durch den Upsert mit NA ueberschrieben werden.
+  classification_cols <- c(
+    "call_event_mapping_id", "contact_id", "is_responsible", "is_organizer",
+    "is_no_show", "excluded", "exclusion_reason", "original_created_at",
+    "is_short_lived_event"
+  )
+
+  # Scope dieses Runs: alle Mapping-IDs zu Events, die wir gerade klassifiziert
+  # haben. Bei use_date_filter = TRUE ist das nur das Date-Fenster.
+  processed_event_ids <- unique(events_classified$event_id)
+  processed_mapping_ids <- dplyr::tbl(con, I("mapping.msgraph_call_event")) %>%
+    dplyr::filter(event_id %in% !!processed_event_ids) %>%
+    dplyr::distinct(id) %>%
+    dplyr::pull(id)
+
+  # Aktiver Bestand der Klassifikations-Tabelle AUSSERHALB unseres Scopes
+  # (= Events anderer Datumsfenster, die wir gerade nicht beruehren) wird 1:1
+  # ins Sync-Set uebernommen, damit postgres_upsert_data mit delete_missing = TRUE
+  # diese Zeilen nicht aus Versehen als geloescht markiert.
+  out_of_scope <- dplyr::tbl(con, I("processed.msgraph_extern_event_classification")) %>%
+    dplyr::filter(is.na(deleted_on)) %>%
+    dplyr::filter(!call_event_mapping_id %in% !!processed_mapping_ids) %>%
+    dplyr::select(dplyr::all_of(classification_cols)) %>%
+    dplyr::collect()
+
+  # Wahrheits-Set = neue Klassifikationen fuer prozessierte Events + unangetasteter
+  # Bestand fuer alles ausserhalb. Alle aktiven DB-Zeilen, die hier nicht
+  # auftauchen, sind stale und werden vom Upsert soft-deleted.
+  to_upsert <- dplyr::bind_rows(
+    dplyr::select(result, dplyr::all_of(classification_cols)),
+    out_of_scope
+  )
+
+  message(paste0("  ", nrow(result), " neue Klassifikationen (Scope), ",
+                 nrow(out_of_scope), " unveraendert (Out-of-Scope)"))
 
   Billomatics::postgres_upsert_data(
     con,
     "processed",
     "msgraph_extern_event_classification",
-    result,
+    to_upsert,
     match_cols = c("call_event_mapping_id", "contact_id"),
-    delete_missing = FALSE
+    delete_missing = TRUE
   )
 
-  message(paste0("  ", nrow(result), " Zeilen upserted in processed.msgraph_extern_event_classification"))
+  message(paste0("  ", nrow(to_upsert), " Zeilen aktiv nach Upsert"))
   message("Fertig!")
 }
