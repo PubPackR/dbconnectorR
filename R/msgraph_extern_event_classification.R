@@ -450,11 +450,22 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
          "(call_event_mapping_id, contact_id) Kombinationen. Bug in Pipeline.")
   }
 
+  # Spalten der Klassifikations-Tabelle, die wir in beiden Teilen des Sync-Sets
+  # (result + out_of_scope) konsistent fuehren muessen. Einmal definiert, damit
+  # spaetere Schema-Erweiterungen nicht stillschweigend in out_of_scope wegfallen
+  # und durch den Upsert mit NA ueberschrieben werden.
+  classification_cols <- c(
+    "call_event_mapping_id", "contact_id", "is_responsible", "is_organizer",
+    "is_no_show", "excluded", "exclusion_reason", "original_created_at",
+    "is_short_lived_event"
+  )
+
   # Scope dieses Runs: alle Mapping-IDs zu Events, die wir gerade klassifiziert
   # haben. Bei use_date_filter = TRUE ist das nur das Date-Fenster.
   processed_event_ids <- unique(events_classified$event_id)
   processed_mapping_ids <- dplyr::tbl(con, I("mapping.msgraph_call_event")) %>%
     dplyr::filter(event_id %in% !!processed_event_ids) %>%
+    dplyr::distinct(id) %>%
     dplyr::pull(id)
 
   # Aktiver Bestand der Klassifikations-Tabelle AUSSERHALB unseres Scopes
@@ -464,17 +475,16 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
   out_of_scope <- dplyr::tbl(con, I("processed.msgraph_extern_event_classification")) %>%
     dplyr::filter(is.na(deleted_on)) %>%
     dplyr::filter(!call_event_mapping_id %in% !!processed_mapping_ids) %>%
-    dplyr::select(
-      call_event_mapping_id, contact_id, is_responsible, is_organizer,
-      is_no_show, excluded, exclusion_reason, original_created_at,
-      is_short_lived_event
-    ) %>%
+    dplyr::select(dplyr::all_of(classification_cols)) %>%
     dplyr::collect()
 
   # Wahrheits-Set = neue Klassifikationen fuer prozessierte Events + unangetasteter
   # Bestand fuer alles ausserhalb. Alle aktiven DB-Zeilen, die hier nicht
   # auftauchen, sind stale und werden vom Upsert soft-deleted.
-  to_upsert <- dplyr::bind_rows(result, out_of_scope)
+  to_upsert <- dplyr::bind_rows(
+    dplyr::select(result, dplyr::all_of(classification_cols)),
+    out_of_scope
+  )
 
   message(paste0("  ", nrow(result), " neue Klassifikationen (Scope), ",
                  nrow(out_of_scope), " unveraendert (Out-of-Scope)"))
