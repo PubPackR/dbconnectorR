@@ -631,6 +631,170 @@ appointments_to_event_dataframes <- function(appointments, staff_lookup, existin
   list(events = events_df, participants = parts)
 }
 
+#' Add SDR as Organizer Participant for Booking Appointments
+#'
+#' Resolves the W-Termin-tagged person on each booking appointment's CRM lead
+#' (at the time of booking) and upserts them as an organizer participant into
+#' raw.msgraph_event_participants. This ensures the SDR who set the appointment
+#' is recognised as organizer in the extern event classification pipeline.
+#'
+#' Tag format assumed: "W <Firstname Lastname> Termin". The name is extracted
+#' by stripping the leading "W " and the trailing " Termin" (case-insensitive),
+#' then matched against raw.personio_persons.first_name + name.
+#'
+#' @param con A PostgreSQL database connection object.
+#' @param all_parts_df Participants data frame produced by
+#'   [appointments_to_event_dataframes()], containing columns
+#'   \code{event_id} (ical_uid), \code{event_start}, \code{is_organizer},
+#'   and \code{attendees_emailAddress_address}.
+#' @return Invisible NULL. Writes to raw.msgraph_event_participants.
+#' @keywords internal
+add_sdr_as_booking_organizer <- function(con, all_parts_df) {
+  # ---- start ---- #
+
+  # W-Termin-Tag-Muster auf raw.crm_lead_tags.tag, z.B. "W Moritz Hemmann Termin".
+  sdr_tag_pattern <- "^W .+ Termin$"
+
+  # 1. Customer rows only (is_organizer = FALSE, nicht Staff)
+  customers <- all_parts_df %>%
+    dplyr::filter(!is_organizer) %>%
+    dplyr::distinct(
+      event_ical_uid = event_id,
+      event_start,
+      customer_email = attendees_emailAddress_address
+    ) %>%
+    dplyr::filter(!is.na(customer_email), customer_email != "")
+
+  if (nrow(customers) == 0) {
+    print("add_sdr_as_booking_organizer: keine Kunden-Rows, übersprungen.")
+    return(invisible(NULL))
+  }
+
+  # 2. DB-Lookups (einmalig)
+  contacts_db <- dplyr::tbl(con, I("raw.msgraph_contacts")) %>%
+    dplyr::select(id, email) %>%
+    dplyr::collect() %>%
+    dplyr::mutate(email = tolower(email))
+
+  events_db <- dplyr::tbl(con, I("raw.msgraph_events")) %>%
+    dplyr::select(event_db_id = id, msgraph_ical_uid, event_start, event_created_at) %>%
+    dplyr::collect() %>%
+    dplyr::mutate(event_start = as.POSIXct(event_start))
+
+  crm_mapping <- dplyr::tbl(con, I("mapping.crm_lead_msgraph_contact")) %>%
+    dplyr::select(msgraph_contact_id, crm_lead_id) %>%
+    dplyr::collect()
+
+  w_termin_tags <- dplyr::tbl(con, I("raw.crm_lead_tags")) %>%
+    dplyr::select(lead_id, tag, tag_added_at, tag_removed_at) %>%
+    dplyr::collect() %>%
+    dplyr::filter(grepl(sdr_tag_pattern, tag, ignore.case = TRUE)) %>%
+    dplyr::mutate(
+      tag_added_at   = as.Date(tag_added_at),
+      tag_removed_at = as.Date(tag_removed_at)
+    )
+
+  personio_persons <- dplyr::tbl(con, I("raw.personio_persons")) %>%
+    dplyr::filter(!is_deleted) %>%
+    dplyr::select(first_name, name, email) %>%
+    dplyr::collect() %>%
+    dplyr::mutate(
+      full_name  = paste(first_name, name),
+      sdr_email  = tolower(email)
+    ) %>%
+    dplyr::select(full_name, sdr_email)
+
+  # 3. Kunden-Email → contact_id → crm_lead_id
+  customer_leads <- customers %>%
+    dplyr::left_join(
+      contacts_db %>% dplyr::select(customer_contact_id = id, email),
+      by = c("customer_email" = "email")
+    ) %>%
+    dplyr::left_join(
+      crm_mapping %>% dplyr::rename(customer_contact_id = msgraph_contact_id),
+      by = "customer_contact_id"
+    ) %>%
+    dplyr::filter(!is.na(crm_lead_id))
+
+  if (nrow(customer_leads) == 0) {
+    print("add_sdr_as_booking_organizer: keine CRM-Lead-Matches, übersprungen.")
+    return(invisible(NULL))
+  }
+
+  # 4. ical_uid + event_start → DB-event_id + event_created_at
+  customer_leads <- customer_leads %>%
+    dplyr::left_join(
+      events_db,
+      by = c("event_ical_uid" = "msgraph_ical_uid", "event_start")
+    ) %>%
+    dplyr::filter(!is.na(event_db_id)) %>%
+    dplyr::mutate(booking_date = as.Date(event_created_at))
+
+  # 5. Neuester aktiver W-Termin-Tag zum Buchungszeitpunkt
+  customer_sdr <- customer_leads %>%
+    dplyr::left_join(
+      w_termin_tags %>% dplyr::rename(crm_lead_id = lead_id),
+      by = "crm_lead_id",
+      relationship = "many-to-many"
+    ) %>%
+    dplyr::filter(
+      !is.na(tag),
+      tag_added_at <= booking_date,
+      is.na(tag_removed_at) | tag_removed_at >= booking_date
+    ) %>%
+    dplyr::group_by(event_db_id, crm_lead_id) %>%
+    dplyr::slice_max(order_by = tag_added_at, n = 1, with_ties = FALSE) %>%
+    dplyr::ungroup()
+
+  if (nrow(customer_sdr) == 0) {
+    print("add_sdr_as_booking_organizer: keine W-Termin-Tags zum Buchungsdatum, übersprungen.")
+    return(invisible(NULL))
+  }
+
+  # 6. Namen aus Tag extrahieren: "W Moritz Hemmann Termin" → "Moritz Hemmann"
+  customer_sdr <- customer_sdr %>%
+    dplyr::mutate(
+      sdr_name = trimws(
+        sub("\\s+[Tt]ermin\\s*$", "",
+            sub("^[Ww]\\s+", "", tag))
+      )
+    )
+
+  # 7. Name → Personio-Email → msgraph contact_id
+  customer_sdr <- customer_sdr %>%
+    dplyr::left_join(personio_persons, by = c("sdr_name" = "full_name")) %>%
+    dplyr::filter(!is.na(sdr_email)) %>%
+    dplyr::left_join(
+      contacts_db %>% dplyr::select(sdr_contact_id = id, email),
+      by = c("sdr_email" = "email")
+    ) %>%
+    dplyr::filter(!is.na(sdr_contact_id))
+
+  if (nrow(customer_sdr) == 0) {
+    print("add_sdr_as_booking_organizer: SDR-Namen konnten nicht aufgelöst werden, übersprungen.")
+    return(invisible(NULL))
+  }
+
+  # 8. Neue Participant-Rows (dedupliziert)
+  new_participants <- customer_sdr %>%
+    dplyr::distinct(event_id = event_db_id, contact_id = sdr_contact_id) %>%
+    dplyr::mutate(is_organizer = TRUE, source = "booking")
+
+  print(paste0("add_sdr_as_booking_organizer: ", nrow(new_participants),
+               " SDR-Organizer-Participants werden eingefügt."))
+
+  # 9. Nur wirklich neue Rows upserten (existierende nicht überschreiben)
+  Billomatics::postgres_upsert_data(
+    con        = con,
+    schema     = "raw",
+    table      = "msgraph_event_participants",
+    data       = new_participants,
+    match_cols = c("event_id", "contact_id")
+  )
+
+  invisible(NULL)
+}
+
 #' Retrieve and Update Booking Appointments From MSGraph
 #'
 #' Retrieves Microsoft Bookings appointments for all booking businesses in the
@@ -710,6 +874,10 @@ msgraph_update_booking_appointments <- function(con, access_token, startDate) {
   if (!is.null(all_parts_df) && nrow(all_parts_df) > 0) {
     update_contacts_from_events(con, all_parts_df)
     update_event_participants(con, all_parts_df, source = "booking")
+  }
+
+  if (!is.null(all_parts_df) && nrow(all_parts_df) > 0) {
+    add_sdr_as_booking_organizer(con, all_parts_df)
   }
 
   invisible(NULL)
