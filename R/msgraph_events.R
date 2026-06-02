@@ -676,10 +676,14 @@ add_sdr_as_booking_organizer <- function(con, all_parts_df) {
     dplyr::collect() %>%
     dplyr::mutate(email = tolower(email))
 
+  # event_start NICHT erneut casten: die DB-Spalte ist timestamp-without-tz und
+  # wird vom Treiber als UTC-POSIXct collectet — identisch zur ymd_hms-Herkunft
+  # von customers$event_start (aus all_parts_df). Ein erneutes as.POSIXct() ohne
+  # tz wuerde in System-TZ reinterpretieren und den Join still leerlaufen lassen.
+  # Gleiches Vorgehen wie update_event_participants() (dort bewaehrt in Prod).
   events_db <- dplyr::tbl(con, I("raw.msgraph_events")) %>%
     dplyr::select(event_db_id = id, msgraph_ical_uid, event_start, event_created_at) %>%
-    dplyr::collect() %>%
-    dplyr::mutate(event_start = as.POSIXct(event_start))
+    dplyr::collect()
 
   crm_mapping <- dplyr::tbl(con, I("mapping.crm_lead_msgraph_contact")) %>%
     dplyr::select(msgraph_contact_id, crm_lead_id) %>%
@@ -694,6 +698,11 @@ add_sdr_as_booking_organizer <- function(con, all_parts_df) {
       tag_removed_at = as.Date(tag_removed_at)
     )
 
+  # Bei doppeltem full_name (zwei aktive Personen gleichen Namens) ist die
+  # Tag-Aufloesung mehrdeutig — distinct(full_name) verhindert, dass dann zwei
+  # Organizer-Rows fuer ein Booking-Event eingefuegt werden. Die getroffene
+  # Person ist in dem seltenen Fall nicht-deterministisch; akzeptabel, da der
+  # W-Termin-Tag praktisch eindeutig auf eine reale Person zeigt.
   personio_persons <- dplyr::tbl(con, I("raw.personio_persons")) %>%
     dplyr::filter(!is_deleted) %>%
     dplyr::select(first_name, name, email) %>%
@@ -702,7 +711,8 @@ add_sdr_as_booking_organizer <- function(con, all_parts_df) {
       full_name  = paste(first_name, name),
       sdr_email  = tolower(email)
     ) %>%
-    dplyr::select(full_name, sdr_email)
+    dplyr::select(full_name, sdr_email) %>%
+    dplyr::distinct(full_name, .keep_all = TRUE)
 
   # 3. Kunden-Email → contact_id → crm_lead_id
   customer_leads <- customers %>%
@@ -776,20 +786,32 @@ add_sdr_as_booking_organizer <- function(con, all_parts_df) {
   }
 
   # 8. Neue Participant-Rows (dedupliziert)
+  # source = "booking_sdr" (NICHT "booking"): update_event_participants() laeuft
+  # in msgraph_update_booking_appointments() VOR dieser Funktion und ersetzt mit
+  # delete_missing = TRUE alle source == "booking"-Rows der Batch-Events. Eine
+  # hier mit "booking" geschriebene SDR-Row wuerde damit beim naechsten Lauf
+  # geloescht, sobald das Event aus dem startDate-Fenster faellt. Mit eigener
+  # Source bleibt sie geschuetzt (der Keep-Filter dort matcht nur die eigene
+  # Source) und wird bei Bedarf hier per Upsert aktualisiert.
   new_participants <- customer_sdr %>%
     dplyr::distinct(event_id = event_db_id, contact_id = sdr_contact_id) %>%
-    dplyr::mutate(is_organizer = TRUE, source = "booking")
+    dplyr::mutate(is_organizer = TRUE, source = "booking_sdr")
 
   print(paste0("add_sdr_as_booking_organizer: ", nrow(new_participants),
                " SDR-Organizer-Participants werden eingefügt."))
 
-  # 9. Nur wirklich neue Rows upserten (existierende nicht überschreiben)
+  # 9. Additiver Upsert: nur die SDR-Rows einfuegen/aktualisieren.
+  # delete_missing = FALSE ist explizit gesetzt (auch wenn es der aktuelle
+  # Default ist): wir uebergeben hier NUR die SDR-Rows, ein delete_missing = TRUE
+  # wuerde die gesamte msgraph_event_participants-Tabelle bis auf diese Rows
+  # soft-deleten. Der explizite Wert schuetzt vor einer kuenftigen Default-Aenderung.
   Billomatics::postgres_upsert_data(
-    con        = con,
-    schema     = "raw",
-    table      = "msgraph_event_participants",
-    data       = new_participants,
-    match_cols = c("event_id", "contact_id")
+    con            = con,
+    schema         = "raw",
+    table          = "msgraph_event_participants",
+    data           = new_participants,
+    match_cols     = c("event_id", "contact_id"),
+    delete_missing = FALSE
   )
 
   invisible(NULL)
