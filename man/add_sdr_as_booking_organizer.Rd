@@ -27,5 +27,12 @@ is recognised as organizer in the extern event classification pipeline.
 Tag format assumed: "W \if{html}{\out{<Firstname Lastname>}} Termin". The name is extracted
 by stripping the leading "W " and the trailing " Termin" (case-insensitive),
 then matched against raw.personio_persons.first_name + name.
+
+To keep the SDR the single organizer, any pre-existing is_organizer = TRUE
+participant of an affected event (typically the MS Bookings mailbox) is
+downgraded to is_organizer = FALSE in the same upsert — otherwise the
+classification (which picks one internal organizer per event) and the
+SDR-monitoring view would select non-deterministically between the mailbox
+and the SDR. The downgraded row keeps its original source.
 }
 \keyword{internal}

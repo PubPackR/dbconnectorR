@@ -642,6 +642,13 @@ appointments_to_event_dataframes <- function(appointments, staff_lookup, existin
 #' by stripping the leading "W " and the trailing " Termin" (case-insensitive),
 #' then matched against raw.personio_persons.first_name + name.
 #'
+#' To keep the SDR the single organizer, any pre-existing is_organizer = TRUE
+#' participant of an affected event (typically the MS Bookings mailbox) is
+#' downgraded to is_organizer = FALSE in the same upsert — otherwise the
+#' classification (which picks one internal organizer per event) and the
+#' SDR-monitoring view would select non-deterministically between the mailbox
+#' and the SDR. The downgraded row keeps its original source.
+#'
 #' @param con A PostgreSQL database connection object.
 #' @param all_parts_df Participants data frame produced by
 #'   [appointments_to_event_dataframes()], containing columns
@@ -785,7 +792,7 @@ add_sdr_as_booking_organizer <- function(con, all_parts_df) {
     return(invisible(NULL))
   }
 
-  # 8. Neue Participant-Rows (dedupliziert)
+  # 8. Neue SDR-Organizer-Rows (dedupliziert).
   # source = "booking_sdr" (NICHT "booking"): update_event_participants() laeuft
   # in msgraph_update_booking_appointments() VOR dieser Funktion und ersetzt mit
   # delete_missing = TRUE alle source == "booking"-Rows der Batch-Events. Eine
@@ -793,23 +800,48 @@ add_sdr_as_booking_organizer <- function(con, all_parts_df) {
   # geloescht, sobald das Event aus dem startDate-Fenster faellt. Mit eigener
   # Source bleibt sie geschuetzt (der Keep-Filter dort matcht nur die eigene
   # Source) und wird bei Bedarf hier per Upsert aktualisiert.
-  new_participants <- customer_sdr %>%
+  new_sdr_organizers <- customer_sdr %>%
     dplyr::distinct(event_id = event_db_id, contact_id = sdr_contact_id) %>%
     dplyr::mutate(is_organizer = TRUE, source = "booking_sdr")
 
-  print(paste0("add_sdr_as_booking_organizer: ", nrow(new_participants),
-               " SDR-Organizer-Participants werden eingefügt."))
+  sdr_event_ids <- unique(new_sdr_organizers$event_id)
 
-  # 9. Additiver Upsert: nur die SDR-Rows einfuegen/aktualisieren.
+  # 8b. Bestehende Organizer dieser Events auf is_organizer = FALSE zuruecksetzen,
+  # damit der SDR der EINZIGE Organizer bleibt. Booking-Events tragen bereits die
+  # MS-Booking-Mailbox als Organizer; die Klassifikation (organizer_per_event,
+  # slice(1)) und das SDR-Monitoring (distinct(call_event_mapping_id)) erwarten
+  # genau einen internen Organizer pro Event und wuerden bei mehreren
+  # nicht-deterministisch einen auswaehlen — der SDR koennte dabei verlieren. Die
+  # eigene SDR-Row wird per anti_join ausgenommen; die Original-Source der
+  # downgegradeten Row bleibt erhalten (kein Source-Wechsel).
+  # Hinweis: Calendar-/Booking-Flow setzt die Mailbox beim naechsten Lauf erneut
+  # auf TRUE; da diese Funktion danach und die Klassifikation zuletzt laeuft,
+  # sieht die Klassifikation pro Lauf stets genau einen Organizer.
+  existing_organizers <- dplyr::tbl(con, I("raw.msgraph_event_participants")) %>%
+    dplyr::filter(event_id %in% !!sdr_event_ids, is_organizer == TRUE) %>%
+    dplyr::collect()
+
+  downgrade_rows <- existing_organizers %>%
+    dplyr::anti_join(new_sdr_organizers, by = c("event_id", "contact_id")) %>%
+    dplyr::mutate(is_organizer = FALSE) %>%
+    dplyr::select(event_id, contact_id, is_organizer, source)
+
+  print(paste0("add_sdr_as_booking_organizer: ", nrow(new_sdr_organizers),
+               " SDR-Organizer gesetzt, ", nrow(downgrade_rows),
+               " bestehende Organizer zurueckgestuft."))
+
+  # 9. Additiver Upsert: SDR-Organizer (TRUE) + Downgrades (FALSE).
   # delete_missing = FALSE ist explizit gesetzt (auch wenn es der aktuelle
-  # Default ist): wir uebergeben hier NUR die SDR-Rows, ein delete_missing = TRUE
-  # wuerde die gesamte msgraph_event_participants-Tabelle bis auf diese Rows
-  # soft-deleten. Der explizite Wert schuetzt vor einer kuenftigen Default-Aenderung.
+  # Default ist): wir uebergeben hier NUR diese Rows, ein delete_missing = TRUE
+  # wuerde die gesamte msgraph_event_participants-Tabelle bis auf sie soft-deleten.
+  # Der explizite Wert schuetzt vor einer kuenftigen Default-Aenderung.
+  to_upsert <- dplyr::bind_rows(new_sdr_organizers, downgrade_rows)
+
   Billomatics::postgres_upsert_data(
     con            = con,
     schema         = "raw",
     table          = "msgraph_event_participants",
-    data           = new_participants,
+    data           = to_upsert,
     match_cols     = c("event_id", "contact_id"),
     delete_missing = FALSE
   )
