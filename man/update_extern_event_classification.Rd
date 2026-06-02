@@ -38,14 +38,15 @@ Key features:
 }
 
 Before writing, the function builds a sync-set as the union of (a) the freshly
-computed classifications for events in this run and (b) the existing active
-rows for events outside the run's scope. It then calls
+computed classifications for events in this run and (b) the existing rows for
+events outside the run's scope. It then calls
 \code{Billomatics::postgres_upsert_data(..., delete_missing = TRUE)}, which
-soft-deletes any active row not in the sync-set. The net effect: stale
-\verb{(call_event_mapping_id, contact_id)} rows from earlier runs — where the
-dedup later picked a different winning mapping_id for the same event — are
-marked as deleted, while classifications for events outside the date window
-(\code{use_date_filter = TRUE}) are preserved untouched.
+deletes any row not in the sync-set. Since this table has no \code{is_deleted}
+column (and therefore no soft-delete trigger), the delete is a hard, physical
+delete. The net effect: stale \code{(call_event_mapping_id, contact_id)} rows
+from earlier runs — where the dedup later picked a different winning mapping_id
+for the same event — are removed, while classifications for events outside the
+date window (\code{use_date_filter = TRUE}) are preserved untouched.
 }
 \examples{
 update_extern_event_classification(con)
