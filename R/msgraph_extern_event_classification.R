@@ -21,13 +21,14 @@
 #'
 #' @details
 #' Before writing, the function builds a sync-set as the union of (a) the freshly
-#' computed classifications for events in this run and (b) the existing active
-#' rows for events outside the run's scope. It then calls
-#' `Billomatics::postgres_upsert_data(..., delete_missing = TRUE)`, which
-#' soft-deletes any active row not in the sync-set. The net effect: stale
-#' `(call_event_mapping_id, contact_id)` rows from earlier runs — where the
-#' dedup later picked a different winning mapping_id for the same event — are
-#' marked as deleted, while classifications for events outside the date window
+#' computed classifications for events in this run and (b) the existing rows for
+#' events outside the run's scope. It then calls
+#' `Billomatics::postgres_upsert_data(..., delete_missing = TRUE)`, which deletes
+#' any row not in the sync-set. Since this table has no `is_deleted` column (and
+#' therefore no soft-delete trigger), the delete is a hard, physical delete. The
+#' net effect: stale `(call_event_mapping_id, contact_id)` rows from earlier runs
+#' — where the dedup later picked a different winning mapping_id for the same
+#' event — are removed, while classifications for events outside the date window
 #' (`use_date_filter = TRUE`) are preserved untouched.
 #'
 #' @export
@@ -468,19 +469,19 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
     dplyr::distinct(id) %>%
     dplyr::pull(id)
 
-  # Aktiver Bestand der Klassifikations-Tabelle AUSSERHALB unseres Scopes
-  # (= Events anderer Datumsfenster, die wir gerade nicht beruehren) wird 1:1
-  # ins Sync-Set uebernommen, damit postgres_upsert_data mit delete_missing = TRUE
-  # diese Zeilen nicht aus Versehen als geloescht markiert.
+  # Bestand der Klassifikations-Tabelle AUSSERHALB unseres Scopes (= Events
+  # anderer Datumsfenster, die wir gerade nicht beruehren) wird 1:1 ins Sync-Set
+  # uebernommen, damit postgres_upsert_data mit delete_missing = TRUE diese Zeilen
+  # nicht physisch loescht. Die Tabelle hat keine is_deleted-Spalte und damit
+  # keinen soft-delete-Trigger -> delete_missing wirkt als harter DELETE.
   out_of_scope <- dplyr::tbl(con, I("processed.msgraph_extern_event_classification")) %>%
-    dplyr::filter(is.na(deleted_on)) %>%
     dplyr::filter(!call_event_mapping_id %in% !!processed_mapping_ids) %>%
     dplyr::select(dplyr::all_of(classification_cols)) %>%
     dplyr::collect()
 
   # Wahrheits-Set = neue Klassifikationen fuer prozessierte Events + unangetasteter
-  # Bestand fuer alles ausserhalb. Alle aktiven DB-Zeilen, die hier nicht
-  # auftauchen, sind stale und werden vom Upsert soft-deleted.
+  # Bestand fuer alles ausserhalb. Alle DB-Zeilen, die hier nicht auftauchen,
+  # sind stale und werden vom Upsert physisch geloescht.
   to_upsert <- dplyr::bind_rows(
     dplyr::select(result, dplyr::all_of(classification_cols)),
     out_of_scope
@@ -488,6 +489,21 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
 
   message(paste0("  ", nrow(result), " neue Klassifikationen (Scope), ",
                  nrow(out_of_scope), " unveraendert (Out-of-Scope)"))
+
+  # Safety-Guard: delete_missing = TRUE loescht physisch (kein soft-delete-Netz).
+  # Wenn das Sync-Set ploetzlich <50% des aktuellen Bestands haette, deutet das
+  # auf einen Upstream-Bug hin -> abbrechen, statt halb die Tabelle zu loeschen.
+  existing_n <- dplyr::tbl(con, I("processed.msgraph_extern_event_classification")) %>%
+    dplyr::count() %>%
+    dplyr::pull(n)
+  if (existing_n > 0 && nrow(to_upsert) < 0.5 * existing_n) {
+    stop(sprintf(
+      paste0("update_extern_event_classification: Sync-Set hat nur %d Zeilen, ",
+             "Bestand ist %d. delete_missing = TRUE wuerde >50%% physisch loeschen. ",
+             "Abbruch (vermuteter Upstream-Bug)."),
+      nrow(to_upsert), existing_n
+    ))
+  }
 
   Billomatics::postgres_upsert_data(
     con,
