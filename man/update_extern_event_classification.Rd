@@ -42,7 +42,7 @@ computed classifications for events in this run and (b) the existing active
 rows for events outside the run's scope. It then calls
 \code{Billomatics::postgres_upsert_data(..., delete_missing = TRUE)}, which
 soft-deletes any active row not in the sync-set. The net effect: stale
-\code{(call_event_mapping_id, contact_id)} rows from earlier runs — where the
+\verb{(call_event_mapping_id, contact_id)} rows from earlier runs — where the
 dedup later picked a different winning mapping_id for the same event — are
 marked as deleted, while classifications for events outside the date window
 (\code{use_date_filter = TRUE}) are preserved untouched.
