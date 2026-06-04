@@ -41,8 +41,8 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA,
   # override_last_update überschreibt is_daily vollständig (NULL und NA gelten beide als "kein Override")
   effective_daily <- is_daily || (!is.null(override_last_update) & !is.na(override_last_update))
 
-  leads_to_update <- dplyr::tbl(con, I("raw.crm_leads")) %>% 
-    filter(!is_deleted) %>%
+  leads_to_update <- dplyr::tbl(con, I("raw.crm_leads")) %>%
+    dplyr::filter(!is_deleted) %>%
     dplyr::collect()
   if (!is.null(crm_lead_ids)) {
     leads_to_update <- leads_to_update %>%
@@ -61,27 +61,27 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA,
   attachments <- protocols$attachments
   comments <- protocols$comments
   comment_attachments <- protocols$comment_attachments
-  protocol_relations <- dplyr::tbl(con, I("raw.crm_lead_protocol_relations")) %>% dplyr::select("protocol_id", "lead_id") %>% replace_internal_ids_with_external("lead_id", tbl(con, I("raw.crm_leads")), "crm_lead_id")
+  protocol_relations <- dplyr::tbl(con, I("raw.crm_lead_protocol_relations")) %>% dplyr::select("protocol_id", "lead_id") %>% replace_internal_ids_with_external("lead_id", dplyr::tbl(con, I("raw.crm_leads")), "crm_lead_id")
   protocols_old <- dplyr::tbl(con, I("raw.crm_lead_protocols")) %>%
-    left_join(protocol_relations, by = c("id" = "protocol_id")) %>%
-    filter(lead_id %in% !!leads_to_update$crm_lead_id) %>%
-    filter(!(crm_protocol_id %in% !!main_table$crm_protocol_id)) %>%
-    filter(lead_id %in% !!deleted_leads$crm_lead_id | lead_id %in% !!main_table$lead_id) %>%
-    select(-id, -updated_at, -created_at) %>% 
-    mutate(is_deleted = TRUE) %>%
+    dplyr::left_join(protocol_relations, by = c("id" = "protocol_id")) %>%
+    dplyr::filter(lead_id %in% !!leads_to_update$crm_lead_id) %>%
+    dplyr::filter(!(crm_protocol_id %in% !!main_table$crm_protocol_id)) %>%
+    dplyr::filter(lead_id %in% !!deleted_leads$crm_lead_id | lead_id %in% !!main_table$lead_id) %>%
+    dplyr::select(-id, -updated_at, -created_at) %>%
+    dplyr::mutate(is_deleted = TRUE) %>%
     dplyr::collect()
 
   print(paste0("Number of deleted protocols: ", nrow(protocols_old)))
 
   data <- main_table %>%
-    drop_na(crm_protocol_id) %>%
+    tidyr::drop_na(crm_protocol_id) %>%
     dplyr::bind_rows(protocols_old) %>%
     resolve_user_ids(all_users, "user_id") %>%
     tidyr::drop_na(user_id) %>%
-    filter(protocol_type != "comment") %>%
-    filter(protocol_type != "protocol_attachment") %>%
-    select(-lead_id) %>%
-    distinct()
+    dplyr::filter(protocol_type != "comment") %>%
+    dplyr::filter(protocol_type != "protocol_attachment") %>%
+    dplyr::select(-lead_id) %>%
+    dplyr::distinct()
 
   if(data %>% nrow() > 0) {
 
@@ -102,12 +102,12 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA,
     dplyr::collect()
 
   data <- main_table %>%
-    filter(protocol_type != "comment") %>%
-    filter(protocol_type != "protocol_attachment") %>%
-    filter(protocol_type != "user_notes") %>%
+    dplyr::filter(protocol_type != "comment") %>%
+    dplyr::filter(protocol_type != "protocol_attachment") %>%
+    dplyr::filter(protocol_type != "user_notes") %>%
     replace_external_ids_with_internal("lead_id", all_leads, "crm_lead_id") %>%
-    replace_external_ids_with_internal("crm_protocol_id", all_protocols, "crm_protocol_id", "protocol_id") %>% 
-    drop_na(protocol_id, lead_id)
+    replace_external_ids_with_internal("crm_protocol_id", all_protocols, "crm_protocol_id", "protocol_id") %>%
+    tidyr::drop_na(protocol_id, lead_id)
 
   leads_to_update_internal_ids <- all_leads %>%
     dplyr::filter(crm_lead_id %in% !!leads_to_update$crm_lead_id) %>%
@@ -115,19 +115,19 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA,
 
   old_in_scope_relations <- dplyr::tbl(con, I("raw.crm_lead_protocol_relations")) %>%
     dplyr::select("protocol_id", "lead_id") %>%
-    filter(lead_id %in% !!leads_to_update_internal_ids) %>%
+    dplyr::filter(lead_id %in% !!leads_to_update_internal_ids) %>%
     dplyr::collect()
 
   protocol_relations_filtered <- dplyr::tbl(con, I("raw.crm_lead_protocol_relations")) %>%
     dplyr::select("protocol_id", "lead_id") %>%
-    filter(!(lead_id %in% !!deleted_leads$id | lead_id %in% !!leads_to_update_internal_ids)) %>%
+    dplyr::filter(!(lead_id %in% !!deleted_leads$id | lead_id %in% !!leads_to_update_internal_ids)) %>%
     dplyr::collect()
 
-  full_data <- bind_rows(
+  full_data <- dplyr::bind_rows(
     data %>% dplyr::select(protocol_id, lead_id),
     protocol_relations_filtered
-  ) %>% distinct(protocol_id, lead_id) %>%
-    drop_na(protocol_id, lead_id)
+  ) %>% dplyr::distinct(protocol_id, lead_id) %>%
+    tidyr::drop_na(protocol_id, lead_id)
 
   old_full_relations <- dplyr::bind_rows(old_in_scope_relations, protocol_relations_filtered)
   new_relations <- dplyr::anti_join(
@@ -184,8 +184,8 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA,
   print(paste0("Number of deleted comments: ", nrow(comments_old)))
 
   data <- downloaded_comments %>%
-    dplyr::bind_rows(comments_old) %>% 
-    drop_na(crm_comment_id) 
+    dplyr::bind_rows(comments_old) %>%
+    tidyr::drop_na(crm_comment_id)
 
   Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_comments", data, match_cols = c("crm_comment_id"), returning_cols = c("id", "crm_comment_id"), delete_missing = FALSE)
   print("comments uploaded")
@@ -205,8 +205,8 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA,
   # Attachments aus DB die zu heruntergeladenen oder gelöschten Protokollen gehören,
   # aber nicht im Download sind → als gelöscht markieren
   attachments_old <- dplyr::tbl(con, I("raw.crm_lead_protocol_attachments")) %>%
-    collect() %>%
-    left_join(all_protocols %>% select(id, crm_protocol_id), by = c("protocol_id" = "id")) %>%
+    dplyr::collect() %>%
+    dplyr::left_join(all_protocols %>% dplyr::select(id, crm_protocol_id), by = c("protocol_id" = "id")) %>%
     dplyr::filter(crm_protocol_id %in% protocols$attachment_for_protocols$id) %>% 
     dplyr::filter(!(crm_attachment_id %in% !!downloaded_attachments$crm_attachment_id)) %>%
     dplyr::select(-id, -updated_at, -created_at, -crm_protocol_id) %>%
@@ -215,8 +215,8 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA,
   print(paste0("Number of deleted attachments: ", nrow(attachments_old)))
 
   data <- downloaded_attachments %>%
-    dplyr::bind_rows(attachments_old) %>% 
-    drop_na(crm_attachment_id)
+    dplyr::bind_rows(attachments_old) %>%
+    tidyr::drop_na(crm_attachment_id)
 
   Billomatics::postgres_upsert_data(con, "raw", "crm_lead_protocol_attachments", data, match_cols = c("crm_attachment_id"))
   print("attachments uploaded")
@@ -245,7 +245,7 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA,
 
     data <- downloaded_comment_attachments %>%
       dplyr::bind_rows(comment_attachments_old) %>%
-      drop_na(crm_attachment_id)
+      tidyr::drop_na(crm_attachment_id)
   } else {
     data <- downloaded_comment_attachments
   }
@@ -382,7 +382,7 @@ expand_protocol_attachments <- function(protocols_simplified, crm_api_key, last_
   protocols_to_update <- protocols_simplified %>%
     dplyr::filter(attachments_count > 0) %>%
     dplyr::filter(!type %in% c("comment", "protocol_attachment")) %>%
-    distinct(id, attachments_count, updated_at) %>%
+    dplyr::distinct(id, attachments_count, updated_at) %>%
     dplyr::filter(is.na(last_update_attachments) | as.Date(updated_at) >= as.Date(last_update_attachments))
 
   print(paste0("Update Attachments for ", nrow(protocols_to_update), " Protocols"))
@@ -539,7 +539,7 @@ expand_protocol_comment_attachments <- function(crm_api_key, offers_billomat, co
 
   if (!is.null(an_next_prefix)) {
     offer_numbers <- offer_numbers %>%
-      filter(!grepl(highest_an, offer_number, fixed = TRUE))
+      dplyr::filter(!grepl(highest_an, offer_number, fixed = TRUE))
   }
 
   # Add next prefix and next year's first prefix
@@ -573,7 +573,7 @@ expand_protocol_comment_attachments <- function(crm_api_key, offers_billomat, co
 
   if (!is.null(ab_next_prefix)) {
     confirmation_numbers <- confirmation_numbers %>%
-      filter(!grepl(highest_ab, confirmation_number, fixed = TRUE))
+      dplyr::filter(!grepl(highest_ab, confirmation_number, fixed = TRUE))
   }
 
   # Add next prefix and next year's first prefix
