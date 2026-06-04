@@ -8,9 +8,13 @@
 #' @param override_last_update POSIXct or Date. If provided, overrides both
 #'   \code{last_update_protocols} and \code{last_update_attachments} instead of
 #'   deriving them from the database. Useful for backfilling or manual reruns.
+#' @param crm_lead_ids Optional integer/character vector of external CRM lead IDs
+#'   (\code{crm_lead_id}). When provided, the date-based filter is skipped and
+#'   only these leads are downloaded. Intended for targeted one-off reruns (e.g.
+#'   leads whose protocol count was truncated at 250 due to a pagination bug).
 #' @return Invisibly returns NULL after successful update.
 #' @export
-crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA) {
+crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA, crm_lead_ids = NULL) {
 
   if (!is.null(override_last_update) & !is.na(override_last_update)) {
     last_update_protocols   <- lubridate::as_datetime(override_last_update)
@@ -40,7 +44,10 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA)
   leads_to_update <- dplyr::tbl(con, I("raw.crm_leads")) %>% 
     filter(!is_deleted) %>%
     dplyr::collect()
-  if (effective_daily) {
+  if (!is.null(crm_lead_ids)) {
+    leads_to_update <- leads_to_update %>%
+      dplyr::filter(crm_lead_id %in% crm_lead_ids)
+  } else if (effective_daily) {
     leads_to_update <- leads_to_update %>%
       dplyr::filter(lubridate::as_datetime(lead_updated_at) >= as.Date(last_update_protocols))
   }
