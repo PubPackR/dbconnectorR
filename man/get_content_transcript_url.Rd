@@ -4,9 +4,23 @@
 \alias{get_content_transcript_url}
 \title{Get Content from Transcript URL}
 \usage{
-get_content_transcript_url(access_token, content_url)
+get_content_transcript_url(
+  access_token,
+  content_url,
+  max_retries = 4,
+  delay = 2
+)
+}
+\arguments{
+\item{max_retries}{Maximum number of GET attempts before giving up.}
+
+\item{delay}{Base delay (seconds) for exponential backoff.}
 }
 \description{
-Downloads transcript content (VTT format)
+Downloads transcript content (VTT format). Transient backend failures
+(HTTP 429 throttling and 5xx, e.g. 504 Gateway Timeout) are retried with
+exponential backoff, honouring a \code{Retry-After} header when present. The
+retry policy mirrors \code{fetch_with_retry()}; this function exists
+separately because the content endpoint returns \code{text/vtt}, not JSON.
 }
 \keyword{internal}

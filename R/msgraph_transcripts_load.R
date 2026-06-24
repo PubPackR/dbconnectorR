@@ -647,31 +647,65 @@ retry_meeting_metadata_with_participants <- function(access_token,
 
 #' Get Content from Transcript URL
 #'
-#' Downloads transcript content (VTT format)
+#' Downloads transcript content (VTT format). Transient backend failures
+#' (HTTP 429 throttling and 5xx, e.g. 504 Gateway Timeout) are retried with
+#' exponential backoff, honouring a `Retry-After` header when present. The
+#' retry policy mirrors \code{fetch_with_retry()}; this function exists
+#' separately because the content endpoint returns \code{text/vtt}, not JSON.
+#' @param max_retries Maximum number of GET attempts before giving up.
+#' @param delay Base delay (seconds) for exponential backoff.
 #' @keywords internal
-get_content_transcript_url <- function(access_token, content_url) {
-  response <- httr::GET(
-    content_url,
-    httr::add_headers(
-      Authorization = paste("Bearer", resolve_token(access_token)),
-      Accept = "text/vtt"
-    )
-  )
+get_content_transcript_url <- function(access_token, content_url,
+                                       max_retries = 4, delay = 2) {
+  attempt <- 1
 
-  if (httr::http_status(response)$category != "Success") {
+  repeat {
+    response <- httr::GET(
+      content_url,
+      httr::add_headers(
+        Authorization = paste("Bearer", resolve_token(access_token)),
+        Accept = "text/vtt"
+      )
+    )
+
+    if (httr::http_status(response)$category == "Success") {
+      return(httr::content(response, as = "text", encoding = "UTF-8"))
+    }
+
+    status <- httr::status_code(response)
+    # Retryable: throttling (429) and server-side errors (5xx incl. 504)
+    retryable <- status == 429 || status >= 500
+
+    if (retryable && attempt < max_retries) {
+      retry_after <- suppressWarnings(
+        as.numeric(httr::headers(response)$`retry-after`)
+      )
+      wait_time <- if (length(retry_after) == 1 && !is.na(retry_after)) {
+        retry_after
+      } else {
+        min(delay * 2 ^ (attempt - 1), 60)
+      }
+      message(sprintf(
+        "[INFO] Transcript content fetch attempt %d/%d failed (HTTP %d). Retrying in %.0fs...",
+        attempt, max_retries, status, wait_time
+      ))
+      Sys.sleep(wait_time)
+      attempt <- attempt + 1
+      next
+    }
+
+    # Non-retryable status, or retries exhausted -> surface the error
     body <- tryCatch(
       httr::content(response, as = "text", encoding = "UTF-8"),
       error = function(e) "<no body>"
     )
     stop(sprintf(
-      "Failed to fetch transcript content (HTTP %d): %s",
-      httr::status_code(response),
+      "Failed to fetch transcript content (HTTP %d)%s: %s",
+      status,
+      if (retryable) sprintf(" after %d attempts", attempt) else "",
       substr(body, 1, 300)
     ))
   }
-
-  content_text <- httr::content(response, as = "text", encoding = "UTF-8")
-  return(content_text)
 }
 
 
