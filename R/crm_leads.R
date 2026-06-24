@@ -43,7 +43,8 @@ crm_update_leads <- function(con, crm_key, is_daily = TRUE, debug_mode = FALSE) 
     # Upsert main table
     data <- leads$main_table %>%
       resolve_user_ids(all_users, c("responsible_user_id", "created_by_user_id", "updated_by_user_id")) %>%
-      resolve_group_id(all_groups)
+      resolve_group_id(all_groups) %>% 
+      mutate(group_id = as.integer(group_id))
     upsert_delete_missing(con, "raw.crm_leads", data, match_cols = c("crm_lead_id"))
     all_leads <- dplyr::tbl(con, I("raw.crm_leads")) %>%
       dplyr::select("id", "crm_lead_id") %>%
