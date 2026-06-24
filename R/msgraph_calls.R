@@ -120,9 +120,9 @@ retrieve_all_call_records <- function(access_token, startDate) {
         retry_count <- retry_count + 1
 
         # Extract the Retry-After header
-        retry_after <- as.numeric(httr::headers(response)$`retry-after`)
+        retry_after <- suppressWarnings(as.numeric(httr::headers(response)$`retry-after`))
 
-        if (!is.na(retry_after)) {
+        if (length(retry_after) == 1 && !is.na(retry_after)) {
           message(paste(
             "Throttled. Retrying after",
             retry_after,

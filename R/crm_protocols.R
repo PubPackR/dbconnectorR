@@ -756,8 +756,8 @@ get_searched_attachments <- function(api_key, prefixes) {
 
       # Rate limit handling: wait and retry
       if (status_code == 429) {
-        retry_after <- as.numeric(httr::headers(response)[["Retry-After"]])
-        wait_time <- ifelse(is.na(retry_after), 60, retry_after)
+        retry_after <- suppressWarnings(as.numeric(httr::headers(response)[["Retry-After"]]))
+        wait_time <- if (length(retry_after) == 1 && !is.na(retry_after)) retry_after else 60
         warning(sprintf("Rate limited on prefix '%s', waiting %d seconds...", i, wait_time))
         Sys.sleep(wait_time)
 

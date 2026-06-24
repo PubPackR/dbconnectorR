@@ -165,8 +165,8 @@ fetch_with_retry <- function(url, access_token, query = c(), max_retries = 5, de
       next
     } else if (response$status_code == 429) {
       # Rate limited: use Retry-After header or exponential backoff
-      retry_after <- as.numeric(httr::headers(response)$`retry-after`)
-      if (!is.na(retry_after)) {
+      retry_after <- suppressWarnings(as.numeric(httr::headers(response)$`retry-after`))
+      if (length(retry_after) == 1 && !is.na(retry_after)) {
         message(paste("Throttled. Retrying after", retry_after, "seconds..."))
         Sys.sleep(retry_after)
       } else {
