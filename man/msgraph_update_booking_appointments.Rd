@@ -4,7 +4,12 @@
 \alias{msgraph_update_booking_appointments}
 \title{Retrieve and Update Booking Appointments From MSGraph}
 \usage{
-msgraph_update_booking_appointments(con, access_token, startDate)
+msgraph_update_booking_appointments(
+  con,
+  access_token,
+  startDate,
+  suppression_pepper = NULL
+)
 }
 \arguments{
 \item{con}{A PostgreSQL database connection object.}
@@ -14,6 +19,12 @@ a token provider closure produced by \code{\link[=msgraph_make_token_provider]{m
 provider is auto-refreshed before expiry and on 401 responses.}
 
 \item{startDate}{Date from which to retrieve appointments.}
+
+\item{suppression_pepper}{Optional. Character pepper for DSGVO suppression.
+If non-NULL, loads the suppression list via
+\code{Billomatics::dsgvo_load_suppression()} and tombstones PII of deleted
+persons in \code{all_parts_df} before writing contacts and participants.
+Default \code{NULL} leaves behaviour unchanged.}
 }
 \value{
 No return value. Updates database tables.
