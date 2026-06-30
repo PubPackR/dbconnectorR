@@ -4,7 +4,13 @@
 \alias{msgraph_update_calls}
 \title{Retrieve Call Records from MSGraph and Update Database}
 \usage{
-msgraph_update_calls(con, access_token, days_back = NULL, user_id = NULL)
+msgraph_update_calls(
+  con,
+  access_token,
+  days_back = NULL,
+  user_id = NULL,
+  suppression_pepper = NULL
+)
 }
 \arguments{
 \item{con}{A PostgreSQL database connection object.}
@@ -21,6 +27,12 @@ uses the last update timestamp from the database.}
 Calls are retrieved tenant-wide from the API and then reduced to those
 where at least one participant matches one of the given users. If NULL
 (default), all retrieved calls are written.}
+
+\item{suppression_pepper}{Optional. Character pepper for DSGVO suppression.
+If non-NULL, loads the suppression list via
+\code{Billomatics::dsgvo_load_suppression()} and tombstones PII of deleted
+persons in \code{call_meeting_record} before writing contacts and
+participants. Default \code{NULL} leaves behaviour unchanged.}
 }
 \value{
 No return value. Updates database tables with new call records and participants.

@@ -13,6 +13,11 @@
 #'   Calls are retrieved tenant-wide from the API and then reduced to those
 #'   where at least one participant matches one of the given users. If NULL
 #'   (default), all retrieved calls are written.
+#' @param suppression_pepper Optional. Character pepper for DSGVO suppression.
+#'   If non-NULL, loads the suppression list via
+#'   \code{Billomatics::dsgvo_load_suppression()} and tombstones PII of deleted
+#'   persons in \code{call_meeting_record} before writing contacts and
+#'   participants. Default \code{NULL} leaves behaviour unchanged.
 #'
 #' @return No return value. Updates database tables with new call records and participants.
 #'
@@ -22,7 +27,7 @@
 #' msgraph_update_calls(con, access_token)
 #' msgraph_update_calls(con, access_token, days_back = 30)
 #' msgraph_update_calls(con, access_token, user_id = c(23, 47, 89))
-msgraph_update_calls <- function(con, access_token, days_back = NULL, user_id = NULL) {
+msgraph_update_calls <- function(con, access_token, days_back = NULL, user_id = NULL, suppression_pepper = NULL) {
 
   old_calls_file <- dplyr::tbl(con, I("raw.msgraph_calls")) %>% dplyr::collect()
 
@@ -79,6 +84,11 @@ msgraph_update_calls <- function(con, access_token, days_back = NULL, user_id = 
     if (nrow(call_meeting_record) == 0) {
       print("No calls to upsert after filtering.")
     } else {
+      if (!is.null(suppression_pepper)) {
+        sup <- Billomatics::dsgvo_load_suppression(con)
+        call_meeting_record <- Billomatics::dsgvo_suppress_msgraph_record(
+          call_meeting_record, sup$email_hashes, suppression_pepper)
+      }
       update_calls(con, call_meeting_record)
       update_contacts_from_calls(con, call_meeting_record)
       update_call_participants(con, call_meeting_record)

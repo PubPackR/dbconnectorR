@@ -10,6 +10,11 @@
 #' @param user_id Optional. Internal user ID(s) to filter calendar events. Accepts a
 #'   single value or a vector. If `NULL` (default), all internal, non-deleted users
 #'   from `raw.msgraph_users` are processed.
+#' @param suppression_pepper Optional. Character pepper for DSGVO suppression.
+#'   If non-NULL, loads the suppression list via
+#'   \code{Billomatics::dsgvo_load_suppression()} and tombstones PII of deleted
+#'   persons in \code{msgraph_event_participants} before writing contacts and
+#'   participants. Default \code{NULL} leaves behaviour unchanged.
 #'
 #' @return No return value. Updates database tables with new calendar events and participants.
 #'
@@ -19,7 +24,7 @@
 #' msgraph_update_events(con, access_token, startDate)
 #' msgraph_update_events(con, access_token, startDate, user_id = 23)
 #' msgraph_update_events(con, access_token, startDate, user_id = c(23, 47, 89))
-msgraph_update_events <- function(con, access_token, startDate, user_id = NULL) {
+msgraph_update_events <- function(con, access_token, startDate, user_id = NULL, suppression_pepper = NULL) {
 
   all_users <- dplyr::tbl(con, I("raw.msgraph_users")) %>%
     dplyr::filter(is_internal & !is_deleted)
@@ -90,6 +95,15 @@ msgraph_update_events <- function(con, access_token, startDate, user_id = NULL) 
     dplyr::summarise(is_organizer = any(is_organizer)) %>%
     dplyr::ungroup()
 
+  # DSGVO-Suppression VOR allen Writes: msgraph_event_participants traegt die Attendee-PII,
+  # die in raw.msgraph_contacts + raw.msgraph_event_participants fliesst. (update_events schreibt
+  # nur Struktur-Spalten aus all_calendar_events_ und droppt attendees/organizer.)
+  if (!is.null(suppression_pepper)) {
+    sup <- Billomatics::dsgvo_load_suppression(con)
+    msgraph_event_participants <- Billomatics::dsgvo_suppress_msgraph_record(
+      msgraph_event_participants, sup$email_hashes, suppression_pepper,
+      mail_col = "attendees_emailAddress_address", name_col = "attendees_emailAddress_name")
+  }
   update_events(con, all_calendar_events_, startDate, source = "calendar")
   update_contacts_from_events(con, msgraph_event_participants)
   update_event_participants(con, msgraph_event_participants, source = "calendar")
@@ -868,13 +882,18 @@ add_sdr_as_booking_organizer <- function(con, all_parts_df) {
 #'   a token provider closure produced by [msgraph_make_token_provider()]. A
 #'   provider is auto-refreshed before expiry and on 401 responses.
 #' @param startDate Date from which to retrieve appointments.
+#' @param suppression_pepper Optional. Character pepper for DSGVO suppression.
+#'   If non-NULL, loads the suppression list via
+#'   \code{Billomatics::dsgvo_load_suppression()} and tombstones PII of deleted
+#'   persons in the booking participants before they are written to contacts and
+#'   event participants. Default \code{NULL} leaves behaviour unchanged.
 #'
 #' @return No return value. Updates database tables.
 #' @export
 #'
 #' @examples
 #' msgraph_update_booking_appointments(con, access_token, startDate)
-msgraph_update_booking_appointments <- function(con, access_token, startDate) {
+msgraph_update_booking_appointments <- function(con, access_token, startDate, suppression_pepper = NULL) {
   # ---- start ---- #
 
   # 1. List businesses
@@ -926,6 +945,14 @@ msgraph_update_booking_appointments <- function(con, access_token, startDate) {
   update_events(con, all_events_df, startDate, source = "booking")
 
   if (!is.null(all_parts_df) && nrow(all_parts_df) > 0) {
+    # DSGVO-Suppression VOR den all_parts_df-Writes (Contacts + Participants). update_events oben
+    # nutzt all_events_df (Struktur-Spalten), nicht all_parts_df.
+    if (!is.null(suppression_pepper)) {
+      sup <- Billomatics::dsgvo_load_suppression(con)
+      all_parts_df <- Billomatics::dsgvo_suppress_msgraph_record(
+        all_parts_df, sup$email_hashes, suppression_pepper,
+        mail_col = "attendees_emailAddress_address", name_col = "attendees_emailAddress_name")
+    }
     update_contacts_from_events(con, all_parts_df)
     update_event_participants(con, all_parts_df, source = "booking")
   }

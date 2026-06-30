@@ -4,7 +4,13 @@
 \alias{msgraph_update_events}
 \title{Retrieve and Update Calendar Events from MSGraph}
 \usage{
-msgraph_update_events(con, access_token, startDate, user_id = NULL)
+msgraph_update_events(
+  con,
+  access_token,
+  startDate,
+  user_id = NULL,
+  suppression_pepper = NULL
+)
 }
 \arguments{
 \item{con}{A PostgreSQL database connection object.}
@@ -18,6 +24,12 @@ provider is auto-refreshed before expiry and on 401 responses.}
 \item{user_id}{Optional. Internal user ID(s) to filter calendar events. Accepts a
 single value or a vector. If \code{NULL} (default), all internal, non-deleted users
 from \code{raw.msgraph_users} are processed.}
+
+\item{suppression_pepper}{Optional. Character pepper for DSGVO suppression.
+If non-NULL, loads the suppression list via
+\code{Billomatics::dsgvo_load_suppression()} and tombstones PII of deleted
+persons in \code{msgraph_event_participants} before writing contacts and
+participants. Default \code{NULL} leaves behaviour unchanged.}
 }
 \value{
 No return value. Updates database tables with new calendar events and participants.
