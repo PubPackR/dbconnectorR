@@ -95,13 +95,16 @@ msgraph_update_events <- function(con, access_token, startDate, user_id = NULL, 
     dplyr::summarise(is_organizer = any(is_organizer)) %>%
     dplyr::ungroup()
 
-  update_events(con, all_calendar_events_, startDate, source = "calendar")
+  # DSGVO-Suppression VOR allen Writes: msgraph_event_participants traegt die Attendee-PII,
+  # die in raw.msgraph_contacts + raw.msgraph_event_participants fliesst. (update_events schreibt
+  # nur Struktur-Spalten aus all_calendar_events_ und droppt attendees/organizer.)
   if (!is.null(suppression_pepper)) {
     sup <- Billomatics::dsgvo_load_suppression(con)
     msgraph_event_participants <- Billomatics::dsgvo_suppress_msgraph_record(
       msgraph_event_participants, sup$email_hashes, suppression_pepper,
       mail_col = "attendees_emailAddress_address", name_col = "attendees_emailAddress_name")
   }
+  update_events(con, all_calendar_events_, startDate, source = "calendar")
   update_contacts_from_events(con, msgraph_event_participants)
   update_event_participants(con, msgraph_event_participants, source = "calendar")
 }
@@ -882,8 +885,8 @@ add_sdr_as_booking_organizer <- function(con, all_parts_df) {
 #' @param suppression_pepper Optional. Character pepper for DSGVO suppression.
 #'   If non-NULL, loads the suppression list via
 #'   \code{Billomatics::dsgvo_load_suppression()} and tombstones PII of deleted
-#'   persons in \code{all_parts_df} before writing contacts and participants.
-#'   Default \code{NULL} leaves behaviour unchanged.
+#'   persons in the booking participants before they are written to contacts and
+#'   event participants. Default \code{NULL} leaves behaviour unchanged.
 #'
 #' @return No return value. Updates database tables.
 #' @export
@@ -942,6 +945,8 @@ msgraph_update_booking_appointments <- function(con, access_token, startDate, su
   update_events(con, all_events_df, startDate, source = "booking")
 
   if (!is.null(all_parts_df) && nrow(all_parts_df) > 0) {
+    # DSGVO-Suppression VOR den all_parts_df-Writes (Contacts + Participants). update_events oben
+    # nutzt all_events_df (Struktur-Spalten), nicht all_parts_df.
     if (!is.null(suppression_pepper)) {
       sup <- Billomatics::dsgvo_load_suppression(con)
       all_parts_df <- Billomatics::dsgvo_suppress_msgraph_record(

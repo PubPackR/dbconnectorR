@@ -23,8 +23,8 @@ provider is auto-refreshed before expiry and on 401 responses.}
 \item{suppression_pepper}{Optional. Character pepper for DSGVO suppression.
 If non-NULL, loads the suppression list via
 \code{Billomatics::dsgvo_load_suppression()} and tombstones PII of deleted
-persons in \code{all_parts_df} before writing contacts and participants.
-Default \code{NULL} leaves behaviour unchanged.}
+persons in the booking participants before they are written to contacts and
+event participants. Default \code{NULL} leaves behaviour unchanged.}
 }
 \value{
 No return value. Updates database tables.
