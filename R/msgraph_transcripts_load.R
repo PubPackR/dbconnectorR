@@ -523,7 +523,7 @@ retry_meeting_metadata_with_participants <- function(access_token,
   }
 
   if (nrow(candidate_calls) == 0) {
-    message("[DEBUG] No candidate calls found for meeting metadata retry")
+    message("[WARNING] No candidate calls found for meeting metadata retry")
     return(NULL)
   }
 
@@ -632,7 +632,7 @@ retry_meeting_metadata_with_participants <- function(access_token,
     }
   }
 
-  message("[DEBUG] get_meeting_metadata failed for all ",
+  message("[WARNING] get_meeting_metadata failed for all ",
           length(retry_uids), " alternative users")
   return(NULL)
 }
