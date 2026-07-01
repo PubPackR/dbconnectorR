@@ -430,15 +430,9 @@ retrieve_transcript_metadata <- function(access_token, user_id, start_date, end_
     "',startDateTime=", start_date, ",endDateTime=", end_date, ")"
   )
 
-  response <- httr::GET(url, httr::add_headers(Authorization = paste("Bearer", resolve_token(access_token))))
-
-  status <- httr::http_status(response)
-
-  if (status$category != "Success") {
-    return(NULL)
-  }
-
-  parsed_response <- httr::content(response, as = "parsed", type = "application/json")
+  # fetch_with_retry handles 401 refresh, 429 throttling and 5xx retries;
+  # returns NULL when all retries are exhausted.
+  parsed_response <- fetch_with_retry(url, access_token)
 
   if (!is.list(parsed_response) || is.null(parsed_response$value) ||
       length(parsed_response$value) == 0) {
@@ -460,18 +454,17 @@ get_meeting_metadata <- function(access_token, user_id, meeting_id) {
     "/onlineMeetings/", meeting_id
   )
 
-  response <- httr::GET(
-    url,
-    httr::add_headers(Authorization = paste("Bearer", resolve_token(access_token)))
-  )
+  # fetch_with_retry handles 401 refresh, 429 throttling and 5xx retries.
+  # Returns NULL on a 404 (meeting not visible to this user) or after exhausting
+  # retries — both cases trigger the participant-based retry in the caller.
+  parsed_response <- fetch_with_retry(url, access_token)
 
-  if (httr::http_status(response)$category != "Success") {
-    message("[WARNING] get_meeting_metadata HTTP ", httr::status_code(response),
-            " for user ", user_id, ", meeting ", meeting_id)
+  if (is.null(parsed_response) || length(parsed_response) == 0) {
+    message("[DEBUG] get_meeting_metadata failed (empty/404/retries exhausted) ",
+            "for user ", user_id, ", meeting ", meeting_id,
+            " — see fetch_with_retry messages")
     return(NULL)
   }
-
-  parsed_response <- httr::content(response, as = "parsed", type = "application/json")
 
   return(parsed_response)
 }
@@ -530,7 +523,7 @@ retry_meeting_metadata_with_participants <- function(access_token,
   }
 
   if (nrow(candidate_calls) == 0) {
-    message("[WARNING] No candidate calls found for meeting metadata retry")
+    message("[DEBUG] No candidate calls found for meeting metadata retry")
     return(NULL)
   }
 
@@ -639,7 +632,7 @@ retry_meeting_metadata_with_participants <- function(access_token,
     }
   }
 
-  message("[WARNING] get_meeting_metadata failed for all ",
+  message("[DEBUG] get_meeting_metadata failed for all ",
           length(retry_uids), " alternative users")
   return(NULL)
 }
@@ -650,27 +643,22 @@ retry_meeting_metadata_with_participants <- function(access_token,
 #' Downloads transcript content (VTT format)
 #' @keywords internal
 get_content_transcript_url <- function(access_token, content_url) {
-  response <- httr::GET(
-    content_url,
-    httr::add_headers(
-      Authorization = paste("Bearer", resolve_token(access_token)),
-      Accept = "text/vtt"
-    )
+  # Transcript content is VTT text, not JSON. fetch_with_retry retries 5xx/429
+  # and refreshes on 401; it returns NULL when all retries are exhausted or on a
+  # 404.
+  content_text <- fetch_with_retry(
+    url          = content_url,
+    access_token = access_token,
+    accept       = "text/vtt",
+    parse        = "text"
   )
 
-  if (httr::http_status(response)$category != "Success") {
-    body <- tryCatch(
-      httr::content(response, as = "text", encoding = "UTF-8"),
-      error = function(e) "<no body>"
-    )
-    stop(sprintf(
-      "Failed to fetch transcript content (HTTP %d): %s",
-      httr::status_code(response),
-      substr(body, 1, 300)
-    ))
+  # Raise on definitive failure so the caller's tryCatch logs it and stores a
+  # NULL-content placeholder row, which the next run re-attempts (self-heal).
+  if (is.null(content_text) || length(content_text) == 0) {
+    stop("Failed to fetch transcript content after retries (see fetch_with_retry messages)")
   }
 
-  content_text <- httr::content(response, as = "text", encoding = "UTF-8")
   return(content_text)
 }
 
