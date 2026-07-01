@@ -144,7 +144,7 @@ resolve_token <- function(access_token, force_refresh = FALSE) {
 }
 
 fetch_with_retry <- function(url, access_token, query = c(), max_retries = 5, delay = 2,
-                             accept = "application/json", parse = c("json", "text", "raw"),
+                             accept = NULL, parse = c("json", "text", "raw"),
                              error_on_failure = FALSE) {
   parse <- match.arg(parse)
   attempt <- 1
@@ -155,10 +155,14 @@ fetch_with_retry <- function(url, access_token, query = c(), max_retries = 5, de
 
   while (attempt <= max_retries && !success) {
     bearer <- resolve_token(access_token)
-    req_headers <- httr::add_headers(
-      Authorization = paste("Bearer", bearer),
-      Accept = accept
-    )
+    # Only send an Accept header when one is explicitly requested (e.g. text/vtt
+    # for transcript content). JSON callers pass none, so their request stays
+    # byte-for-byte identical to the pre-retry implementation.
+    req_headers <- if (is.null(accept)) {
+      httr::add_headers(Authorization = paste("Bearer", bearer))
+    } else {
+      httr::add_headers(Authorization = paste("Bearer", bearer), Accept = accept)
+    }
     if (length(query) == 0) {
       response <- httr::GET(url, req_headers)
     } else {

@@ -69,3 +69,28 @@ test_that("404 returns NULL/empty so the caller can fall back", {
   out <- run(list(list(status_code = 404, body = "not found")))
   expect_true(is.null(out) || length(out) == 0)
 })
+
+# Captures the headers actually attached to the GET request.
+capture_headers <- function(...) {
+  captured <- NULL
+  cap_get <- function(url, ...) {
+    for (d in list(...)) if (inherits(d, "request")) captured <<- d$headers
+    list(status_code = 200, body = "WEBVTT", payload = list(ok = TRUE))
+  }
+  testthat::with_mocked_bindings(
+    fetch_with_retry(url = "https://x", access_token = "TOKEN", delay = 0, ...),
+    GET = cap_get, content = fake_content, headers = fake_headers, .package = "httr"
+  )
+  captured
+}
+
+test_that("no Accept header is sent by default (JSON callers stay unchanged)", {
+  hdrs <- capture_headers()
+  expect_false("Accept" %in% names(hdrs))
+  expect_true("Authorization" %in% names(hdrs))
+})
+
+test_that("an explicit accept is sent (e.g. text/vtt for transcript content)", {
+  hdrs <- capture_headers(accept = "text/vtt", parse = "text")
+  expect_equal(unname(hdrs[["Accept"]]), "text/vtt")
+})
