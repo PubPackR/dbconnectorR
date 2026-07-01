@@ -144,12 +144,14 @@ resolve_token <- function(access_token, force_refresh = FALSE) {
 }
 
 fetch_with_retry <- function(url, access_token, query = c(), max_retries = 5, delay = 2,
-                             accept = "application/json", parse = c("json", "text", "raw")) {
+                             accept = "application/json", parse = c("json", "text", "raw"),
+                             error_on_failure = FALSE) {
   parse <- match.arg(parse)
   attempt <- 1
   success <- FALSE
   response_content <- NULL
   auth_refresh_done <- FALSE
+  response <- NULL  # holds the most recent response for failure diagnostics
 
   while (attempt <= max_retries && !success) {
     bearer <- resolve_token(access_token)
@@ -204,8 +206,17 @@ fetch_with_retry <- function(url, access_token, query = c(), max_retries = 5, de
     }
   }
 
-  if (!success && attempt > max_retries) {
-    message(paste("Failed to fetch content after", max_retries, "attempts:", url))
+  if (!success) {
+    last_status <- if (is.null(response)) NA_integer_ else response$status_code
+    last_body <- tryCatch(
+      substr(httr::content(response, as = "text", encoding = "UTF-8"), 1, 300),
+      error = function(e) "<no body>"
+    )
+    message(sprintf("Failed to fetch content (last HTTP %s): %s", last_status, url))
+    if (error_on_failure) {
+      stop(sprintf("Failed to fetch content (HTTP %s) from %s: %s",
+                   last_status, url, last_body))
+    }
   }
 
   return(response_content)

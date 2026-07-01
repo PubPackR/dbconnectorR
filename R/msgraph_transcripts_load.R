@@ -644,20 +644,17 @@ retry_meeting_metadata_with_participants <- function(access_token,
 #' @keywords internal
 get_content_transcript_url <- function(access_token, content_url) {
   # Transcript content is VTT text, not JSON. fetch_with_retry retries 5xx/429
-  # and refreshes on 401; it returns NULL when all retries are exhausted or on a
-  # 404.
+  # and refreshes on 401. error_on_failure = TRUE makes it raise with the last
+  # HTTP status and response body on definitive failure (exhausted retries or a
+  # 404), so the caller's tryCatch captures that detail in e$message, logs it and
+  # stores a NULL-content placeholder row which the next run re-attempts.
   content_text <- fetch_with_retry(
-    url          = content_url,
-    access_token = access_token,
-    accept       = "text/vtt",
-    parse        = "text"
+    url              = content_url,
+    access_token     = access_token,
+    accept           = "text/vtt",
+    parse            = "text",
+    error_on_failure = TRUE
   )
-
-  # Raise on definitive failure so the caller's tryCatch logs it and stores a
-  # NULL-content placeholder row, which the next run re-attempts (self-heal).
-  if (is.null(content_text) || length(content_text) == 0) {
-    stop("Failed to fetch transcript content after retries (see fetch_with_retry messages)")
-  }
 
   return(content_text)
 }
