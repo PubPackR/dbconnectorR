@@ -143,18 +143,30 @@ resolve_token <- function(access_token, force_refresh = FALSE) {
   }
 }
 
-fetch_with_retry <- function(url, access_token, query = c(), max_retries = 5, delay = 2) {
+fetch_with_retry <- function(url, access_token, query = c(), max_retries = 5, delay = 2,
+                             accept = NULL, parse = c("json", "text", "raw"),
+                             error_on_failure = FALSE) {
+  parse <- match.arg(parse)
   attempt <- 1
   success <- FALSE
   response_content <- NULL
   auth_refresh_done <- FALSE
+  response <- NULL  # holds the most recent response for failure diagnostics
 
   while (attempt <= max_retries && !success) {
     bearer <- resolve_token(access_token)
-    if (length(query) == 0) {
-      response <- httr::GET(url, httr::add_headers(Authorization = paste("Bearer", bearer)))
+    # Only send an Accept header when one is explicitly requested (e.g. text/vtt
+    # for transcript content). JSON callers pass none, so their request stays
+    # byte-for-byte identical to the pre-retry implementation.
+    req_headers <- if (is.null(accept)) {
+      httr::add_headers(Authorization = paste("Bearer", bearer))
     } else {
-      response <- httr::GET(url, query = query, httr::add_headers(Authorization = paste("Bearer", bearer)))
+      httr::add_headers(Authorization = paste("Bearer", bearer), Accept = accept)
+    }
+    if (length(query) == 0) {
+      response <- httr::GET(url, req_headers)
+    } else {
+      response <- httr::GET(url, query = query, req_headers)
     }
 
     if (response$status_code == 401 && !auth_refresh_done && is.function(access_token)) {
@@ -175,7 +187,7 @@ fetch_with_retry <- function(url, access_token, query = c(), max_retries = 5, de
         Sys.sleep(backoff_time)
       }
       attempt <- attempt + 1
-    } else if (response$status_code > 500) {
+    } else if (response$status_code >= 500) {
       message(paste("\nAttempt", attempt, "failed with status", response$status_code))
       attempt <- attempt + 1
       Sys.sleep(delay)
@@ -187,14 +199,28 @@ fetch_with_retry <- function(url, access_token, query = c(), max_retries = 5, de
         message("401 Unauthorized — token appears expired. ",
                 "Use msgraph_make_token_provider() instead of a raw token for auto-refresh.")
       }
-      # Parse the content
-      response_content <- httr::content(response, as = "parsed", type = "application/json")
+      # Parse the content according to the requested format
+      response_content <- switch(
+        parse,
+        json = httr::content(response, as = "parsed", type = "application/json"),
+        text = httr::content(response, as = "text", encoding = "UTF-8"),
+        raw  = httr::content(response, as = "raw")
+      )
       success <- TRUE
     }
   }
 
-  if (!success && attempt > max_retries) {
-    message(paste("Failed to fetch content after", max_retries, "attempts:", url))
+  if (!success) {
+    last_status <- if (is.null(response)) NA_integer_ else response$status_code
+    last_body <- tryCatch(
+      substr(httr::content(response, as = "text", encoding = "UTF-8"), 1, 300),
+      error = function(e) "<no body>"
+    )
+    message(sprintf("Failed to fetch content (last HTTP %s): %s", last_status, url))
+    if (error_on_failure) {
+      stop(sprintf("Failed to fetch content (HTTP %s) from %s: %s",
+                   last_status, url, last_body))
+    }
   }
 
   return(response_content)
