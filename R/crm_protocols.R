@@ -200,7 +200,8 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA,
     resolve_user_ids(all_users, "user_id") %>%
     resolve_protocol_id(all_protocols, "protocol_id") %>%
     dplyr::distinct(crm_attachment_id, .keep_all = TRUE) %>%
-    tidyr::drop_na(user_id)
+    tidyr::drop_na(user_id) %>%
+    drop_attachments_without_file_metadata("protocol")
 
   # Attachments aus DB die zu heruntergeladenen oder gelöschten Protokollen gehören,
   # aber nicht im Download sind → als gelöscht markieren
@@ -228,7 +229,8 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA,
     resolve_comment_ids(all_comments, "comment_id") %>%
     tidyr::drop_na(comment_id) %>%
     dplyr::distinct(crm_attachment_id, .keep_all = TRUE) %>%
-    tidyr::drop_na(user_id)
+    tidyr::drop_na(user_id) %>%
+    drop_attachments_without_file_metadata("comment")
 
   # Comment-Attachments aus DB deren Prefix gesucht wurde,
   # aber nicht im Download sind → als gelöscht markieren
@@ -914,6 +916,40 @@ simplify_protocols <- function(protocols) {
   
   return(all_protocols)
 
+}
+
+#' Drop attachments without file metadata
+#'
+#' CentralStation occasionally returns attachment objects with no file behind
+#' them (empty or failed uploads): \code{content_type} and \code{file_size}
+#' come back as \code{NA}. Both columns are \code{NOT NULL} in the raw schema,
+#' so an unfiltered upsert aborts the entire ingestion job. This helper removes
+#' such rows before the upsert and warns, listing the affected
+#' \code{crm_attachment_id}s so the anomaly stays visible.
+#'
+#' @param attachments A data frame of prepared attachments with at least the
+#'   columns \code{crm_attachment_id}, \code{content_type} and \code{file_size}.
+#' @param attachment_kind Character label used in the warning message, e.g.
+#'   \code{"protocol"} or \code{"comment"}.
+#' @return The input data frame with metadata-less rows removed.
+#' @noRd
+drop_attachments_without_file_metadata <- function(attachments, attachment_kind = "protocol") {
+
+  # ---- start ---- #
+
+  if (nrow(attachments) == 0) return(attachments)
+
+  missing_metadata <- is.na(attachments$content_type) | is.na(attachments$file_size)
+
+  if (any(missing_metadata)) {
+    dropped_ids <- attachments$crm_attachment_id[missing_metadata]
+    warning(sprintf(
+      "Dropping %d %s attachment(s) without file metadata (content_type/file_size NA): %s",
+      length(dropped_ids), attachment_kind, paste(dropped_ids, collapse = ", ")
+    ))
+  }
+
+  attachments[!missing_metadata, , drop = FALSE]
 }
 
 # grepl with a single huge alternation pattern can exceed R's regex memory limit.
