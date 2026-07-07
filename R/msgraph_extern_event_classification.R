@@ -49,7 +49,7 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
     dplyr::select(id, call_start, call_end) %>%
     dplyr::collect() %>%
     dplyr::mutate(call_duration_sec = as.numeric(difftime(call_end, call_start, units = "secs"))) %>%
-    dplyr::select(call_id = id, call_duration_sec)
+    dplyr::select(call_id = id, call_start, call_duration_sec)
 
   events_classified <- dplyr::tbl(con, I("mapping.msgraph_call_event")) %>%
     {if (use_date_filter) dplyr::filter(., event_date >= !!min_date) else .} %>%
@@ -377,6 +377,52 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
   message(paste0("  ", sum(!is.na(verantwortliche_contact$responsible_contact_id)),
                  " / ", nrow(verantwortliche_contact), " Events mit Verantwortlichem"))
 
+  # === 8b. ECHTE NO-SHOWS UNTER RESCHEDULE-AUSSCHLUESSEN ======================
+
+  message("8b. Echte No-Shows unter Reschedule-Ausschluessen erkennen...")
+
+  # Ein Reschedule-Ausschluss (verschoben / rescheduled_without_meeting_id)
+  # entfernt die gecancelte Haelfte eines verschobenen Meetings. Das ist falsch,
+  # wenn der Lead no-showt und der Termin erst DANACH neu gelegt wurde -- so ein
+  # No-Show zaehlt weiter. Diagnostik: interner Call am Slot (call_start ~
+  # event_start), Absage NACH dem Slot (event_updated_at > event_start) und ein
+  # externer Lead war eingeladen.
+  event_call_times <- events_classified %>%
+    dplyr::select(event_id, call_start) %>%
+    dplyr::left_join(
+      events_all %>% dplyr::distinct(id, event_start, event_updated_at),
+      by = c("event_id" = "id")
+    )
+
+  event_participant_emails <- all_event_participants %>%
+    dplyr::left_join(contacts %>% dplyr::select(id, email), by = c("contact_id" = "id")) %>%
+    dplyr::select(event_id, email)
+
+  # Nur No-Show-Events kommen fuer den Override in Frage (nicht stattgefundene
+  # extern_call-Termine, die auch externen Lead + Call am Slot haben).
+  no_show_event_ids <- events_classified %>%
+    dplyr::filter(grepl("no_call|intern_call", event_class, ignore.case = TRUE)) %>%
+    dplyr::pull(event_id)
+
+  reschedule_no_show_ids <- intersect(
+    c(verschobene_ids, rescheduled_without_mid_ids),
+    no_show_event_ids
+  )
+
+  real_no_show_ids <- identify_real_no_show_reschedules(
+    reschedule_event_ids     = reschedule_no_show_ids,
+    event_call_times         = event_call_times,
+    event_participant_emails = event_participant_emails
+  )
+
+  # Reschedule-Ausschluesse um die echten No-Shows bereinigen. zu_viele_interne
+  # und duplikat_event bleiben unberuehrt.
+  verschobene_final <- setdiff(verschobene_ids, real_no_show_ids)
+  rescheduled_final <- setdiff(rescheduled_without_mid_ids, real_no_show_ids)
+
+  message(paste0("  ", length(real_no_show_ids),
+                 " Reschedule-Events sind echte No-Shows (bleiben gezaehlt)"))
+
   # === 9. ERGEBNIS ZUSAMMENBAUEN (EINE ZEILE PRO EVENT-CONTACT) ==============
 
   message("9. Ergebnis zusammenbauen (eine Zeile pro Event-Contact)...")
@@ -412,10 +458,10 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
     ) %>%
     dplyr::mutate(
       is_no_show = grepl("no_call|intern_call", event_class, ignore.case = TRUE),
-      excluded = event_id %in% c(verschobene_ids, internal_meeting_ids, duplikat_ids, rescheduled_without_mid_ids),
+      excluded = event_id %in% c(verschobene_final, internal_meeting_ids, duplikat_ids, rescheduled_final),
       exclusion_reason = dplyr::case_when(
-        event_id %in% rescheduled_without_mid_ids ~ "rescheduled_without_meeting_id",
-        event_id %in% verschobene_ids ~ "verschoben",
+        event_id %in% rescheduled_final ~ "rescheduled_without_meeting_id",
+        event_id %in% verschobene_final ~ "verschoben",
         event_id %in% internal_meeting_ids ~ "zu_viele_interne",
         event_id %in% duplikat_ids ~ "duplikat_event",
         TRUE ~ NA_character_
@@ -516,4 +562,76 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
 
   message(paste0("  ", nrow(to_upsert), " Zeilen aktiv nach Upsert"))
   message("Fertig!")
+}
+
+#' Identify Genuine No-Shows Among Reschedule-Excluded Events
+#'
+#' A reschedule exclusion (`verschoben` / `rescheduled_without_meeting_id`)
+#' removes the canceled leg of a moved meeting. That is correct when a meeting
+#' was moved *before* it happened, but wrong when the lead no-showed and the
+#' meeting was only rebooked *afterwards* -- per definition such a no-show still
+#' counts. This helper returns the subset of reschedule-excluded event_ids that
+#' are genuine no-shows and must therefore NOT be excluded.
+#'
+#' An event qualifies when ALL hold:
+#' - an external lead was invited: at least one participant email that is
+#'   neither internal (`is_internal_email`) nor synthetic (`is_synthetic_email`)
+#'   -- rules out internal meetings mis-tagged as `extern_planned`;
+#' - an internal call actually took place at the scheduled slot: the event's
+#'   (deduped) mapped `call_start` lies within `slot_window_minutes` of
+#'   `event_start` -- positive evidence the meeting time arrived and someone
+#'   internal joined; and
+#' - the event was cancelled/last modified AFTER the slot
+#'   (`event_updated_at > event_start`) -- the no-show happened before the
+#'   reschedule. This rules out meetings moved *before* their time (proactive
+#'   reschedule, no no-show), where a call may still map to the slot via a
+#'   shared recurring meeting id. `event_updated_at` is the same
+#'   cancellation-time proxy the pipeline already uses for `is_short_lived_event`.
+#'
+#' @param reschedule_event_ids Integer vector of event_ids currently flagged for
+#'   reschedule-exclusion.
+#' @param event_call_times Data frame with one row per event and columns
+#'   `event_id`, `call_start`, `event_start`, `event_updated_at` (the deduped
+#'   mapped call plus event timing).
+#' @param event_participant_emails Data frame with columns `event_id`, `email`
+#'   for all participants of the events in scope.
+#' @param slot_window_minutes Numeric. Maximum absolute distance (minutes)
+#'   between `call_start` and `event_start` to count as "call at the slot".
+#'   Default 30.
+#' @return Integer vector: the subset of `reschedule_event_ids` that are genuine
+#'   no-shows and should stay counted (not excluded).
+#' @keywords internal
+identify_real_no_show_reschedules <- function(reschedule_event_ids,
+                                              event_call_times,
+                                              event_participant_emails,
+                                              slot_window_minutes = 30) {
+  # ---- start ---- #
+  if (length(reschedule_event_ids) == 0) {
+    return(reschedule_event_ids)
+  }
+
+  events_with_external_lead <- event_participant_emails %>%
+    dplyr::filter(
+      !is.na(email),
+      !is_internal_email(email),
+      !is_synthetic_email(email)
+    ) %>%
+    dplyr::distinct(event_id) %>%
+    dplyr::pull(event_id)
+
+  # Echter No-Show am Slot: interner Call am geplanten Termin UND Absage erst
+  # NACH dem Slot (sonst proaktive Vorher-Verschiebung -> kein No-Show).
+  events_real_no_show <- event_call_times %>%
+    dplyr::filter(
+      !is.na(call_start), !is.na(event_start),
+      abs(as.numeric(difftime(call_start, event_start, units = "mins"))) <= slot_window_minutes,
+      !is.na(event_updated_at), event_updated_at > event_start
+    ) %>%
+    dplyr::distinct(event_id) %>%
+    dplyr::pull(event_id)
+
+  reschedule_event_ids[
+    reschedule_event_ids %in% events_with_external_lead &
+      reschedule_event_ids %in% events_real_no_show
+  ]
 }
