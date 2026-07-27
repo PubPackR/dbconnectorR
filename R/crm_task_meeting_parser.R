@@ -55,8 +55,8 @@ classify_meeting_status <- function(comment_text) {
   x <- tolower(ifelse(is.na(comment_text), "", comment_text))
   dplyr::case_when(
     stringr::str_detect(x, "storn|abgesagt|verschoben|cancel")                      ~ "storniert",
-    stringr::str_detect(x, "no ?show|nicht erschienen|nicht da|kam nicht|nicht aufgetaucht") ~ "no_show",
-    stringr::str_detect(x, "show ?up|erschienen|stattgefunden|gehalten|durchgef|war da")     ~ "show_up",
+    stringr::str_detect(x, "no[ -]?show|nicht erschienen|nicht da|kam nicht|nicht aufgetaucht") ~ "no_show",
+    stringr::str_detect(x, "show[ -]?up|erschienen|stattgefunden|gehalten|durchgef|war da")     ~ "show_up",
     TRUE                                                                            ~ "unbekannt"
   )
 }

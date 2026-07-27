@@ -37,6 +37,8 @@ test_that("classify_meeting_status priorisiert Storno vor No-Show vor Show-Up", 
   expect_equal(classify_meeting_status("No Show, muss neu terminieren"), "no_show")
   expect_equal(classify_meeting_status("hat stattgefunden, lief gut"), "show_up")
   expect_equal(classify_meeting_status("Kunde war da, Show-Up"), "show_up")
+  expect_equal(classify_meeting_status("No-Show"), "no_show")
+  expect_equal(classify_meeting_status("Show-Up"), "show_up")
   expect_equal(classify_meeting_status(""), "unbekannt")
   expect_equal(classify_meeting_status(NA_character_), "unbekannt")
 })
