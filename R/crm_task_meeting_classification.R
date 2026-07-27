@@ -128,9 +128,12 @@ update_crm_task_meeting_classification <- function(con) {
     dplyr::distinct(lead_id, event_date) %>%
     dplyr::collect()
 
-  # assigned_to_user_id bevorzugen, sonst user_id
+  # assigned_to_user_id bevorzugen, sonst user_id. Coalesce im CHARACTER-Raum:
+  # assigned_to_user_id ist bigint/integer64; ifelse() strippt die integer64-Klasse
+  # und liefert Garbage-Doubles -> Match schlaegt still fehl (integer64-Falle).
   crm_tasks$user_id <- ifelse(!is.na(crm_tasks$assigned_to_user_id),
-                              crm_tasks$assigned_to_user_id, crm_tasks$user_id)
+                              as.character(crm_tasks$assigned_to_user_id),
+                              as.character(crm_tasks$user_id))
 
   rows <- assemble_crm_classification_rows(
     crm_tasks = crm_tasks, crm_comments = crm_comments,
@@ -156,16 +159,18 @@ update_crm_task_meeting_classification <- function(con) {
 #' Loest CRM-User auf msgraph-Kontakte auf (best effort)
 #'
 #' Best-effort E-Mail-Join crm_users.user_login -> raw.msgraph_contacts-E-Mail-
-#' Spalte; gibt user_id + contact_id zurueck. DB-abhaengig, von Moritz gegen
-#' echte Spaltenstruktur zu verifizieren.
+#' Spalte; gibt user_id + contact_id zurueck. Der zurueckgegebene `user_id` ist
+#' die Surrogat-Spalte `crm_users.id` — DAS ist die Spalte, die
+#' `raw.crm_lead_tasks.user_id` / `assigned_to_user_id` referenzieren (NICHT
+#' `crm_user_id`; DB-verifiziert 2026-07-24: 186547 vs 0 Join-Treffer).
 #'
 #' @param con Pool/DBI-Connection.
-#' @return data.frame: user_id, contact_id.
+#' @return data.frame: user_id (= crm_users.id), contact_id.
 #' @keywords internal
 resolve_crm_user_contact <- function(con) {
   crm_users <- dplyr::tbl(con, I("raw.crm_users")) %>%
     dplyr::filter(is_deleted == FALSE) %>%
-    dplyr::select(user_id = crm_user_id, user_login) %>%
+    dplyr::select(user_id = id, user_login) %>%
     dplyr::collect()
   contacts <- dplyr::tbl(con, I("raw.msgraph_contacts")) %>%
     dplyr::collect()
