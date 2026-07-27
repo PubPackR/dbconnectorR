@@ -40,3 +40,26 @@ test_that("classify_meeting_status priorisiert Storno vor No-Show vor Show-Up", 
   expect_equal(classify_meeting_status(""), "unbekannt")
   expect_equal(classify_meeting_status(NA_character_), "unbekannt")
 })
+
+test_that("filter_new_crm_meetings behaelt externe Tools immer und Teams nur ohne MSGraph-Match", {
+  crm <- data.frame(
+    crm_task_id     = 1:4,
+    lead_id         = c(10L, 20L, 30L, 40L),
+    event_date      = as.Date(c("2026-07-20", "2026-07-20", "2026-07-21", "2026-07-22")),
+    is_external_tool = c(TRUE, FALSE, FALSE, TRUE),
+    stringsAsFactors = FALSE
+  )
+  msgraph <- data.frame(
+    lead_id    = c(10L, 20L, 99L),
+    event_date = as.Date(c("2026-07-20", "2026-07-20", "2026-07-20")),
+    stringsAsFactors = FALSE
+  )
+  # task 1: extern + MSGraph-Match am selben Tag -> trotzdem BEHALTEN (extern immer)
+  # task 2: teams + MSGraph-Match -> VERWERFEN
+  # task 3: teams + kein Match     -> BEHALTEN
+  # task 4: extern + kein Match    -> BEHALTEN
+  res <- filter_new_crm_meetings(crm, msgraph)
+  expect_equal(sort(res$crm_task_id), c(1L, 3L, 4L))
+  # keine Hilfsspalte durchgereicht
+  expect_false(".in_msgraph" %in% names(res))
+})

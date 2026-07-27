@@ -60,3 +60,24 @@ classify_meeting_status <- function(comment_text) {
     TRUE                                                                            ~ "unbekannt"
   )
 }
+
+#' Behaelt nur CRM-Meetings, die MSGraph noch nicht kennt
+#'
+#' Externe Tools (is_external_tool == TRUE) werden immer behalten (per Definition
+#' nicht in MSGraph). Teams/unbekannt werden nur behalten, wenn kein
+#' MSGraph-Meeting mit gleichem lead_id + event_date existiert.
+#'
+#' @param crm_meetings data.frame mit Spalten lead_id, event_date, is_external_tool (+ beliebige weitere).
+#' @param msgraph_meetings data.frame mit Spalten lead_id, event_date.
+#' @return data.frame — gefilterte Teilmenge von crm_meetings, ohne Hilfsspalten.
+#' @export
+filter_new_crm_meetings <- function(crm_meetings, msgraph_meetings) {
+  ms_keys <- msgraph_meetings %>%
+    dplyr::distinct(lead_id, event_date) %>%
+    dplyr::mutate(.in_msgraph = TRUE)
+
+  crm_meetings %>%
+    dplyr::left_join(ms_keys, by = c("lead_id", "event_date")) %>%
+    dplyr::filter(is_external_tool | is.na(.in_msgraph)) %>%
+    dplyr::select(-.in_msgraph)
+}
