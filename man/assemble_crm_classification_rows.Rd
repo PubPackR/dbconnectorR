@@ -8,7 +8,6 @@ assemble_crm_classification_rows(
   crm_tasks,
   crm_comments,
   crm_user_contact,
-  lead_contact,
   msgraph_meetings
 )
 }
@@ -18,8 +17,6 @@ assemble_crm_classification_rows(
 \item{crm_comments}{data.frame: task_id, comment_name.}
 
 \item{crm_user_contact}{data.frame: user_id, contact_id (Sales-Rep-Kontakt).}
-
-\item{lead_contact}{data.frame: lead_id, contact_id (Lead-Kontakt).}
 
 \item{msgraph_meetings}{data.frame: lead_id, event_date.}
 }

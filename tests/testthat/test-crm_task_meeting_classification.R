@@ -22,10 +22,6 @@ make_comments <- function() {
     stringsAsFactors = FALSE
   )
 }
-make_lead_contact <- function() {
-  data.frame(lead_id = c(10L, 20L, 30L, 40L),
-             contact_id = c(1010L, 2020L, 3030L, 4040L))
-}
 make_user_contact <- function() {
   data.frame(user_id = c(100L, 200L), contact_id = c(5100L, 5200L))
 }
@@ -39,7 +35,6 @@ test_that("assemble bildet nur VC-Termine, wendet Anti-Join und Status korrekt a
     crm_tasks = make_tasks(),
     crm_comments = make_comments(),
     crm_user_contact = make_user_contact(),
-    lead_contact = make_lead_contact(),
     msgraph_meetings = make_msgraph()
   )
   # task 4 (kein VC) raus; task 2 (teams + MSGraph-Match) raus -> bleiben 1 und 3
@@ -51,7 +46,7 @@ test_that("assemble bildet nur VC-Termine, wendet Anti-Join und Status korrekt a
   expect_equal(r1$meeting_status, "no_show")
   expect_true(r1$is_no_show)
   expect_false(r1$excluded)
-  expect_equal(r1$contact_id, 1010L)
+  expect_equal(r1$contact_id, 5100L)
   expect_equal(as.character(r1$crm_event_date), "2026-07-20")
   expect_equal(r1$source, "crm_task")
   expect_true(is.na(r1$call_event_mapping_id))
@@ -61,16 +56,29 @@ test_that("assemble bildet nur VC-Termine, wendet Anti-Join und Status korrekt a
   expect_equal(r3$meeting_tool, "zoom")
   expect_equal(r3$meeting_status, "unbekannt")  # kein Kommentar
   expect_false(r3$is_no_show)
+  expect_equal(r3$contact_id, 5200L)
 })
 
 test_that("storniertes Meeting wird excluded=TRUE, is_no_show=FALSE", {
   tasks <- make_tasks()[1, ]
   comments <- data.frame(task_id = 1L, comment_name = "verschoben auf naechste Woche")
   res <- assemble_crm_classification_rows(
-    tasks, comments, make_user_contact(), make_lead_contact(),
+    tasks, comments, make_user_contact(),
     make_msgraph()[0, ]
   )
   expect_equal(res$meeting_status, "storniert")
   expect_true(res$excluded)
   expect_false(res$is_no_show)
+})
+
+test_that("Zeile wird verworfen, wenn der Rep-Kontakt nicht auflösbar ist", {
+  tasks <- make_tasks()[1, ]
+  tasks$user_id <- 999L  # nicht in crm_user_contact enthalten
+  res <- assemble_crm_classification_rows(
+    crm_tasks = tasks,
+    crm_comments = make_comments(),
+    crm_user_contact = make_user_contact(),
+    msgraph_meetings = make_msgraph()[0, ]
+  )
+  expect_equal(nrow(res), 0)
 })

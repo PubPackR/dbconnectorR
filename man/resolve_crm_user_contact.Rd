@@ -13,8 +13,8 @@ resolve_crm_user_contact(con)
 data.frame: user_id, contact_id.
 }
 \description{
-Primaer via mapping.vw_service_users (connected_service='crm'); Fallback ueber
-crm_users.user_login == personio_persons.email == msgraph_contacts (E-Mail).
-Gibt bei fehlender Aufloesung eine leere/teilweise Tabelle zurueck.
+Best-effort E-Mail-Join crm_users.user_login -> raw.msgraph_contacts-E-Mail-
+Spalte; gibt user_id + contact_id zurueck. DB-abhaengig, von Moritz gegen
+echte Spaltenstruktur zu verifizieren.
 }
 \keyword{internal}
