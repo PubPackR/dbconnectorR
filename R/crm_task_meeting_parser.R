@@ -41,3 +41,22 @@ extract_meeting_tool <- function(task_name) {
 is_external_tool <- function(tool) {
   tool %in% c("webex", "zoom", "google_meet", "skype")
 }
+
+#' Klassifiziert den Meeting-Status aus einem CRM-Task-Kommentar
+#'
+#' Ausschliesslich auf Kommentar-Text anzuwenden (nicht auf Task-Namen, dort
+#' stehen irrefuehrende Notizen zu vergangenen Terminen). Priorisiert:
+#' storniert > no_show > show_up > unbekannt.
+#'
+#' @param comment_text Character(-Vektor) mit dem Kommentar-Text.
+#' @return Character(-Vektor): storniert/no_show/show_up/unbekannt.
+#' @export
+classify_meeting_status <- function(comment_text) {
+  x <- tolower(ifelse(is.na(comment_text), "", comment_text))
+  dplyr::case_when(
+    stringr::str_detect(x, "storn|abgesagt|verschoben|cancel")                      ~ "storniert",
+    stringr::str_detect(x, "no ?show|nicht erschienen|nicht da|kam nicht|nicht aufgetaucht") ~ "no_show",
+    stringr::str_detect(x, "show ?up|erschienen|stattgefunden|gehalten|durchgef|war da")     ~ "show_up",
+    TRUE                                                                            ~ "unbekannt"
+  )
+}
