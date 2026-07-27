@@ -83,3 +83,112 @@ assemble_crm_empty_result <- function() {
     crm_task_id = integer(0), stringsAsFactors = FALSE
   )
 }
+
+#' Aktualisiert die CRM-Task-Meeting-Zeilen in der Klassifikations-Tabelle
+#'
+#' Laeuft als letzter Schritt nach update_extern_event_classification. Schreibt
+#' NUR source='crm_task'-Zeilen (scoped): loescht die bestehenden CRM-Zeilen und
+#' schreibt die frisch berechneten. MSGraph-Zeilen werden nicht beruehrt.
+#'
+#' @param con Pool/DBI-Connection.
+#' @return invisible(Anzahl geschriebener CRM-Zeilen).
+#' @export
+update_crm_task_meeting_classification <- function(con) {
+  message("update_crm_task_meeting_classification: lade CRM-Tasks ...")
+
+  crm_tasks <- dplyr::tbl(con, I("raw.crm_lead_tasks")) %>%
+    dplyr::filter(is_deleted == FALSE) %>%
+    dplyr::select(crm_task_id, lead_id, user_id, assigned_to_user_id,
+                  precise_time, task_name) %>%
+    dplyr::collect()
+
+  crm_comments <- dplyr::tbl(con, I("raw.crm_lead_task_comments")) %>%
+    dplyr::filter(is_deleted == FALSE) %>%
+    dplyr::select(task_id, comment_name) %>%
+    dplyr::collect()
+
+  # Lead -> msgraph-Kontakt (Primary bevorzugt)
+  lead_contact <- dplyr::tbl(con, I("mapping.crm_lead_msgraph_contact")) %>%
+    dplyr::select(lead_id = crm_lead_id, contact_id = msgraph_contact_id,
+                  is_primary_crm) %>%
+    dplyr::collect() %>%
+    dplyr::arrange(dplyr::desc(is_primary_crm)) %>%
+    dplyr::distinct(lead_id, .keep_all = TRUE) %>%
+    dplyr::select(lead_id, contact_id)
+
+  # crm_user -> Personio -> (E-Mail) -> msgraph-Kontakt. Best effort; wenn leer,
+  # bleibt crm_user_contact leer (Rep-Aufloesung optional fuer diese Phase).
+  crm_user_contact <- resolve_crm_user_contact(con)
+
+  # MSGraph-Meetings fuer Anti-Join: lead_id + event_date aus bestehender
+  # Klassifikation (nur msgraph-Zeilen), Datum via mapping.
+  msgraph_meetings <- dplyr::tbl(con, I("processed.msgraph_extern_event_classification")) %>%
+    dplyr::filter(source == "msgraph") %>%
+    dplyr::inner_join(
+      dplyr::tbl(con, I("mapping.msgraph_call_event")) %>%
+        dplyr::select(call_event_mapping_id = id, event_date),
+      by = "call_event_mapping_id") %>%
+    dplyr::inner_join(
+      dplyr::tbl(con, I("mapping.crm_lead_msgraph_contact")) %>%
+        dplyr::select(contact_id = msgraph_contact_id, lead_id = crm_lead_id),
+      by = "contact_id") %>%
+    dplyr::distinct(lead_id, event_date) %>%
+    dplyr::collect()
+
+  # assigned_to_user_id bevorzugen, sonst user_id
+  crm_tasks$user_id <- ifelse(!is.na(crm_tasks$assigned_to_user_id),
+                              crm_tasks$assigned_to_user_id, crm_tasks$user_id)
+
+  rows <- assemble_crm_classification_rows(
+    crm_tasks = crm_tasks, crm_comments = crm_comments,
+    crm_user_contact = crm_user_contact, lead_contact = lead_contact,
+    msgraph_meetings = msgraph_meetings)
+
+  message(paste0("  ", nrow(rows), " CRM-Meeting-Zeilen zu schreiben"))
+
+  # scoped: bestehende CRM-Zeilen loeschen, dann frische schreiben
+  DBI::dbExecute(con,
+    "DELETE FROM processed.msgraph_extern_event_classification WHERE source = 'crm_task'")
+
+  if (nrow(rows) > 0) {
+    Billomatics::postgres_upsert_data(
+      con, "processed", "msgraph_extern_event_classification",
+      rows, match_cols = c("crm_task_id", "contact_id"), delete_missing = FALSE)
+  }
+  message("  fertig.")
+  invisible(nrow(rows))
+}
+
+#' Loest CRM-User auf msgraph-Kontakte auf (best effort)
+#'
+#' Primaer via mapping.vw_service_users (connected_service='crm'); Fallback ueber
+#' crm_users.user_login == personio_persons.email == msgraph_contacts (E-Mail).
+#' Gibt bei fehlender Aufloesung eine leere/teilweise Tabelle zurueck.
+#'
+#' @param con Pool/DBI-Connection.
+#' @return data.frame: user_id, contact_id.
+#' @keywords internal
+resolve_crm_user_contact <- function(con) {
+  # Diese Aufloesung ist DB-abhaengig und wird von Moritz gegen die echte DB
+  # verifiziert (vw_service_users-crm-Zweig vorhanden?). Vorerst E-Mail-Fallback.
+  crm_users <- dplyr::tbl(con, I("raw.crm_users")) %>%
+    dplyr::filter(is_deleted == FALSE) %>%
+    dplyr::select(user_id = crm_user_id, user_login) %>%
+    dplyr::collect()
+  personio <- dplyr::tbl(con, I("raw.personio_persons")) %>%
+    dplyr::select(email) %>% dplyr::collect()
+  contacts <- dplyr::tbl(con, I("raw.msgraph_contacts")) %>%
+    dplyr::collect()
+  # E-Mail-Join crm_users.user_login -> msgraph_contacts (best effort).
+  # Wenn keine Kontakt-E-Mail-Spalte existiert, bleibt das Ergebnis leer.
+  email_col <- intersect(c("email", "mail", "address"), names(contacts))
+  if (length(email_col) == 0) {
+    return(data.frame(user_id = integer(0), contact_id = integer(0)))
+  }
+  contacts$.email <- tolower(contacts[[email_col[1]]])
+  crm_users$.email <- tolower(crm_users$user_login)
+  merged <- merge(crm_users, contacts, by = ".email")
+  id_col <- intersect(c("contact_id", "msgraph_contact_id", "id"), names(contacts))
+  data.frame(user_id = merged$user_id,
+             contact_id = merged[[id_col[1]]])
+}
