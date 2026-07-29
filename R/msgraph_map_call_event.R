@@ -63,7 +63,18 @@ msgraph_map_calls_events <- function(con) {
     )) %>%
     dplyr::mutate(event_class = paste0(event_class_planed, "_planned", "_", event_class_call, "_call")) %>%
     dplyr::filter(!is.na(event_class)) %>%
-    dplyr::distinct(call_id, event_id, meeting_id, event_class, event_date = date, call_start) %>%
+    # event_is_canceled wird mitgefuehrt, damit Konsumenten eine Absage von einem
+    # No-Show unterscheiden koennen. Bisher endete die Information hier: sie war
+    # oben in den Filtern verfuegbar, wurde aber nicht in die Zieltabelle
+    # geschrieben, und mapping.msgraph_call_event hatte keine Spalte dafuer.
+    # Bewusst NICHT "is_canceled": mehrere Konsumenten joinen diese Tabelle direkt
+    # mit raw.msgraph_events, das die Spalte bereits fuehrt (z.B. base-41
+    # do/main_postgres.R). Ein gleicher Name erzeugte dort is_canceled.x/.y und
+    # brechende select()-Aufrufe.
+    # Die Spalte ist je event_id konstant und aendert die Granularitaet des
+    # distinct() daher nicht.
+    dplyr::distinct(call_id, event_id, meeting_id, event_class, event_date = date, call_start,
+                    event_is_canceled = is_canceled) %>%
     dplyr::mutate(full_match = !is.na(call_id) & !is.na(event_id)) %>%
     dplyr::group_by(call_id) %>%
     dplyr::mutate(has_ever_full_match_call = max(full_match, na.rm = TRUE)) %>%
