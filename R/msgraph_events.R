@@ -248,8 +248,20 @@ update_events <- function(con, all_calendar_events_, startDate,
   # Im Normalbetrieb deckt der Download fast den kompletten Bestand im
   # Zeitfenster ab; echte Absagen sind Einzelfaelle. Faellt die Abdeckung unter
   # die Schwelle, wird in diesem Lauf gar nicht storniert. Bewusst
-  # log-and-degrade statt stop(): eine ausgebliebene Stornierung holt der
-  # naechste gesunde Lauf nach, eine falsche Absage-Welle nicht.
+  # log-and-degrade statt stop(): der Rest der Ingestion soll weiterlaufen und
+  # der Vorfall sichtbar geloggt werden.
+  # Der Tradeoff ist bewusst asymmetrisch -- lieber eine Stornierung verpassen
+  # als eine falsche Absage-Welle. ACHTUNG, zwei Grenzen, die das mitkauft:
+  #  (1) Ist das Verschwinden ECHT (geloeschte Serie, geraeumter Kalender,
+  #      Massen-Storno), heilt sich die Abdeckung nicht von selbst -- die
+  #      Stornierung bleibt dauerhaft aus, bis unabhaengige Neu-Events das
+  #      Verhaeltnis ueber die Schwelle verduennen. Das ist der akzeptierte Preis.
+  #  (2) Der Guard rechnet AGGREGIERT ueber alle Booking-Businesses eines Laufs.
+  #      Faellt ein Minderheits-Business still aus (HTTP 200 mit leerem value,
+  #      kein error), drueckt das die Abdeckung nur anteilig; bleibt sie > Schwelle,
+  #      greift der Guard NICHT und dessen Events werden faelschlich storniert.
+  #      Harte Fehler crashen den Lauf ohnehin vorher (retrieve_* stop()). Eine
+  #      Pro-Business-Abdeckungspruefung waere der saubere Fix (Follow-up).
   in_scope_n <- nrow(events_in_scope)
   coverage_check <- cancellation_coverage_check(
     in_scope_n   = in_scope_n,
