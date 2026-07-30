@@ -561,74 +561,62 @@ list_meeting_transcripts <- function(access_token, user_id, meeting_id) {
 }
 
 
-#' Internal users that can be used to query a call's meeting
+#' Meeting organisers for a set of calls
 #'
-#' Priority: the organiser of the calendar event first, then every internal
-#' participant of the call. Only the organiser's identity resolves the meeting
-#' id, so the order matters.
+#' Only the organiser is of any use here, and that is not a preference but a
+#' property of the id format: the meeting id is
+#' base64("1*<organizer-oid>*0**<threadId>") — the organiser's object id is part
+#' of the identifier. Building it with any other user's oid does not ask for
+#' "this meeting as seen by that person", it asks for a meeting that does not
+#' exist, and Graph answers 403.
+#'
+#' An earlier version walked every internal participant as a fallback. That
+#' produced nothing but failed requests and misleading Forbidden messages.
+#'
+#' Note the limitation this implies: the organiser is taken from the calendar
+#' event (raw.msgraph_event_participants.is_organizer). Meetings organised by
+#' someone outside the tenant, or whose event is not in our data, cannot be
+#' served by this route at all — that is a boundary of the approach, not a
+#' failure.
 #'
 #' @param con Database connection
 #' @param call_ids Vector of call ids
 #' @param call_event_mapping Data frame of call-event mappings (already loaded)
 #' @param users Data frame of internal users (already loaded)
 #'
-#' @return Data frame with call_id, msgraph_user_id and priority
+#' @return Data frame with call_id and msgraph_user_id of the organiser
 #' @keywords internal
 # ---- start ---- #
-get_internal_candidates_for_calls <- function(con, call_ids, call_event_mapping, users) {
-  empty <- tibble::tibble(call_id = integer(0), msgraph_user_id = character(0),
-                          priority = integer(0))
+get_meeting_organizers_for_calls <- function(con, call_ids, call_event_mapping, users) {
+  empty <- tibble::tibble(call_id = integer(0), msgraph_user_id = character(0))
   if (length(call_ids) == 0) return(empty)
 
   user_lookup <- users %>%
     dplyr::select(msgraph_user_id, email) %>%
     dplyr::filter(!is.na(email))
 
-  # 1. organiser of the calendar event
   event_map <- call_event_mapping %>%
     dplyr::filter(call_id %in% !!call_ids, !is.na(event_id), event_id > 0) %>%
     dplyr::select(call_id, event_id)
 
-  organizers <- empty
-  if (nrow(event_map) > 0) {
-    organizers <- tryCatch({
-      dplyr::tbl(con, I("raw.msgraph_event_participants")) %>%
-        dplyr::filter(event_id %in% !!unique(event_map$event_id), is_organizer == TRUE) %>%
-        dplyr::inner_join(
-          dplyr::tbl(con, I("raw.msgraph_contacts")) %>% dplyr::select(id, email),
-          by = c("contact_id" = "id")
-        ) %>%
-        dplyr::select(event_id, email) %>%
-        dplyr::collect() %>%
-        dplyr::inner_join(event_map, by = "event_id") %>%
-        dplyr::inner_join(user_lookup, by = "email") %>%
-        dplyr::transmute(call_id, msgraph_user_id, priority = 1L)
-    }, error = function(e) {
-      message("[WARNING] Could not resolve event organisers: ", e$message)
-      empty
-    })
-  }
+  if (nrow(event_map) == 0) return(empty)
 
-  # 2. internal participants of the call
-  participants <- tryCatch({
-    dplyr::tbl(con, I("raw.msgraph_call_participants")) %>%
-      dplyr::filter(call_id %in% !!call_ids) %>%
+  tryCatch({
+    dplyr::tbl(con, I("raw.msgraph_event_participants")) %>%
+      dplyr::filter(event_id %in% !!unique(event_map$event_id), is_organizer == TRUE) %>%
       dplyr::inner_join(
         dplyr::tbl(con, I("raw.msgraph_contacts")) %>% dplyr::select(id, email),
         by = c("contact_id" = "id")
       ) %>%
-      dplyr::select(call_id, email) %>%
+      dplyr::select(event_id, email) %>%
       dplyr::collect() %>%
+      dplyr::inner_join(event_map, by = "event_id") %>%
       dplyr::inner_join(user_lookup, by = "email") %>%
-      dplyr::transmute(call_id, msgraph_user_id, priority = 2L)
+      dplyr::distinct(call_id, msgraph_user_id)
   }, error = function(e) {
-    message("[WARNING] Could not resolve call participants: ", e$message)
+    message("[WARNING] Could not resolve event organisers: ", e$message)
     empty
   })
-
-  dplyr::bind_rows(organizers, participants) %>%
-    dplyr::arrange(call_id, priority) %>%
-    dplyr::distinct(call_id, msgraph_user_id, .keep_all = TRUE)
 }
 
 
@@ -721,9 +709,16 @@ fetch_transcripts_for_open_calls <- function(con,
     message("[completion] ", nrow(open_calls), " external call(s) without content to check.")
   }
 
-  candidates <- get_internal_candidates_for_calls(
+  organizers <- get_meeting_organizers_for_calls(
     con, open_calls$id, call_event_mapping, users
   )
+
+  ohne_organisator <- sum(!open_calls$id %in% organizers$call_id)
+  if (ohne_organisator > 0) {
+    message("[completion] ", ohne_organisator, " of ", nrow(open_calls),
+            " call(s) have no internal meeting organiser - not reachable via ",
+            "this route (organiser outside the tenant, or event not in our data).")
+  }
 
   access_token <- MSGraph::authorize_graph(
     authentication_msgraph$tenant_id,
@@ -731,10 +726,11 @@ fetch_transcripts_for_open_calls <- function(con,
     authentication_msgraph$access_token
   )
 
-  rows       <- list()
-  recovered  <- 0L
-  not_found  <- 0L
-  api_errors <- 0L
+  rows         <- list()
+  recovered    <- 0L
+  not_found    <- 0L
+  api_errors   <- 0L
+  no_organizer <- 0L
 
   for (i in seq_len(nrow(open_calls))) {
     call_row <- open_calls[i, ]
@@ -751,13 +747,14 @@ fetch_transcripts_for_open_calls <- function(con,
       )
     }
 
-    uids <- candidates %>%
+    uids <- organizers %>%
       dplyr::filter(call_id == call_row$id[1]) %>%
       dplyr::pull(msgraph_user_id)
 
+    # No internal organiser means there is nothing to try: without their oid the
+    # meeting id cannot be built. Counted separately from an API failure.
     if (length(uids) == 0) {
-      message("[completion] call ", call_row$id[1], ": no internal candidate")
-      not_found <- not_found + 1L
+      no_organizer <- no_organizer + 1L
       next
     }
 
@@ -859,18 +856,20 @@ fetch_transcripts_for_open_calls <- function(con,
     recovered <- recovered + 1L
   }
 
-  message("[completion] recovered ", recovered, " transcript(s), ",
-          not_found, " call(s) without a usable transcript.")
+  message("[completion] recovered ", recovered, " transcript(s) | ",
+          no_organizer, " without internal organiser | ",
+          not_found, " without a usable transcript | ",
+          api_errors, " Graph error(s).")
 
-  # Eine Haeufung von API-Fehlern ist kein "kein Transkript vorhanden", sondern
-  # ein Zugriffs- oder Token-Problem. Das muss auffallen, nicht in der Bilanz
-  # verschwinden - nach der Tenant-Migration ist 403 (ausserhalb der Policy)
-  # der wahrscheinlichste Fall.
+  # Now that only the organiser is queried, a Graph error is genuinely an
+  # access or token problem — with participant guessing removed, the expected
+  # 403s are gone. A cluster of them must surface rather than disappear into
+  # the tally; after the tenant migration an out-of-policy 403 is the likely
+  # cause.
   if (api_errors > 0) {
-    warning("[completion] ", api_errors, " of ", nrow(open_calls),
-            " call(s) failed with a Graph error rather than an empty result - ",
-            "check token validity and the application access policy.",
-            call. = FALSE)
+    warning("[completion] ", api_errors, " call(s) failed with a Graph error ",
+            "while querying the meeting organiser - check token validity and ",
+            "the application access policy.", call. = FALSE)
   }
 
   if (length(rows) == 0) return(empty_result)
