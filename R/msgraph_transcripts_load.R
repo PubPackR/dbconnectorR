@@ -151,7 +151,7 @@ get_and_save_transcript_data <- function(con,
   message("Fetching transcripts from: ", format(start_date, "%Y-%m-%dT%H:%M:%SZ"),
           " to ", format(end_date, "%Y-%m-%dT%H:%M:%SZ"))
 
-  # Fetch transcripts
+  # Pass 1: organizer-scoped enumeration via getAllTranscripts.
   new_transcripts <- fetch_transcripts_for_all_users(
     users = users,
     all_events_categorised_df = call_event_mapping,
@@ -162,6 +162,33 @@ get_and_save_transcript_data <- function(con,
     existing_transcript_ids = existing_transcript_ids,
     con = con
   )
+
+  # Pass 2: close the gaps pass 1 cannot see.
+  #
+  # getAllTranscripts enumerates over the organizer's Exchange calendar — the
+  # IDs it returns carry a calendar anchor ("2##1<oid><tenant><GlobalObjectId>##
+  # <guid>"). Meetings whose anchor is missing or stale are simply absent from
+  # that result, without any error. The meeting-scoped endpoint enumerates over
+  # the call instead and still knows them; verified on call_id 666374, where
+  # getAllTranscripts returned nothing and the meeting endpoint returned an
+  # intact transcript of 82716 characters.
+  #
+  # This pass is deliberately additive: pass 1 covers the vast majority and
+  # stays untouched. Once getAllTranscripts is dropped for the tenant migration
+  # (see the endpoint overview, which already lists it as replaced by #6), the
+  # call to pass 1 above is the only thing that needs to go.
+  completion_transcripts <- fetch_transcripts_for_open_calls(
+    con                     = con,
+    authentication_msgraph  = authentication_msgraph,
+    users                   = users,
+    calls                   = calls,
+    call_event_mapping      = call_event_mapping,
+    start_date              = start_date,
+    end_date                = end_date,
+    handled_call_ids        = if (nrow(new_transcripts) > 0) new_transcripts$call_id else integer(0)
+  )
+
+  new_transcripts <- dplyr::bind_rows(new_transcripts, completion_transcripts)
 
   # Save to database
   if (nrow(new_transcripts) > 0) {
@@ -408,6 +435,394 @@ get_transcript_row <- function(entry,
       transcript_summary_anonymized = NA_character_
     ))
   }
+}
+
+
+################################################################################
+# Meeting-scoped Completion Pass
+#
+# getAllTranscripts enumerates over the organizer's Exchange calendar and
+# silently omits meetings whose calendar anchor is missing or stale. The
+# functions below enumerate over the call instead, which the meeting-scoped
+# endpoint /onlineMeetings/{id}/transcripts still knows about.
+################################################################################
+
+#' Build the Graph Online-Meeting ID
+#'
+#' The ID is deterministic and needs no lookup call:
+#'   base64("1*<organizer-oid>*0**<threadId>")
+#' Verified byte-for-byte against a stored transcript_url.
+#'
+#' jsonlite::base64_enc wraps long output — the line breaks have to go, they
+#' would corrupt the URL.
+#'
+#' @param organizer_oid msgraph_user_id of the organising person
+#' @param thread_id Teams thread id, as stored in raw.msgraph_calls.meeting_id
+#'
+#' @return base64-encoded meeting id
+#' @keywords internal
+# ---- start ---- #
+build_online_meeting_id <- function(organizer_oid, thread_id) {
+  gsub("[\r\n]", "",
+       jsonlite::base64_enc(charToRaw(paste0("1*", organizer_oid, "*0**", thread_id))))
+}
+
+
+#' Does a transcript fall into a call's time window?
+#'
+#' One Teams meeting can produce several call records, so a transcript has to be
+#' attributed to exactly one of them. The transcript id cannot be used for that:
+#' unlike the getAllTranscripts ids (base64 of "2##1<oid><tenant><GOID>##<guid>")
+#' the meeting-scoped ids are opaque and carry no call reference.
+#'
+#' The time window is what production already uses in get_call_id(): same
+#' meeting, and the transcript created strictly between call start and end.
+#' Checked against both known cases — each transcript falls into its own call's
+#' window and into no other.
+#'
+#' @param created_date_time createdDateTime from the Graph response
+#' @param call_start Start of the call (POSIXct)
+#' @param call_end End of the call (POSIXct)
+#'
+#' @return TRUE when the transcript was created during the call
+#' @keywords internal
+# ---- start ---- #
+transcript_within_call_window <- function(created_date_time, call_start, call_end) {
+  created <- suppressWarnings(
+    lubridate::ymd_hms(as.character(created_date_time), quiet = TRUE)
+  )
+  if (length(created) == 0 || is.na(created[1])) return(FALSE)
+
+  isTRUE(created[1] > call_start && created[1] < call_end)
+}
+
+
+#' Is this transcript entry a dead stub?
+#'
+#' The meeting-scoped endpoint also returns stubs that never carry content:
+#' end date on the zero date and no contentCorrelationId. They answer every
+#' content request with 404.
+#'
+#' @param entry One entry of the Graph response
+#'
+#' @return TRUE for a stub
+#' @keywords internal
+# ---- start ---- #
+is_dead_transcript_stub <- function(entry) {
+  correlation_id <- entry$contentCorrelationId
+  end_date_time  <- entry$endDateTime
+
+  no_correlation <- is.null(correlation_id) || length(correlation_id) == 0 ||
+    is.na(correlation_id[1]) || !nzchar(as.character(correlation_id[1]))
+  zero_date <- !is.null(end_date_time) && length(end_date_time) > 0 &&
+    !is.na(end_date_time[1]) && grepl("^0001-01-01", as.character(end_date_time[1]))
+
+  no_correlation || zero_date
+}
+
+
+#' List all transcripts of one meeting
+#'
+#' @param access_token MS Graph access token
+#' @param user_id msgraph_user_id used as the calling identity
+#' @param meeting_id base64 meeting id from build_online_meeting_id()
+#'
+#' @return List of entries, empty when nothing is available
+#' @keywords internal
+# ---- start ---- #
+list_meeting_transcripts <- function(access_token, user_id, meeting_id) {
+  url <- paste0("https://graph.microsoft.com/beta/users/", user_id,
+                "/onlineMeetings/", meeting_id, "/transcripts")
+
+  parsed <- fetch_with_retry(url, access_token)
+
+  if (!is.list(parsed) || is.null(parsed$value) || length(parsed$value) == 0) {
+    return(list())
+  }
+
+  parsed$value
+}
+
+
+#' Internal users that can be used to query a call's meeting
+#'
+#' Priority: the organiser of the calendar event first, then every internal
+#' participant of the call. Only the organiser's identity resolves the meeting
+#' id, so the order matters.
+#'
+#' @param con Database connection
+#' @param call_ids Vector of call ids
+#' @param call_event_mapping Data frame of call-event mappings (already loaded)
+#' @param users Data frame of internal users (already loaded)
+#'
+#' @return Data frame with call_id, msgraph_user_id and priority
+#' @keywords internal
+# ---- start ---- #
+get_internal_candidates_for_calls <- function(con, call_ids, call_event_mapping, users) {
+  empty <- tibble::tibble(call_id = integer(0), msgraph_user_id = character(0),
+                          priority = integer(0))
+  if (length(call_ids) == 0) return(empty)
+
+  user_lookup <- users %>%
+    dplyr::select(msgraph_user_id, email) %>%
+    dplyr::filter(!is.na(email))
+
+  # 1. organiser of the calendar event
+  event_map <- call_event_mapping %>%
+    dplyr::filter(call_id %in% !!call_ids, !is.na(event_id), event_id > 0) %>%
+    dplyr::select(call_id, event_id)
+
+  organizers <- empty
+  if (nrow(event_map) > 0) {
+    organizers <- tryCatch({
+      dplyr::tbl(con, I("raw.msgraph_event_participants")) %>%
+        dplyr::filter(event_id %in% !!unique(event_map$event_id), is_organizer == TRUE) %>%
+        dplyr::inner_join(
+          dplyr::tbl(con, I("raw.msgraph_contacts")) %>% dplyr::select(id, email),
+          by = c("contact_id" = "id")
+        ) %>%
+        dplyr::select(event_id, email) %>%
+        dplyr::collect() %>%
+        dplyr::inner_join(event_map, by = "event_id") %>%
+        dplyr::inner_join(user_lookup, by = "email") %>%
+        dplyr::transmute(call_id, msgraph_user_id, priority = 1L)
+    }, error = function(e) {
+      message("[WARNING] Could not resolve event organisers: ", e$message)
+      empty
+    })
+  }
+
+  # 2. internal participants of the call
+  participants <- tryCatch({
+    dplyr::tbl(con, I("raw.msgraph_call_participants")) %>%
+      dplyr::filter(call_id %in% !!call_ids) %>%
+      dplyr::inner_join(
+        dplyr::tbl(con, I("raw.msgraph_contacts")) %>% dplyr::select(id, email),
+        by = c("contact_id" = "id")
+      ) %>%
+      dplyr::select(call_id, email) %>%
+      dplyr::collect() %>%
+      dplyr::inner_join(user_lookup, by = "email") %>%
+      dplyr::transmute(call_id, msgraph_user_id, priority = 2L)
+  }, error = function(e) {
+    message("[WARNING] Could not resolve call participants: ", e$message)
+    empty
+  })
+
+  dplyr::bind_rows(organizers, participants) %>%
+    dplyr::arrange(call_id, priority) %>%
+    dplyr::distinct(call_id, msgraph_user_id, .keep_all = TRUE)
+}
+
+
+#' Fetch transcripts for calls that pass 1 left without content
+#'
+#' Walks the external calls of the load window that still have no transcript
+#' content, builds the meeting id from organiser and thread id, and reads the
+#' transcript from the meeting-scoped endpoint.
+#'
+#' Attribution is by time window — same meeting, transcript created strictly
+#' between call start and end, exactly as get_call_id() does it. One Teams
+#' meeting can produce several call records; the window is what separates them.
+#' Anything ambiguous is left alone rather than guessed.
+#'
+#' @param con Database connection
+#' @param authentication_msgraph List with tenant_id, client_id, access_token
+#' @param users Data frame of internal users (already loaded)
+#' @param calls Data frame of calls (already loaded)
+#' @param call_event_mapping Data frame of call-event mappings (already loaded)
+#' @param start_date Start of the load window (POSIXct)
+#' @param end_date End of the load window (POSIXct)
+#' @param handled_call_ids Call ids that pass 1 already produced a row for
+#' @param max_calls Upper bound per run; a truncation is logged, never silent
+#'
+#' @return Tibble in the same shape as get_transcript_row(), possibly empty
+#' @keywords internal
+# ---- start ---- #
+fetch_transcripts_for_open_calls <- function(con,
+                                             authentication_msgraph,
+                                             users,
+                                             calls,
+                                             call_event_mapping,
+                                             start_date,
+                                             end_date,
+                                             handled_call_ids = integer(0),
+                                             max_calls = 150) {
+
+  empty_result <- tibble::tibble()
+
+  extern_call_ids <- call_event_mapping %>%
+    dplyr::filter(grepl("extern", event_class), !is.na(call_id)) %>%
+    dplyr::pull(call_id) %>%
+    unique()
+
+  if (length(extern_call_ids) == 0) return(empty_result)
+
+  open_calls <- calls %>%
+    dplyr::filter(
+      id %in% extern_call_ids,
+      !is.na(meeting_id), nzchar(meeting_id),
+      call_start >= start_date,
+      call_start <= end_date
+    )
+
+  # Never touch a call that pass 1 already handled — the two endpoints use
+  # different transcript id spaces, so a second row would not be deduplicated
+  # by match_cols = transcript_id and the call would end up with two rows.
+  if (length(handled_call_ids) > 0) {
+    open_calls <- open_calls %>% dplyr::filter(!id %in% handled_call_ids)
+  }
+
+  calls_with_content <- tryCatch({
+    dplyr::tbl(con, I("processed.msgraph_call_transcripts")) %>%
+      dplyr::filter(!is.na(transcript_content), !is.na(call_id)) %>%
+      dplyr::distinct(call_id) %>%
+      dplyr::collect() %>%
+      dplyr::pull(call_id)
+  }, error = function(e) {
+    message("[WARNING] Could not read existing transcript content: ", e$message)
+    integer(0)
+  })
+
+  if (length(calls_with_content) > 0) {
+    open_calls <- open_calls %>% dplyr::filter(!id %in% calls_with_content)
+  }
+
+  if (nrow(open_calls) == 0) {
+    message("[completion] No external calls without transcript content in the window.")
+    return(empty_result)
+  }
+
+  open_calls <- open_calls %>% dplyr::arrange(dplyr::desc(call_start))
+
+  if (nrow(open_calls) > max_calls) {
+    message("[completion] ", nrow(open_calls), " open calls, processing the ",
+            max_calls, " most recent — ", nrow(open_calls) - max_calls,
+            " NOT processed in this run (max_calls).")
+    open_calls <- open_calls[seq_len(max_calls), ]
+  } else {
+    message("[completion] ", nrow(open_calls), " external call(s) without content to check.")
+  }
+
+  candidates <- get_internal_candidates_for_calls(
+    con, open_calls$id, call_event_mapping, users
+  )
+
+  access_token <- MSGraph::authorize_graph(
+    authentication_msgraph$tenant_id,
+    authentication_msgraph$client_id,
+    authentication_msgraph$access_token
+  )
+
+  rows       <- list()
+  recovered  <- 0L
+  not_found  <- 0L
+
+  for (i in seq_len(nrow(open_calls))) {
+    call_row <- open_calls[i, ]
+
+    uids <- candidates %>%
+      dplyr::filter(call_id == call_row$id[1]) %>%
+      dplyr::pull(msgraph_user_id)
+
+    if (length(uids) == 0) {
+      message("[completion] call ", call_row$id[1], ": no internal candidate")
+      not_found <- not_found + 1L
+      next
+    }
+
+    entries <- list()
+    for (uid in uids) {
+      entries <- list_meeting_transcripts(
+        access_token, uid, build_online_meeting_id(uid, call_row$meeting_id[1])
+      )
+      if (length(entries) > 0) break
+    }
+
+    if (length(entries) == 0) {
+      not_found <- not_found + 1L
+      next
+    }
+
+    alive <- Filter(function(e) !is_dead_transcript_stub(e), entries)
+    if (length(alive) == 0) {
+      message("[completion] call ", call_row$id[1], ": only dead stub(s) available")
+      not_found <- not_found + 1L
+      next
+    }
+
+    matched <- Filter(
+      function(e) transcript_within_call_window(
+        e$createdDateTime, call_row$call_start[1], call_row$call_end[1]
+      ),
+      alive
+    )
+
+    # Exactly one hit or nothing. Two transcripts inside the same call window
+    # would be ambiguous, and guessing is worse than leaving the call open —
+    # it stays a candidate for the next run.
+    if (length(matched) != 1) {
+      message("[completion] call ", call_row$id[1], ": ", length(matched),
+              " transcript(s) inside the call window out of ", length(alive),
+              " live entr(y/ies) - skipped")
+      not_found <- not_found + 1L
+      next
+    }
+
+    entry <- matched[[1]]
+
+    content_url <- as.character(entry$transcriptContentUrl)
+    if (length(content_url) == 0 || is.na(content_url) || !nzchar(content_url)) {
+      message("[completion] call ", call_row$id[1], ": entry without transcriptContentUrl")
+      not_found <- not_found + 1L
+      next
+    }
+
+    transcript_content <- tryCatch(
+      get_content_transcript_url(access_token, content_url),
+      error = function(e) {
+        message("[completion] call ", call_row$id[1], ": download failed - ", e$message)
+        NA_character_
+      }
+    )
+
+    # No placeholder row on failure: the call keeps no content and is retried on
+    # the next run, which is the self-healing behaviour we want here.
+    if (is.na(transcript_content) || !nzchar(transcript_content)) {
+      not_found <- not_found + 1L
+      next
+    }
+
+    # raw.msgraph_calls.id is a bigint and arrives as integer64. Without bit64
+    # loaded, as.integer() on it silently yields 0 instead of NA — that would
+    # attach the transcript to a non-existent call. Fail loudly instead.
+    call_id_value <- suppressWarnings(as.integer(call_row$id[1]))
+    if (is.na(call_id_value) || call_id_value == 0L) {
+      message("[completion] call ", call_row$id[1],
+              ": call_id conversion failed (integer64 without bit64?) - skipped")
+      not_found <- not_found + 1L
+      next
+    }
+
+    rows[[length(rows) + 1]] <- tibble::tibble(
+      transcript_id                 = as.character(entry$id),
+      call_id                       = call_id_value,
+      transcript_url                = content_url,
+      transcript_created_at         = lubridate::ymd_hms(as.character(entry$createdDateTime)),
+      transcript_content            = as.character(transcript_content),
+      transcript_content_anonymized = NA_character_,
+      transcript_summary            = NA_character_,
+      transcript_summary_anonymized = NA_character_
+    )
+    recovered <- recovered + 1L
+  }
+
+  message("[completion] recovered ", recovered, " transcript(s), ",
+          not_found, " call(s) without a usable transcript.")
+
+  if (length(rows) == 0) return(empty_result)
+
+  dplyr::bind_rows(rows)
 }
 
 
