@@ -523,11 +523,19 @@ is_dead_transcript_stub <- function(entry) {
 
 #' List all transcripts of one meeting
 #'
+#' Separates "no transcript" from "the request failed". fetch_with_retry() only
+#' special-cases 401-with-provider, 429, 5xx and 404 — every other status, in
+#' particular 400, 401-with-string-token and 403, ends up in its success branch
+#' and returns the parsed Graph error object. Without the check below an expired
+#' token or an out-of-policy user would be indistinguishable from a meeting that
+#' simply has no transcript, and the completion pass would silently report
+#' nothing to recover.
+#'
 #' @param access_token MS Graph access token
 #' @param user_id msgraph_user_id used as the calling identity
 #' @param meeting_id base64 meeting id from build_online_meeting_id()
 #'
-#' @return List of entries, empty when nothing is available
+#' @return List with entries (possibly empty) and error (character or NULL)
 #' @keywords internal
 # ---- start ---- #
 list_meeting_transcripts <- function(access_token, user_id, meeting_id) {
@@ -536,11 +544,20 @@ list_meeting_transcripts <- function(access_token, user_id, meeting_id) {
 
   parsed <- fetch_with_retry(url, access_token)
 
-  if (!is.list(parsed) || is.null(parsed$value) || length(parsed$value) == 0) {
-    return(list())
+  if (is.list(parsed) && !is.null(parsed$error)) {
+    # kein %||%: das ist erst ab R 4.4.0 in base, die Version auf dem Server
+    # ist nicht garantiert und bit64/base-Abhaengigkeiten sind hier ohnehin eng
+    code   <- if (is.null(parsed$error$code)) "unknown" else as.character(parsed$error$code)[1]
+    detail <- if (is.null(parsed$error$message)) "" else as.character(parsed$error$message)[1]
+    return(list(entries = list(),
+                error = paste0(code, ": ", substr(detail, 1, 200))))
   }
 
-  parsed$value
+  if (!is.list(parsed) || is.null(parsed$value) || length(parsed$value) == 0) {
+    return(list(entries = list(), error = NULL))
+  }
+
+  list(entries = parsed$value, error = NULL)
 }
 
 
@@ -717,9 +734,22 @@ fetch_transcripts_for_open_calls <- function(con,
   rows       <- list()
   recovered  <- 0L
   not_found  <- 0L
+  api_errors <- 0L
 
   for (i in seq_len(nrow(open_calls))) {
     call_row <- open_calls[i, ]
+
+    # Der Token wird einmal am Anfang geholt und haelt rund eine Stunde. Bei
+    # max_calls = 150 und zwei Requests je Call kann ein Lauf daran kratzen.
+    # fetch_with_retry kann hier nicht selbst erneuern, weil ein String-Token
+    # uebergeben wird - ein 401 landete sonst als Fehlerobjekt in der Auswertung.
+    if (i > 1 && (i - 1) %% 50 == 0) {
+      access_token <- MSGraph::authorize_graph(
+        authentication_msgraph$tenant_id,
+        authentication_msgraph$client_id,
+        authentication_msgraph$access_token
+      )
+    }
 
     uids <- candidates %>%
       dplyr::filter(call_id == call_row$id[1]) %>%
@@ -731,15 +761,27 @@ fetch_transcripts_for_open_calls <- function(con,
       next
     }
 
-    entries <- list()
+    entries    <- list()
+    last_error <- NULL
     for (uid in uids) {
-      entries <- list_meeting_transcripts(
+      result <- list_meeting_transcripts(
         access_token, uid, build_online_meeting_id(uid, call_row$meeting_id[1])
       )
-      if (length(entries) > 0) break
+      if (!is.null(result$error)) {
+        last_error <- result$error
+        next
+      }
+      if (length(result$entries) > 0) {
+        entries <- result$entries
+        break
+      }
     }
 
     if (length(entries) == 0) {
+      if (!is.null(last_error)) {
+        message("[completion] call ", call_row$id[1], ": Graph error - ", last_error)
+        api_errors <- api_errors + 1L
+      }
       not_found <- not_found + 1L
       next
     }
@@ -819,6 +861,17 @@ fetch_transcripts_for_open_calls <- function(con,
 
   message("[completion] recovered ", recovered, " transcript(s), ",
           not_found, " call(s) without a usable transcript.")
+
+  # Eine Haeufung von API-Fehlern ist kein "kein Transkript vorhanden", sondern
+  # ein Zugriffs- oder Token-Problem. Das muss auffallen, nicht in der Bilanz
+  # verschwinden - nach der Tenant-Migration ist 403 (ausserhalb der Policy)
+  # der wahrscheinlichste Fall.
+  if (api_errors > 0) {
+    warning("[completion] ", api_errors, " of ", nrow(open_calls),
+            " call(s) failed with a Graph error rather than an empty result - ",
+            "check token validity and the application access policy.",
+            call. = FALSE)
+  }
 
   if (length(rows) == 0) return(empty_result)
 
