@@ -1213,8 +1213,15 @@ export_unmappable_to_debug_lead <- function(con, crm_api_key, unmappable_transcr
       )
     )
 
+    # A date-only value here would not survive the round trip: the ingestion
+    # parses occurred_at with lubridate::ymd_hms(), which returns NA for a
+    # plain date and falls back to protocol_created_at. A failed PUT would
+    # then look identical to a successful one in our data, so this uses the
+    # same full local timestamp as the mapped export path, not just the date.
     if (!is.na(meeting_date)) {
-      json_data$protocol$occurred_at <- format(meeting_date, "%Y-%m-%d")
+      json_data$protocol$occurred_at <- format(transcript$transcript_created_at,
+                                               "%Y-%m-%dT%H:%M:%S",
+                                               tz = "Europe/Berlin")
     }
 
     body_string <- jsonlite::toJSON(json_data, auto_unbox = TRUE)
@@ -1232,6 +1239,28 @@ export_unmappable_to_debug_lead <- function(con, crm_api_key, unmappable_transcr
         exported_count <- exported_count + 1
         logger(sprintf("  Uploaded unmapped transcript id=%s to debug lead %s",
                         transcript$id, debug_lead_id), "DEBUG")
+
+        # The POST stores occurred_at on the protocol but does not move the
+        # activity that drives the CRM feed — same reason the mapped path needs
+        # a follow-up PUT. Without it these protocols all sit at creation time.
+        if (!is.null(json_data$protocol$occurred_at)) {
+          crm_protocol_id <- crm_extract_protocol_id(response)
+
+          if (is.null(crm_protocol_id)) {
+            logger(paste0("  Protocol created but its ID could not be read ",
+                          "— occurred_at was not propagated to the activity."),
+                   "WARNING")
+          } else {
+            put_result <- crm_push_occurred_at_to_activity(
+              headers, crm_protocol_id, json_data$protocol$occurred_at
+            )
+            if (!isTRUE(put_result$success)) {
+              logger(sprintf(paste0("  Protocol %s created, but propagating ",
+                                    "occurred_at failed: %s"),
+                             crm_protocol_id, put_result$error), "WARNING")
+            }
+          }
+        }
       } else {
         response_text <- tryCatch(suppressWarnings(httr::content(response, "text")), error = function(e) "")
         logger(sprintf("  Failed to upload transcript id=%s: HTTP %d %s",
