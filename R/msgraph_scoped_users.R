@@ -32,8 +32,11 @@ msgraph_scoped_update_users <- function(con, app_token, del_token, cfg) {
   # ---- start ---- #
   cals <- graph_collect("https://graph.microsoft.com/v1.0/me/calendars", del_token)
   if (cals$status != 200) stop("Kalenderliste HTTP ", cals$status)
+  # Owner der freigegebenen Kalender = alle Owner ausser dem Service-Account selbst.
+  # (isSharedWithMe ist bei Graph unzuverlaessig -> Owner-Vergleich ist robust.)
+  sa <- tolower(cfg$service_account_upn)
   owners <- unique(tolower(unlist(lapply(
-    Filter(function(x) isTRUE(x$isSharedWithMe), cals$value),
+    Filter(function(x) { oa <- tolower(x$owner$address %||% ""); nzchar(oa) && oa != sa }, cals$value),
     function(x) x$owner$address %||% NA_character_))))
   owners <- owners[!is.na(owners) & nzchar(owners)]
   if (length(owners) == 0) { message("Keine freigegebenen Kalender/Owner."); return(invisible(0L)) }

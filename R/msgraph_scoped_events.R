@@ -85,10 +85,15 @@ msgraph_scoped_update_events <- function(con, del_token, cfg) {
   # ---- start ---- #
   start_dt <- format(Sys.Date() - cfg$events_days_back, "%Y-%m-%dT00:00:00Z")
   end_dt   <- format(Sys.Date() + cfg$events_days_forward, "%Y-%m-%dT23:59:59Z")
-  # Freigegebene Kalender des Service-Account
+  # Freigegebene Kalender = solche, deren Owner NICHT der Service-Account ist.
+  # (isSharedWithMe ist bei Graph unzuverlaessig -> Owner-Vergleich ist robust.)
   cals <- graph_collect("https://graph.microsoft.com/v1.0/me/calendars", del_token)
   if (cals$status != 200) stop("Kalenderliste HTTP ", cals$status)
-  shared <- Filter(function(x) isTRUE(x$isSharedWithMe), cals$value)
+  sa <- tolower(cfg$service_account_upn)
+  shared <- Filter(function(x) {
+    oa <- tolower(x$owner$address %||% "")
+    nzchar(oa) && oa != sa
+  }, cals$value)
 
   all_events <- list()
   for (cal in shared) {
