@@ -46,3 +46,21 @@ test_that("parse_scoped_events mappt Felder und extrahiert Teilnehmer inkl. Orga
   expect_true(out$participants$is_organizer[out$participants$email == "rep.a@studyflix.de"])
   expect_true(all(out$participants$source == "calendar"))
 })
+
+test_that("parse_scoped_bookings praefixt booking: und synthetisiert Gast-Email", {
+  appts <- list(list(
+    id = "APT1", serviceName = "Beratung", status = "confirmed",
+    start = list(dateTime = "2026-07-11T09:00:00Z"), end = list(dateTime = "2026-07-11T09:30:00Z"),
+    joinWebUrl = "https://teams.microsoft.com/l/meetup-join/19%3ameeting_XYZ%40thread.v2/0",
+    staffMemberIds = list("S1"),
+    customers = list(list(name = "Kunde Ohne Mail", emailAddress = NULL),
+                     list(name = "Kunde Y", emailAddress = "y@kunde.com"))))
+  out <- parse_scoped_bookings(appts, staff_map = c(S1 = "rep.b@studyflix.de"))
+  expect_equal(out$events$msgraph_ical_uid, "booking:APT1")
+  expect_equal(out$events$subject, "Beratung")
+  # Staff-Organizer + 2 Kunden (einer synthetisch)
+  expect_equal(nrow(out$participants), 3)
+  expect_true(any(grepl("@external.guest$", out$participants$email)))
+  expect_true(out$participants$is_organizer[out$participants$email == "rep.b@studyflix.de"])
+  expect_true(all(out$participants$source == "booking"))
+})
