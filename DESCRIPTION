@@ -29,6 +29,7 @@ Imports:
     coreNLP,
     stringdist,
     Billomatics,
+    safer,
     testthat,
     MSGraph,
     utils,
