@@ -1,0 +1,128 @@
+#' Graph-Kalender-Events -> Zielschema (rein, ohne Netz)
+#'
+#' @param events_value
+#'   Liste von Graph-Event-Objekten (aus calendarView $value).
+#'
+#' @return
+#'   list(events, participants) als tibbles.
+#'
+#' @export
+parse_scoped_events <- function(events_value) {
+  # ---- start ---- #
+  ev_rows <- list(); pt_rows <- list()
+  for (e in events_value) {
+    ical  <- e$iCalUId %||% NA_character_
+    estart <- e$start$dateTime %||% NA_character_
+    if (is.na(ical) || is.na(estart)) next
+    ju <- e$onlineMeeting$joinUrl %||% NA_character_
+    subj <- e$subject %||% NA_character_
+    canceled <- isTRUE(e$isCancelled) ||
+      (!is.na(subj) && grepl("^(Canceled:|Abgesagt:)", subj))
+    ev_rows[[length(ev_rows) + 1]] <- tibble::tibble(
+      msgraph_ical_uid   = ical,
+      event_created_at   = e$createdDateTime %||% NA_character_,
+      event_updated_at   = e$lastModifiedDateTime %||% NA_character_,
+      subject            = subj,
+      event_start        = estart,
+      event_end          = e$end$dateTime %||% NA_character_,
+      meeting_id         = if (!is.na(ju)) extract_meeting_id_safe(ju) else NA_character_,
+      is_single_instance = identical(e$type, "singleInstance"),
+      is_online_meeting  = isTRUE(e$isOnlineMeeting),
+      is_canceled        = canceled)
+    # Teilnehmer: Organizer + attendees
+    org <- e$organizer$emailAddress
+    if (!is.null(org$address)) {
+      pt_rows[[length(pt_rows) + 1]] <- tibble::tibble(
+        msgraph_ical_uid = ical, event_start = estart,
+        email = tolower(org$address), ms_name = org$name %||% NA_character_,
+        is_organizer = TRUE, source = "calendar")
+    }
+    for (a in e$attendees %||% list()) {
+      addr <- a$emailAddress$address %||% NA_character_
+      if (is.na(addr)) next
+      pt_rows[[length(pt_rows) + 1]] <- tibble::tibble(
+        msgraph_ical_uid = ical, event_start = estart,
+        email = tolower(addr), ms_name = a$emailAddress$name %||% NA_character_,
+        is_organizer = FALSE, source = "calendar")
+    }
+  }
+  list(
+    events = if (length(ev_rows)) dplyr::distinct(dplyr::bind_rows(ev_rows)) else tibble::tibble(),
+    participants = if (length(pt_rows)) dplyr::distinct(dplyr::bind_rows(pt_rows)) else tibble::tibble())
+}
+
+#' Meeting-ID-Extraktion, NA-sicher
+#'
+#' @param url
+#'   Teams/OnlineMeeting joinUrl.
+#'
+#' @return
+#'   meeting_id als character, oder NA_character_ bei Fehler.
+#'
+#' @keywords internal
+extract_meeting_id_safe <- function(url) {
+  tryCatch(extract_meeting_id(url), error = function(e) NA_character_)
+}
+
+#' Kalender-Events der freigegebenen Kalender gescoped aktualisieren (delegiert)
+#'
+#' @param con
+#'   DB-Pool.
+#' @param del_token
+#'   delegierter Token-Provider.
+#' @param cfg
+#'   load_scoped_config().
+#'
+#' @return
+#'   invisible(Anzahl geschriebener Events).
+#'
+#' @export
+msgraph_scoped_update_events <- function(con, del_token, cfg) {
+  # ---- start ---- #
+  start_dt <- format(Sys.Date() - cfg$events_days_back, "%Y-%m-%dT00:00:00Z")
+  end_dt   <- format(Sys.Date() + cfg$events_days_forward, "%Y-%m-%dT23:59:59Z")
+  # Freigegebene Kalender des Service-Account
+  cals <- graph_collect("https://graph.microsoft.com/v1.0/me/calendars", del_token)
+  if (cals$status != 200) stop("Kalenderliste HTTP ", cals$status)
+  shared <- Filter(function(x) isTRUE(x$isSharedWithMe), cals$value)
+
+  all_events <- list()
+  for (cal in shared) {
+    cid <- cal$id
+    res <- graph_collect(
+      paste0("https://graph.microsoft.com/v1.0/me/calendars/",
+             utils::URLencode(cid, reserved = TRUE), "/calendarView"),
+      del_token,
+      query = list(startDateTime = start_dt, endDateTime = end_dt, `$top` = 100,
+                   `$select` = paste("iCalUId,type,createdDateTime,lastModifiedDateTime,subject,",
+                                     "start,end,isCancelled,isOnlineMeeting,onlineMeeting,organizer,attendees")))
+    if (res$status == 200) all_events <- c(all_events, res$value)
+  }
+
+  parsed <- parse_scoped_events(all_events)
+  if (nrow(parsed$events) == 0) { message("Keine Events."); return(invisible(0L)) }
+
+  # 1) Kontakte (email) upserten -> danach event_id/contact_id-Lookup
+  contacts <- parsed$participants %>%
+    dplyr::transmute(email, ms_name) %>% dplyr::distinct(email, .keep_all = TRUE)
+  Billomatics::postgres_upsert_data(con, "raw", "msgraph_contacts", contacts, match_cols = "email")
+
+  # 2) Events upserten
+  Billomatics::postgres_upsert_data(con, "raw", "msgraph_events", parsed$events,
+                                    match_cols = c("msgraph_ical_uid", "event_start"))
+
+  # 3) Teilnehmer via Lookup auf DB-ids verknuepfen (nur source='calendar')
+  ev_ids <- dplyr::tbl(con, I("raw.msgraph_events")) %>%
+    dplyr::select(id, msgraph_ical_uid, event_start) %>% dplyr::collect()
+  ct_ids <- dplyr::tbl(con, I("raw.msgraph_contacts")) %>%
+    dplyr::select(id, email) %>% dplyr::collect() %>% dplyr::rename(contact_id = id)
+  part <- parsed$participants %>%
+    dplyr::left_join(ev_ids, by = c("msgraph_ical_uid", "event_start")) %>%
+    dplyr::rename(event_id = id) %>%
+    dplyr::left_join(ct_ids, by = "email") %>%
+    dplyr::filter(!is.na(event_id), !is.na(contact_id)) %>%
+    dplyr::transmute(event_id, contact_id, is_organizer, source)
+  Billomatics::postgres_upsert_data(con, "raw", "msgraph_event_participants", part,
+                                    match_cols = c("event_id", "contact_id"))
+  invisible(nrow(parsed$events))
+}

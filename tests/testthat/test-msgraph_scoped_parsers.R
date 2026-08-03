@@ -23,3 +23,26 @@ test_that("parse_scoped_user mappt Graph-User auf raw.msgraph_users-Schema (emai
   expect_true(row$is_internal)
   expect_false(row$is_deleted)
 })
+
+test_that("parse_scoped_events mappt Felder und extrahiert Teilnehmer inkl. Organizer", {
+  ev <- list(list(
+    iCalUId = "ICAL1", type = "singleInstance",
+    createdDateTime = "2026-07-01T08:00:00Z", lastModifiedDateTime = "2026-07-02T09:00:00Z",
+    subject = "Kundencall", start = list(dateTime = "2026-07-10T10:00:00.0000000"),
+    end = list(dateTime = "2026-07-10T10:30:00.0000000"),
+    isCancelled = FALSE, isOnlineMeeting = TRUE,
+    onlineMeeting = list(joinUrl = "https://teams.microsoft.com/l/meetup-join/19%3ameeting_ABC%40thread.v2/0"),
+    organizer = list(emailAddress = list(name = "Rep A", address = "rep.a@studyflix.de")),
+    attendees = list(list(emailAddress = list(name = "Kunde X", address = "x@kunde.com")))
+  ))
+  out <- parse_scoped_events(ev)
+  expect_equal(nrow(out$events), 1)
+  expect_equal(out$events$msgraph_ical_uid, "ICAL1")
+  expect_true(out$events$is_single_instance)
+  expect_equal(out$events$event_start, "2026-07-10T10:00:00.0000000")
+  # Organizer + 1 Attendee = 2 Teilnehmerzeilen, Emails lowercase
+  expect_equal(nrow(out$participants), 2)
+  expect_setequal(out$participants$email, c("rep.a@studyflix.de", "x@kunde.com"))
+  expect_true(out$participants$is_organizer[out$participants$email == "rep.a@studyflix.de"])
+  expect_true(all(out$participants$source == "calendar"))
+})
