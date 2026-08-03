@@ -64,3 +64,18 @@ test_that("parse_scoped_bookings praefixt booking: und synthetisiert Gast-Email"
   expect_true(out$participants$is_organizer[out$participants$email == "rep.b@studyflix.de"])
   expect_true(all(out$participants$source == "booking"))
 })
+
+test_that("parse_attendance_records extrahiert Teilnehmer mit lowercase email", {
+  reports <- list(list(
+    id = "R1", meetingStartDateTime = "2026-07-10T10:00:00Z", totalParticipantCount = 2,
+    attendanceRecords = list(
+      list(identity = list(displayName = "Rep A"), emailAddress = "REP.A@studyflix.de",
+           role = "Organizer", totalAttendanceInSeconds = 1800),
+      list(identity = list(displayName = "Kunde X"), emailAddress = "X@kunde.com",
+           role = "Attendee", totalAttendanceInSeconds = 1700))))
+  df <- parse_attendance_records(reports, meeting_id = "MID1")
+  expect_equal(nrow(df), 2)
+  expect_equal(df$meeting_id[1], "MID1")
+  expect_true(all(df$email == tolower(df$email)))
+  expect_setequal(df$email, c("rep.a@studyflix.de", "x@kunde.com"))
+})
