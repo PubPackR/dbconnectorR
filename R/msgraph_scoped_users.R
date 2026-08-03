@@ -25,7 +25,7 @@ parse_scoped_user <- function(user_obj) {
 #' @param con DB-Pool.
 #' @param app_token app-only Token-Provider (User.ReadBasic.All).
 #' @param del_token delegierter Token-Provider (Calendars.Read.Shared).
-#' @param cfg load_scoped_config().
+#' @param cfg load_scoped_config() (aktuell ungenutzt; fuer einheitliche Aufrufsignatur der scoped-Funktionen).
 #' @return invisible(Anzahl aktiver interner User).
 #' @export
 msgraph_scoped_update_users <- function(con, app_token, del_token, cfg) {
@@ -52,12 +52,13 @@ msgraph_scoped_update_users <- function(con, app_token, del_token, cfg) {
   Billomatics::postgres_upsert_data(con, "raw", "msgraph_users", users_df,
                                     match_cols = "msgraph_user_id")
 
-  # Soft-Delete: interne User, die diesmal NICHT geliefert wurden
+  # Soft-Delete: interne User, die diesmal NICHT geliefert wurden.
+  # active_ids stammen aus der Graph-API -> sicher quoten (kein rohes paste0 in SQL).
   active_ids <- users_df$msgraph_user_id
+  quoted_ids <- paste(DBI::dbQuoteLiteral(con, active_ids), collapse = ", ")
   DBI::dbExecute(con, paste0(
     "UPDATE raw.msgraph_users SET is_deleted = TRUE ",
-    "WHERE is_internal AND NOT is_deleted AND msgraph_user_id NOT IN ('",
-    paste(active_ids, collapse = "','"), "')"))
+    "WHERE is_internal AND NOT is_deleted AND msgraph_user_id NOT IN (", quoted_ids, ")"))
 
   invisible(nrow(users_df))
 }
