@@ -12,7 +12,7 @@ parse_scoped_events <- function(events_value) {
   ev_rows <- list(); pt_rows <- list()
   for (e in events_value) {
     ical  <- e$iCalUId %||% NA_character_
-    estart <- e$start$dateTime %||% NA_character_
+    estart <- lubridate::ymd_hms(e$start$dateTime %||% NA_character_, quiet = TRUE)
     if (is.na(ical) || is.na(estart)) next
     ju <- e$onlineMeeting$joinUrl %||% NA_character_
     subj <- e$subject %||% NA_character_
@@ -20,11 +20,11 @@ parse_scoped_events <- function(events_value) {
       (!is.na(subj) && grepl("^(Canceled:|Abgesagt:)", subj))
     ev_rows[[length(ev_rows) + 1]] <- tibble::tibble(
       msgraph_ical_uid   = ical,
-      event_created_at   = e$createdDateTime %||% NA_character_,
-      event_updated_at   = e$lastModifiedDateTime %||% NA_character_,
+      event_created_at   = lubridate::ymd_hms(e$createdDateTime %||% NA_character_, quiet = TRUE),
+      event_updated_at   = lubridate::ymd_hms(e$lastModifiedDateTime %||% NA_character_, quiet = TRUE),
       subject            = subj,
       event_start        = estart,
-      event_end          = e$end$dateTime %||% NA_character_,
+      event_end          = lubridate::ymd_hms(e$end$dateTime %||% NA_character_, quiet = TRUE),
       meeting_id         = if (!is.na(ju)) extract_meeting_id_safe(ju) else NA_character_,
       is_single_instance = identical(e$type, "singleInstance"),
       is_online_meeting  = isTRUE(e$isOnlineMeeting),
@@ -34,7 +34,7 @@ parse_scoped_events <- function(events_value) {
     if (!is.null(org$address)) {
       pt_rows[[length(pt_rows) + 1]] <- tibble::tibble(
         msgraph_ical_uid = ical, event_start = estart,
-        email = tolower(org$address), ms_name = org$name %||% NA_character_,
+        email = tolower(normalize_external_email(org$address)), ms_name = org$name %||% NA_character_,
         is_organizer = TRUE, source = "calendar")
     }
     for (a in e$attendees %||% list()) {
@@ -42,13 +42,17 @@ parse_scoped_events <- function(events_value) {
       if (is.na(addr)) next
       pt_rows[[length(pt_rows) + 1]] <- tibble::tibble(
         msgraph_ical_uid = ical, event_start = estart,
-        email = tolower(addr), ms_name = a$emailAddress$name %||% NA_character_,
+        email = tolower(normalize_external_email(addr)), ms_name = a$emailAddress$name %||% NA_character_,
         is_organizer = FALSE, source = "calendar")
     }
   }
   list(
     events = if (length(ev_rows)) dplyr::distinct(dplyr::bind_rows(ev_rows)) else tibble::tibble(),
-    participants = if (length(pt_rows)) dplyr::distinct(dplyr::bind_rows(pt_rows)) else tibble::tibble())
+    participants = if (length(pt_rows)) {
+      dplyr::bind_rows(pt_rows) %>%
+        dplyr::arrange(dplyr::desc(is_organizer)) %>%
+        dplyr::distinct(msgraph_ical_uid, event_start, email, .keep_all = TRUE)
+    } else tibble::tibble())
 }
 
 #' Meeting-ID-Extraktion, NA-sicher
@@ -94,22 +98,24 @@ msgraph_scoped_update_events <- function(con, del_token, cfg) {
              utils::URLencode(cid, reserved = TRUE), "/calendarView"),
       del_token,
       query = list(startDateTime = start_dt, endDateTime = end_dt, `$top` = 100,
-                   `$select` = paste("iCalUId,type,createdDateTime,lastModifiedDateTime,subject,",
-                                     "start,end,isCancelled,isOnlineMeeting,onlineMeeting,organizer,attendees")))
+                   `$select` = paste0("iCalUId,type,createdDateTime,lastModifiedDateTime,subject,",
+                                      "start,end,isCancelled,isOnlineMeeting,onlineMeeting,organizer,attendees")))
     if (res$status == 200) all_events <- c(all_events, res$value)
   }
 
   parsed <- parse_scoped_events(all_events)
   if (nrow(parsed$events) == 0) { message("Keine Events."); return(invisible(0L)) }
 
+  # 2) Events upserten
+  Billomatics::postgres_upsert_data(con, "raw", "msgraph_events", parsed$events,
+                                    match_cols = c("msgraph_ical_uid", "event_start"))
+
+  if (nrow(parsed$participants) == 0) return(invisible(nrow(parsed$events)))
+
   # 1) Kontakte (email) upserten -> danach event_id/contact_id-Lookup
   contacts <- parsed$participants %>%
     dplyr::transmute(email, ms_name) %>% dplyr::distinct(email, .keep_all = TRUE)
   Billomatics::postgres_upsert_data(con, "raw", "msgraph_contacts", contacts, match_cols = "email")
-
-  # 2) Events upserten
-  Billomatics::postgres_upsert_data(con, "raw", "msgraph_events", parsed$events,
-                                    match_cols = c("msgraph_ical_uid", "event_start"))
 
   # 3) Teilnehmer via Lookup auf DB-ids verknuepfen (nur source='calendar')
   ev_ids <- dplyr::tbl(con, I("raw.msgraph_events")) %>%

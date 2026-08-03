@@ -33,18 +33,28 @@ test_that("parse_scoped_events mappt Felder und extrahiert Teilnehmer inkl. Orga
     isCancelled = FALSE, isOnlineMeeting = TRUE,
     onlineMeeting = list(joinUrl = "https://teams.microsoft.com/l/meetup-join/19%3ameeting_ABC%40thread.v2/0"),
     organizer = list(emailAddress = list(name = "Rep A", address = "rep.a@studyflix.de")),
-    attendees = list(list(emailAddress = list(name = "Kunde X", address = "x@kunde.com")))
+    attendees = list(list(emailAddress = list(name = "Kunde X", address = "x@kunde.com")),
+                     list(emailAddress = list(name = "Kunde EXT",
+                                               address = "john_doe_gmail.com#EXT#@tenant.onmicrosoft.com")))
   ))
   out <- parse_scoped_events(ev)
   expect_equal(nrow(out$events), 1)
   expect_equal(out$events$msgraph_ical_uid, "ICAL1")
   expect_true(out$events$is_single_instance)
-  expect_equal(out$events$event_start, "2026-07-10T10:00:00.0000000")
-  # Organizer + 1 Attendee = 2 Teilnehmerzeilen, Emails lowercase
-  expect_equal(nrow(out$participants), 2)
-  expect_setequal(out$participants$email, c("rep.a@studyflix.de", "x@kunde.com"))
+  # event_start / event_end sind POSIXct (Join-Key muss zum DB-Reread passen)
+  expect_s3_class(out$events$event_start, "POSIXct")
+  expect_s3_class(out$participants$event_start, "POSIXct")
+  # Organizer + 2 Attendees (davon 1 #EXT#) = 3 Teilnehmerzeilen, Emails lowercase
+  expect_equal(nrow(out$participants), 3)
+  known <- c("rep.a@studyflix.de", "x@kunde.com")
+  expect_true(all(known %in% out$participants$email))
   expect_true(out$participants$is_organizer[out$participants$email == "rep.a@studyflix.de"])
   expect_true(all(out$participants$source == "calendar"))
+  # #EXT#-Adresse muss zurueckuebersetzt + lowercase sein (exakter Output liegt bei normalize_external_email)
+  ext_email <- out$participants$email[!out$participants$email %in% known]
+  expect_length(ext_email, 1)
+  expect_false(grepl("#ext#", ext_email, ignore.case = TRUE))
+  expect_equal(ext_email, tolower(ext_email))
 })
 
 test_that("parse_scoped_bookings praefixt booking: und synthetisiert Gast-Email", {
@@ -72,12 +82,20 @@ test_that("parse_attendance_records extrahiert Teilnehmer mit lowercase email", 
       list(identity = list(displayName = "Rep A"), emailAddress = "REP.A@studyflix.de",
            role = "Organizer", totalAttendanceInSeconds = 1800),
       list(identity = list(displayName = "Kunde X"), emailAddress = "X@kunde.com",
-           role = "Attendee", totalAttendanceInSeconds = 1700))))
+           role = "Attendee", totalAttendanceInSeconds = 1700),
+      list(identity = list(displayName = "Kunde EXT"),
+           emailAddress = "john_doe_gmail.com#EXT#@tenant.onmicrosoft.com",
+           role = "Attendee", totalAttendanceInSeconds = 1600))))
   df <- parse_attendance_records(reports, meeting_id = "MID1")
-  expect_equal(nrow(df), 2)
+  expect_equal(nrow(df), 3)
   expect_equal(df$meeting_id[1], "MID1")
   expect_true(all(df$email == tolower(df$email)))
-  expect_setequal(df$email, c("rep.a@studyflix.de", "x@kunde.com"))
+  known <- c("rep.a@studyflix.de", "x@kunde.com")
+  expect_true(all(known %in% df$email))
+  ext_email <- df$email[!df$email %in% known]
+  expect_length(ext_email, 1)
+  expect_false(grepl("#ext#", ext_email, ignore.case = TRUE))
+  expect_equal(ext_email, tolower(ext_email))
 })
 
 test_that("vtt_to_plaintext entfernt Zeitstempel und WEBVTT-Header", {

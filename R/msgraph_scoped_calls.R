@@ -11,7 +11,7 @@ parse_attendance_records <- function(reports_value, meeting_id) {
       addr <- r$emailAddress %||% NA_character_
       rows[[length(rows) + 1]] <- tibble::tibble(
         meeting_id    = meeting_id,
-        email         = if (is.na(addr)) NA_character_ else tolower(addr),
+        email         = if (is.na(addr)) NA_character_ else tolower(normalize_external_email(addr)),
         ms_name       = r$identity$displayName %||% NA_character_,
         role          = r$role %||% NA_character_,
         total_seconds = r$totalAttendanceInSeconds %||% NA_integer_)
@@ -49,7 +49,8 @@ attendance_records <- function(object_id, meeting_id, app_token) {
   base <- paste0("https://graph.microsoft.com/v1.0/users/", object_id,
                  "/onlineMeetings/", meeting_id, "/attendanceReports")
   res <- graph_collect(base, app_token, query = list(`$expand` = "attendanceRecords"))
-  if (res$status != 200) return(list(status = res$status, meeting_start = NA_character_, reports = list()))
+  if (res$status != 200) return(list(status = res$status, meeting_start = NA_character_,
+                                     meeting_end = NA_character_, reports = list()))
   # per-Report-Fallback: $expand liefert oft keine Records -> nachladen
   for (i in seq_along(res$value)) {
     if (length(res$value[[i]]$attendanceRecords %||% list()) == 0 && !is.null(res$value[[i]]$id)) {
@@ -59,6 +60,7 @@ attendance_records <- function(object_id, meeting_id, app_token) {
   }
   list(status = 200,
        meeting_start = res$value[[1]]$meetingStartDateTime %||% NA_character_,
+       meeting_end = res$value[[1]]$meetingEndDateTime %||% NA_character_,
        reports = res$value)
 }
 
@@ -87,13 +89,15 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg) {
       if (isTRUE(mt$status == 403)) break            # Policy-Block definitiv -> Rest sparen
       if (!isTRUE(mt$status == 200) || is.na(mt$id)) next
       at <- tryCatch(attendance_records(oid, mt$id, app_token),
-                     error = function(e) list(status = NA, meeting_start = NA, reports = list()))
+                     error = function(e) list(status = NA, meeting_start = NA, meeting_end = NA, reports = list()))
       if (!isTRUE(at$status == 200) || length(at$reports) == 0) next
       df <- parse_attendance_records(at$reports, mt$id)
       if (nrow(df) == 0) next
+      cs <- lubridate::ymd_hms(at$meeting_start, quiet = TRUE)
+      ce <- lubridate::ymd_hms(at$meeting_end, quiet = TRUE)
+      if (is.na(ce)) ce <- cs   # Fallback: NOT NULL column, use start when end missing
       calls[[length(calls) + 1]] <- tibble::tibble(
-        msgraph_call_id = mt$id,
-        call_start = at$meeting_start, call_end = NA_character_,
+        msgraph_call_id = mt$id, call_start = cs, call_end = ce,
         meeting_id = mt$id)
       parts[[length(parts) + 1]] <- df
     }

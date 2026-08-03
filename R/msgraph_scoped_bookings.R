@@ -14,7 +14,7 @@ parse_scoped_bookings <- function(appointments_value, staff_map) {
   ev_rows <- list(); pt_rows <- list()
   for (a in appointments_value) {
     aid <- a$id %||% NA_character_
-    astart <- a$start$dateTime %||% NA_character_
+    astart <- lubridate::ymd_hms(a$start$dateTime %||% NA_character_, quiet = TRUE)
     if (is.na(aid) || is.na(astart)) next
     ju <- a$joinWebUrl %||% a$onlineMeetingUrl %||% NA_character_
     ical <- paste0("booking:", aid)
@@ -22,7 +22,8 @@ parse_scoped_bookings <- function(appointments_value, staff_map) {
       msgraph_ical_uid = ical,
       event_created_at = astart, event_updated_at = astart,
       subject = a$serviceName %||% NA_character_,
-      event_start = astart, event_end = a$end$dateTime %||% NA_character_,
+      event_start = astart,
+      event_end = lubridate::ymd_hms(a$end$dateTime %||% NA_character_, quiet = TRUE),
       meeting_id = if (!is.na(ju)) extract_meeting_id_safe(ju) else NA_character_,
       is_single_instance = TRUE,
       is_online_meeting = !is.na(ju),
@@ -34,7 +35,7 @@ parse_scoped_bookings <- function(appointments_value, staff_map) {
       if (!is.na(semail) && length(semail) == 1) {
         pt_rows[[length(pt_rows) + 1]] <- tibble::tibble(
           msgraph_ical_uid = ical, event_start = astart,
-          email = tolower(semail), ms_name = NA_character_,
+          email = tolower(normalize_external_email(semail)), ms_name = NA_character_,
           is_organizer = TRUE, source = "booking")
       }
     }
@@ -43,7 +44,8 @@ parse_scoped_bookings <- function(appointments_value, staff_map) {
     for (idx in seq_along(custs)) {
       cu <- custs[[idx]]
       addr <- cu$emailAddress %||% NA_character_
-      email <- if (is.na(addr) || !nzchar(addr)) paste0(aid, "-", idx, "@external.guest") else tolower(addr)
+      email <- if (is.na(addr) || !nzchar(addr)) paste0(aid, "-", idx, "@external.guest")
+               else tolower(normalize_external_email(addr))
       pt_rows[[length(pt_rows) + 1]] <- tibble::tibble(
         msgraph_ical_uid = ical, event_start = astart,
         email = email, ms_name = cu$name %||% NA_character_,
@@ -52,7 +54,11 @@ parse_scoped_bookings <- function(appointments_value, staff_map) {
   }
   list(
     events = if (length(ev_rows)) dplyr::distinct(dplyr::bind_rows(ev_rows)) else tibble::tibble(),
-    participants = if (length(pt_rows)) dplyr::distinct(dplyr::bind_rows(pt_rows)) else tibble::tibble())
+    participants = if (length(pt_rows)) {
+      dplyr::bind_rows(pt_rows) %>%
+        dplyr::arrange(dplyr::desc(is_organizer)) %>%
+        dplyr::distinct(msgraph_ical_uid, event_start, email, .keep_all = TRUE)
+    } else tibble::tibble())
 }
 
 #' Bookings-Termine gescopt aktualisieren (app-only Bookings.Read.All)
@@ -93,10 +99,13 @@ msgraph_scoped_update_bookings <- function(con, app_token, cfg) {
   }
   if (nrow(all_events) == 0) { message("Keine Bookings."); return(invisible(0L)) }
 
-  contacts <- all_part %>% dplyr::transmute(email, ms_name) %>% dplyr::distinct(email, .keep_all = TRUE)
-  Billomatics::postgres_upsert_data(con, "raw", "msgraph_contacts", contacts, match_cols = "email")
   Billomatics::postgres_upsert_data(con, "raw", "msgraph_events", all_events,
                                     match_cols = c("msgraph_ical_uid", "event_start"))
+
+  if (nrow(all_part) == 0) return(invisible(nrow(all_events)))
+
+  contacts <- all_part %>% dplyr::transmute(email, ms_name) %>% dplyr::distinct(email, .keep_all = TRUE)
+  Billomatics::postgres_upsert_data(con, "raw", "msgraph_contacts", contacts, match_cols = "email")
   ev_ids <- dplyr::tbl(con, I("raw.msgraph_events")) %>%
     dplyr::select(id, msgraph_ical_uid, event_start) %>% dplyr::collect()
   ct_ids <- dplyr::tbl(con, I("raw.msgraph_contacts")) %>%
