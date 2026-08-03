@@ -79,3 +79,12 @@ test_that("parse_attendance_records extrahiert Teilnehmer mit lowercase email", 
   expect_true(all(df$email == tolower(df$email)))
   expect_setequal(df$email, c("rep.a@studyflix.de", "x@kunde.com"))
 })
+
+test_that("vtt_to_plaintext entfernt Zeitstempel und WEBVTT-Header", {
+  vtt <- "WEBVTT\n\n00:00:01.000 --> 00:00:03.000\n<v Rep A>Hallo Herr X</v>\n\n00:00:04.000 --> 00:00:05.000\n<v Kunde X>Guten Tag</v>\n"
+  out <- vtt_to_plaintext(vtt)
+  expect_false(grepl("-->", out))
+  expect_false(grepl("WEBVTT", out))
+  expect_true(grepl("Hallo Herr X", out))
+  expect_true(grepl("Guten Tag", out))
+})
