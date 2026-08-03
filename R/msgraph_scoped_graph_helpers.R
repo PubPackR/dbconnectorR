@@ -1,7 +1,9 @@
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
 #' Einzelner Graph-GET
-#' @param url Voll-URL. @param token Provider-Closure oder String. @param query optionale Query-Liste.
+#' @param url Voll-URL.
+#' @param token Provider-Closure oder String.
+#' @param query optionale Query-Liste.
 #' @return list(status, content)
 #' @export
 graph_get <- function(url, token, query = NULL) {
@@ -33,7 +35,8 @@ graph_collect <- function(url, token, query = NULL) {
 }
 
 #' UPN -> ObjectId (List-Endpoint mit $filter)
-#' @param upn userPrincipalName. @param token Provider/String.
+#' @param upn userPrincipalName.
+#' @param token Provider/String.
 #' @return list(status, id)
 #' @export
 resolve_user_id <- function(upn, token) {

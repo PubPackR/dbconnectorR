@@ -7,7 +7,11 @@
 graph_get(url, token, query = NULL)
 }
 \arguments{
-\item{url}{Voll-URL. @param token Provider-Closure oder String. @param query optionale Query-Liste.}
+\item{url}{Voll-URL.}
+
+\item{token}{Provider-Closure oder String.}
+
+\item{query}{optionale Query-Liste.}
 }
 \value{
 list(status, content)

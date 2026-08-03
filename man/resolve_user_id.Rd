@@ -7,7 +7,9 @@
 resolve_user_id(upn, token)
 }
 \arguments{
-\item{upn}{userPrincipalName. @param token Provider/String.}
+\item{upn}{userPrincipalName.}
+
+\item{token}{Provider/String.}
 }
 \value{
 list(status, id)
