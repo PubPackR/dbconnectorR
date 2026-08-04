@@ -53,7 +53,7 @@ parse_scoped_bookings <- function(appointments_value, staff_map) {
     }
   }
   list(
-    events = if (length(ev_rows)) dplyr::distinct(dplyr::bind_rows(ev_rows)) else tibble::tibble(),
+    events = if (length(ev_rows)) dplyr::distinct(dplyr::bind_rows(ev_rows), msgraph_ical_uid, event_start, .keep_all = TRUE) else tibble::tibble(),
     participants = if (length(pt_rows)) {
       dplyr::bind_rows(pt_rows) %>%
         dplyr::arrange(dplyr::desc(is_organizer)) %>%

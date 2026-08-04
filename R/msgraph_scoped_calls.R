@@ -122,7 +122,9 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg) {
     dplyr::left_join(call_ids, by = c("meeting_id" = "msgraph_call_id")) %>%
     dplyr::left_join(ct_ids, by = "email") %>%
     dplyr::filter(!is.na(call_id), !is.na(contact_id)) %>%
-    dplyr::transmute(call_id, contact_id)
+    dplyr::transmute(call_id, contact_id) %>%
+    # dieselbe Person kann in mehreren Attendance-Reports eines Meetings stehen
+    dplyr::distinct(call_id, contact_id)
   Billomatics::postgres_upsert_data(con, rs, "msgraph_call_participants", cp,
                                     match_cols = c("call_id", "contact_id"))
   invisible(nrow(calls_df))

@@ -106,3 +106,25 @@ test_that("vtt_to_plaintext entfernt Zeitstempel und WEBVTT-Header", {
   expect_true(grepl("Hallo Herr X", out))
   expect_true(grepl("Guten Tag", out))
 })
+
+test_that("parse_scoped_events dedupt Events per (ical, event_start) fuer den Upsert", {
+  mk <- function(subj) list(
+    iCalUId = "ICALDUP", type = "singleInstance",
+    createdDateTime = "2026-07-01T08:00:00Z", lastModifiedDateTime = "2026-07-02T09:00:00Z",
+    subject = subj, start = list(dateTime = "2026-07-10T10:00:00.0000000"),
+    end = list(dateTime = "2026-07-10T10:30:00.0000000"), isCancelled = FALSE,
+    isOnlineMeeting = FALSE,
+    organizer = list(emailAddress = list(name = "A", address = "a@studyflix.de")),
+    attendees = list())
+  # dasselbe Meeting aus zwei Kalendern, minimal unterschiedlich (Subject) -> nur EINE Event-Zeile
+  out <- parse_scoped_events(list(mk("Titel A"), mk("Titel B")))
+  expect_equal(nrow(out$events), 1)
+})
+
+test_that("parse_scoped_bookings dedupt Events per (ical, event_start)", {
+  a <- function(svc) list(id = "APTDUP", serviceName = svc, status = "confirmed",
+    start = list(dateTime = "2026-07-11T09:00:00Z"), end = list(dateTime = "2026-07-11T09:30:00Z"),
+    staffMemberIds = list("S1"), customers = list(list(name = "K", emailAddress = "k@kunde.com")))
+  out <- parse_scoped_bookings(list(a("Svc A"), a("Svc B")), staff_map = c(S1 = "rep@studyflix.de"))
+  expect_equal(nrow(out$events), 1)
+})
