@@ -13,6 +13,7 @@ msgraph_export_single_transcript_to_crm(
   protocol_id = NULL,
   sales_user_names = NULL,
   protocol_name = NULL,
+  occurred_at = NULL,
   use_test_account = FALSE
 )
 }
@@ -36,6 +37,11 @@ If NULL, a new protocol is created (POST).}
 
 \item{protocol_name}{Optional custom protocol name. If NULL, auto-generated as
 "Teams Meeting Summary - {date}".}
+
+\item{occurred_at}{Optional date of the meeting as "YYYY-MM-DD". Determines
+where the protocol appears in the lead's feed. If NULL and a transcript_id
+is given, it is derived from transcript_created_at in Europe/Berlin. If it
+stays NULL, the field is omitted and CentralStation stamps the creation time.}
 
 \item{use_test_account}{Logical, whether to use test CRM account. Default: FALSE}
 }
