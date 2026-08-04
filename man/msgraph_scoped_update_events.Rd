@@ -11,7 +11,7 @@ msgraph_scoped_update_events(con, del_token, cfg)
 
 \item{del_token}{delegierter Token-Provider.}
 
-\item{cfg}{load_scoped_config().}
+\item{cfg}{load_scoped_config(); \code{raw_schema}/\code{processed_schema} steuern das Ziel-Schema.}
 }
 \value{
 invisible(Anzahl geschriebener Events).

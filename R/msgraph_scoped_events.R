@@ -75,7 +75,7 @@ extract_meeting_id_safe <- function(url) {
 #' @param del_token
 #'   delegierter Token-Provider.
 #' @param cfg
-#'   load_scoped_config().
+#'   load_scoped_config(); `raw_schema`/`processed_schema` steuern das Ziel-Schema.
 #'
 #' @return
 #'   invisible(Anzahl geschriebener Events).
@@ -83,6 +83,8 @@ extract_meeting_id_safe <- function(url) {
 #' @export
 msgraph_scoped_update_events <- function(con, del_token, cfg) {
   # ---- start ---- #
+  rs <- cfg$raw_schema %||% "raw"
+  ps <- cfg$processed_schema %||% "processed"
   start_dt <- format(Sys.Date() - cfg$events_days_back, "%Y-%m-%dT00:00:00Z")
   end_dt   <- format(Sys.Date() + cfg$events_days_forward, "%Y-%m-%dT23:59:59Z")
   # Freigegebene Kalender = solche, deren Owner NICHT der Service-Account ist.
@@ -112,7 +114,7 @@ msgraph_scoped_update_events <- function(con, del_token, cfg) {
   if (nrow(parsed$events) == 0) { message("Keine Events."); return(invisible(0L)) }
 
   # 2) Events upserten
-  Billomatics::postgres_upsert_data(con, "raw", "msgraph_events", parsed$events,
+  Billomatics::postgres_upsert_data(con, rs, "msgraph_events", parsed$events,
                                     match_cols = c("msgraph_ical_uid", "event_start"))
 
   if (nrow(parsed$participants) == 0) return(invisible(nrow(parsed$events)))
@@ -120,12 +122,12 @@ msgraph_scoped_update_events <- function(con, del_token, cfg) {
   # 1) Kontakte (email) upserten -> danach event_id/contact_id-Lookup
   contacts <- parsed$participants %>%
     dplyr::transmute(email, ms_name) %>% dplyr::distinct(email, .keep_all = TRUE)
-  Billomatics::postgres_upsert_data(con, "raw", "msgraph_contacts", contacts, match_cols = "email")
+  Billomatics::postgres_upsert_data(con, rs, "msgraph_contacts", contacts, match_cols = "email")
 
   # 3) Teilnehmer via Lookup auf DB-ids verknuepfen (nur source='calendar')
-  ev_ids <- dplyr::tbl(con, I("raw.msgraph_events")) %>%
+  ev_ids <- dplyr::tbl(con, I(paste0(rs, ".msgraph_events"))) %>%
     dplyr::select(id, msgraph_ical_uid, event_start) %>% dplyr::collect()
-  ct_ids <- dplyr::tbl(con, I("raw.msgraph_contacts")) %>%
+  ct_ids <- dplyr::tbl(con, I(paste0(rs, ".msgraph_contacts"))) %>%
     dplyr::select(id, email) %>% dplyr::collect() %>% dplyr::rename(contact_id = id)
   part <- parsed$participants %>%
     dplyr::left_join(ev_ids, by = c("msgraph_ical_uid", "event_start")) %>%
@@ -133,7 +135,7 @@ msgraph_scoped_update_events <- function(con, del_token, cfg) {
     dplyr::left_join(ct_ids, by = "email") %>%
     dplyr::filter(!is.na(event_id), !is.na(contact_id)) %>%
     dplyr::transmute(event_id, contact_id, is_organizer, source)
-  Billomatics::postgres_upsert_data(con, "raw", "msgraph_event_participants", part,
+  Billomatics::postgres_upsert_data(con, rs, "msgraph_event_participants", part,
                                     match_cols = c("event_id", "contact_id"))
   invisible(nrow(parsed$events))
 }

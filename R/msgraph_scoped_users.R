@@ -25,11 +25,13 @@ parse_scoped_user <- function(user_obj) {
 #' @param con DB-Pool.
 #' @param app_token app-only Token-Provider (User.ReadBasic.All).
 #' @param del_token delegierter Token-Provider (Calendars.Read.Shared).
-#' @param cfg load_scoped_config() (aktuell ungenutzt; fuer einheitliche Aufrufsignatur der scoped-Funktionen).
+#' @param cfg load_scoped_config(); `raw_schema`/`processed_schema` steuern das Ziel-Schema.
 #' @return invisible(Anzahl aktiver interner User).
 #' @export
 msgraph_scoped_update_users <- function(con, app_token, del_token, cfg) {
   # ---- start ---- #
+  rs <- cfg$raw_schema %||% "raw"
+  ps <- cfg$processed_schema %||% "processed"
   cals <- graph_collect("https://graph.microsoft.com/v1.0/me/calendars", del_token)
   if (cals$status != 200) stop("Kalenderliste HTTP ", cals$status)
   # Owner der freigegebenen Kalender = alle Owner ausser dem Service-Account selbst.
@@ -52,7 +54,7 @@ msgraph_scoped_update_users <- function(con, app_token, del_token, cfg) {
   if (length(rows) == 0) { message("Keine User aufloesbar."); return(invisible(0L)) }
   users_df <- dplyr::distinct(dplyr::bind_rows(rows), msgraph_user_id, .keep_all = TRUE)
 
-  Billomatics::postgres_upsert_data(con, "raw", "msgraph_users", users_df,
+  Billomatics::postgres_upsert_data(con, rs, "msgraph_users", users_df,
                                     match_cols = "msgraph_user_id")
 
   # Soft-Delete: interne User, die diesmal NICHT geliefert wurden.
@@ -60,7 +62,7 @@ msgraph_scoped_update_users <- function(con, app_token, del_token, cfg) {
   active_ids <- users_df$msgraph_user_id
   quoted_ids <- paste(DBI::dbQuoteLiteral(con, active_ids), collapse = ", ")
   DBI::dbExecute(con, paste0(
-    "UPDATE raw.msgraph_users SET is_deleted = TRUE ",
+    "UPDATE ", rs, ".msgraph_users SET is_deleted = TRUE ",
     "WHERE is_internal AND NOT is_deleted AND msgraph_user_id NOT IN (", quoted_ids, ")"))
 
   invisible(nrow(users_df))

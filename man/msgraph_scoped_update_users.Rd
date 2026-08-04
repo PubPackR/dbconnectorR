@@ -13,7 +13,7 @@ msgraph_scoped_update_users(con, app_token, del_token, cfg)
 
 \item{del_token}{delegierter Token-Provider (Calendars.Read.Shared).}
 
-\item{cfg}{load_scoped_config() (aktuell ungenutzt; fuer einheitliche Aufrufsignatur der scoped-Funktionen).}
+\item{cfg}{load_scoped_config(); \code{raw_schema}/\code{processed_schema} steuern das Ziel-Schema.}
 }
 \value{
 invisible(Anzahl aktiver interner User).

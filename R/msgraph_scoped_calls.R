@@ -67,14 +67,16 @@ attendance_records <- function(object_id, meeting_id, app_token) {
 #' Calls/Teilnehmer gescopt via Attendance aktualisieren (app-only, policy-gescoped)
 #' @param con DB-Pool.
 #' @param app_token app-only Provider.
-#' @param cfg load_scoped_config().
+#' @param cfg load_scoped_config(); `raw_schema`/`processed_schema` steuern das Ziel-Schema.
 #' @return invisible(Anzahl Calls).
 #' @export
 msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg) {
   # ---- start ---- #
+  rs <- cfg$raw_schema %||% "raw"
+  ps <- cfg$processed_schema %||% "processed"
   start_dt <- format(Sys.Date() - cfg$events_days_back, "%Y-%m-%dT00:00:00Z")
   end_dt   <- format(Sys.Date(), "%Y-%m-%dT23:59:59Z")
-  users <- dplyr::tbl(con, I("raw.msgraph_users")) %>%
+  users <- dplyr::tbl(con, I(paste0(rs, ".msgraph_users"))) %>%
     dplyr::filter(is_internal & !is_deleted) %>%
     dplyr::select(msgraph_user_id, user_principal_name) %>% dplyr::collect()
 
@@ -108,20 +110,20 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg) {
 
   # Kontakte upserten
   contacts <- parts_df %>% dplyr::transmute(email, ms_name) %>% dplyr::distinct(email, .keep_all = TRUE)
-  Billomatics::postgres_upsert_data(con, "raw", "msgraph_contacts", contacts, match_cols = "email")
+  Billomatics::postgres_upsert_data(con, rs, "msgraph_contacts", contacts, match_cols = "email")
   # Calls upserten
-  Billomatics::postgres_upsert_data(con, "raw", "msgraph_calls", calls_df, match_cols = "msgraph_call_id")
+  Billomatics::postgres_upsert_data(con, rs, "msgraph_calls", calls_df, match_cols = "msgraph_call_id")
   # Teilnehmer verknuepfen
-  call_ids <- dplyr::tbl(con, I("raw.msgraph_calls")) %>%
+  call_ids <- dplyr::tbl(con, I(paste0(rs, ".msgraph_calls"))) %>%
     dplyr::select(id, msgraph_call_id) %>% dplyr::collect() %>% dplyr::rename(call_id = id)
-  ct_ids <- dplyr::tbl(con, I("raw.msgraph_contacts")) %>%
+  ct_ids <- dplyr::tbl(con, I(paste0(rs, ".msgraph_contacts"))) %>%
     dplyr::select(id, email) %>% dplyr::collect() %>% dplyr::rename(contact_id = id)
   cp <- parts_df %>%
     dplyr::left_join(call_ids, by = c("meeting_id" = "msgraph_call_id")) %>%
     dplyr::left_join(ct_ids, by = "email") %>%
     dplyr::filter(!is.na(call_id), !is.na(contact_id)) %>%
     dplyr::transmute(call_id, contact_id)
-  Billomatics::postgres_upsert_data(con, "raw", "msgraph_call_participants", cp,
+  Billomatics::postgres_upsert_data(con, rs, "msgraph_call_participants", cp,
                                     match_cols = c("call_id", "contact_id"))
   invisible(nrow(calls_df))
 }

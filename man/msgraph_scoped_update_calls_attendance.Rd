@@ -11,7 +11,7 @@ msgraph_scoped_update_calls_attendance(con, app_token, cfg)
 
 \item{app_token}{app-only Provider.}
 
-\item{cfg}{load_scoped_config().}
+\item{cfg}{load_scoped_config(); \code{raw_schema}/\code{processed_schema} steuern das Ziel-Schema.}
 }
 \value{
 invisible(Anzahl Calls).

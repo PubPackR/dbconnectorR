@@ -27,7 +27,7 @@ vtt_to_plaintext <- function(vtt) {
 #'   app-only Provider.
 #'
 #' @param cfg
-#'   load_scoped_config().
+#'   load_scoped_config(); `raw_schema`/`processed_schema` steuern das Ziel-Schema.
 #'
 #' @return
 #'   invisible(Anzahl neu geholter Transkripte).
@@ -35,40 +35,43 @@ vtt_to_plaintext <- function(vtt) {
 #' @export
 msgraph_scoped_update_transcripts <- function(con, app_token, cfg) {
   # ---- start ---- #
+  rs <- cfg$raw_schema %||% "raw"
+  ps <- cfg$processed_schema %||% "processed"
   # Calls im Sliding Window, deren meeting_id noch KEIN Transkript hat
   window_start <- Sys.Date() - cfg$transcripts_sliding_window_days
-  calls <- dplyr::tbl(con, I("raw.msgraph_calls")) %>%
+  calls <- dplyr::tbl(con, I(paste0(rs, ".msgraph_calls"))) %>%
     dplyr::filter(!is.na(meeting_id) & call_start >= !!format(window_start, "%Y-%m-%d")) %>%
     dplyr::select(call_db_id = id, msgraph_call_id, meeting_id) %>% dplyr::collect()
-  have <- dplyr::tbl(con, I("processed.msgraph_call_transcripts")) %>%
+  have <- dplyr::tbl(con, I(paste0(ps, ".msgraph_call_transcripts"))) %>%
     dplyr::select(transcript_id, call_id) %>% dplyr::collect()
 
   # object_id je Meeting: bevorzugt der echte Event-Organizer, sonst Fallback auf
   # den ersten internen Call-Teilnehmer (Mapping-Job laeuft erst nach den Transkripten).
-  org_lookup <- DBI::dbGetQuery(con, "
+  # rs kommt aus der Config (kein User-Input) -> sichere String-Interpolation.
+  org_lookup <- DBI::dbGetQuery(con, sprintf("
     WITH organizer AS (
       SELECT DISTINCT c.meeting_id, u.msgraph_user_id AS object_id
-      FROM raw.msgraph_calls c
-      JOIN raw.msgraph_events e            ON e.meeting_id = c.meeting_id
-      JOIN raw.msgraph_event_participants p ON p.event_id = e.id AND p.is_organizer
-      JOIN raw.msgraph_contacts ct          ON ct.id = p.contact_id
-      JOIN raw.msgraph_users u              ON lower(u.email) = lower(ct.email)
+      FROM %1$s.msgraph_calls c
+      JOIN %1$s.msgraph_events e            ON e.meeting_id = c.meeting_id
+      JOIN %1$s.msgraph_event_participants p ON p.event_id = e.id AND p.is_organizer
+      JOIN %1$s.msgraph_contacts ct          ON ct.id = p.contact_id
+      JOIN %1$s.msgraph_users u              ON lower(u.email) = lower(ct.email)
       WHERE u.is_internal AND NOT u.is_deleted
     ),
     fallback AS (
       SELECT DISTINCT c.msgraph_call_id AS meeting_id, u.msgraph_user_id AS object_id
-      FROM raw.msgraph_calls c
-      JOIN raw.msgraph_call_participants p ON p.call_id = c.id
-      JOIN raw.msgraph_contacts ct          ON ct.id = p.contact_id
-      JOIN raw.msgraph_users u              ON lower(u.email) = lower(ct.email)
+      FROM %1$s.msgraph_calls c
+      JOIN %1$s.msgraph_call_participants p ON p.call_id = c.id
+      JOIN %1$s.msgraph_contacts ct          ON ct.id = p.contact_id
+      JOIN %1$s.msgraph_users u              ON lower(u.email) = lower(ct.email)
       WHERE u.is_internal AND NOT u.is_deleted
     )
     SELECT c.msgraph_call_id,
            COALESCE(o.object_id, f.object_id) AS object_id
-    FROM raw.msgraph_calls c
+    FROM %1$s.msgraph_calls c
     LEFT JOIN organizer o ON o.meeting_id = c.meeting_id
     LEFT JOIN fallback  f ON f.meeting_id = c.msgraph_call_id
-    WHERE COALESCE(o.object_id, f.object_id) IS NOT NULL")
+    WHERE COALESCE(o.object_id, f.object_id) IS NOT NULL", rs))
   org_map <- stats::setNames(org_lookup$object_id, org_lookup$msgraph_call_id)
 
   new_rows <- list()
@@ -98,7 +101,7 @@ msgraph_scoped_update_transcripts <- function(con, app_token, cfg) {
   }
   if (length(new_rows) == 0) { message("Keine neuen Transkripte."); return(invisible(0L)) }
   df <- dplyr::bind_rows(new_rows)
-  Billomatics::postgres_upsert_data(con, "processed", "msgraph_call_transcripts", df,
+  Billomatics::postgres_upsert_data(con, ps, "msgraph_call_transcripts", df,
                                     match_cols = "transcript_id")
   invisible(nrow(df))
 }
