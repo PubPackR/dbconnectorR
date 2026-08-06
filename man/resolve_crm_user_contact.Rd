@@ -10,11 +10,13 @@ resolve_crm_user_contact(con)
 \item{con}{Pool/DBI-Connection.}
 }
 \value{
-data.frame: user_id, contact_id.
+data.frame: user_id (= crm_users.id), contact_id.
 }
 \description{
 Best-effort E-Mail-Join crm_users.user_login -> raw.msgraph_contacts-E-Mail-
-Spalte; gibt user_id + contact_id zurueck. DB-abhaengig, von Moritz gegen
-echte Spaltenstruktur zu verifizieren.
+Spalte; gibt user_id + contact_id zurueck. Der zurueckgegebene \code{user_id} ist
+die Surrogat-Spalte \code{crm_users.id} — DAS ist die Spalte, die
+\code{raw.crm_lead_tasks.user_id} / \code{assigned_to_user_id} referenzieren (NICHT
+\code{crm_user_id}; DB-verifiziert 2026-07-24: 186547 vs 0 Join-Treffer).
 }
 \keyword{internal}

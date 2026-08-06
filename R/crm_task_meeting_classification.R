@@ -4,7 +4,8 @@
 #' wendet den Anti-Join gegen bestehende MSGraph-Meetings an und mappt auf das
 #' Schema von processed.msgraph_extern_event_classification (+ CRM-Zusatzspalten).
 #'
-#' @param crm_tasks data.frame: crm_task_id, lead_id, user_id, precise_time, task_name.
+#' @param crm_tasks data.frame: id (Surrogat-PK, fuer Kommentar-Join), crm_task_id,
+#'   lead_id, user_id, precise_time, task_name.
 #' @param crm_comments data.frame: task_id, comment_name.
 #' @param crm_user_contact data.frame: user_id, contact_id (Sales-Rep-Kontakt).
 #' @param msgraph_meetings data.frame: lead_id, event_date.
@@ -28,9 +29,22 @@ assemble_crm_classification_rows <- function(crm_tasks, crm_comments,
   comment_status$rank <- status_rank[comment_status$status]
   agg <- stats::aggregate(rank ~ task_id, data = comment_status, FUN = max)
   agg$meeting_status <- names(status_rank)[match(agg$rank, status_rank)]
-  vc$meeting_status <- agg$meeting_status[match(as.character(vc$crm_task_id),
+  # Kommentar-Join auf die Surrogat-PK: crm_lead_task_comments.task_id
+  # referenziert crm_lead_tasks.id (DB-verifiziert 2026-08: 253195 vs 113
+  # Treffer), NICHT crm_task_id.
+  vc$meeting_status <- agg$meeting_status[match(as.character(vc$id),
                                                  as.character(agg$task_id))]
   vc$meeting_status[is.na(vc$meeting_status)] <- "unbekannt"
+
+  # 3b. Nur informative Zeilen: erkanntes Tool ODER erkannter Status. VC-Tasks
+  # ohne Tool-String und ohne Status-Kommentar tragen keine Information (die
+  # sichtbaren Teams-/internen Meetings erfasst MSGraph ohnehin) und wuerden die
+  # Fakttabelle + den Tab mit Rauschen fluten. Frueh filtern spart Anti-Join/
+  # Rep-Match. Bewusster Tradeoff: ein echtes externes Meeting mit unerkanntem
+  # Freitext-Tool UND ohne Kommentar faellt hier raus (seltener Randfall).
+  vc <- vc[vc$meeting_tool != "unbekannt" | vc$meeting_status != "unbekannt",
+           , drop = FALSE]
+  if (nrow(vc) == 0) return(assemble_crm_empty_result())
 
   # 4. Datum (Europe/Berlin)
   vc$event_date <- as.Date(vc$precise_time, tz = "Europe/Berlin")
@@ -99,7 +113,7 @@ update_crm_task_meeting_classification <- function(con) {
 
   crm_tasks <- dplyr::tbl(con, I("raw.crm_lead_tasks")) %>%
     dplyr::filter(is_deleted == FALSE) %>%
-    dplyr::select(crm_task_id, lead_id, user_id, assigned_to_user_id,
+    dplyr::select(id, crm_task_id, lead_id, user_id, assigned_to_user_id,
                   precise_time, task_name) %>%
     dplyr::collect()
 
@@ -108,8 +122,10 @@ update_crm_task_meeting_classification <- function(con) {
     dplyr::select(task_id, comment_name) %>%
     dplyr::collect()
 
-  # crm_user -> Personio -> (E-Mail) -> msgraph-Kontakt. Best effort; wenn leer,
-  # bleibt crm_user_contact leer (Rep-Aufloesung optional fuer diese Phase).
+  # Rep-Aufloesung: crm_users.user_login -> raw.msgraph_contacts.email (best
+  # effort, kein Personio-Zwischenschritt). Liefert den Sales-Rep-Kontakt.
+  # ACHTUNG: assemble_crm_classification_rows verwirft Zeilen ohne aufloesbaren
+  # Rep -> die Auflösung ist de facto Pflicht (leeres Ergebnis => keine CRM-Zeilen).
   crm_user_contact <- resolve_crm_user_contact(con)
 
   # MSGraph-Meetings fuer Anti-Join: lead_id + event_date aus bestehender

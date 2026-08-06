@@ -9,10 +9,16 @@ ALTER TABLE processed.msgraph_extern_event_classification
   ADD COLUMN IF NOT EXISTS crm_event_date   date,
   ADD COLUMN IF NOT EXISTS crm_task_id      bigint;
 
--- Eindeutigkeit der CRM-Zeilen (partial unique) fuer den scoped Upsert.
+-- Eindeutigkeit der CRM-Zeilen fuer den scoped Upsert.
+-- NICHT partial: Billomatics::postgres_upsert_data emittiert ein blankes
+-- ON CONFLICT (crm_task_id, contact_id) ohne WHERE-Praedikat -> Postgres kann
+-- einen partiellen Index nicht als Arbiter inferieren. Ein voller Unique-Index
+-- ist unbedenklich: msgraph-Zeilen haben crm_task_id = NULL, und NULLs gelten
+-- als distinct (kein Konflikt). DROP behebt einen evtl. schon angelegten
+-- partiellen Index aus einer frueheren Migrations-Version.
+DROP INDEX IF EXISTS processed.uq_extern_event_classification_crm_task;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_extern_event_classification_crm_task
-  ON processed.msgraph_extern_event_classification (crm_task_id, contact_id)
-  WHERE source = 'crm_task';
+  ON processed.msgraph_extern_event_classification (crm_task_id, contact_id);
 
 -- Schneller Filter fuer den scoped DELETE.
 CREATE INDEX IF NOT EXISTS idx_extern_event_classification_source

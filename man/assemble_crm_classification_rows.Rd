@@ -12,7 +12,8 @@ assemble_crm_classification_rows(
 )
 }
 \arguments{
-\item{crm_tasks}{data.frame: crm_task_id, lead_id, user_id, precise_time, task_name.}
+\item{crm_tasks}{data.frame: id (Surrogat-PK, fuer Kommentar-Join), crm_task_id,
+lead_id, user_id, precise_time, task_name.}
 
 \item{crm_comments}{data.frame: task_id, comment_name.}
 
