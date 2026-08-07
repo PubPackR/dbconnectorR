@@ -52,10 +52,17 @@ is_external_tool <- function(tool) {
 #' @return Character(-Vektor): storniert/no_show/show_up/unbekannt.
 #' @export
 classify_meeting_status <- function(comment_text) {
-  x <- tolower(ifelse(is.na(comment_text), "", comment_text))
+  raw <- ifelse(is.na(comment_text), "", comment_text)
+  x   <- tolower(raw)
+  # NE ('nicht erschienen') und AB ('Anrufbeantworter') sind die haeufigsten
+  # Sales-Kurzformen fuer No-Show. Sie werden CASE-SENSITIV auf dem Rohtext
+  # gematcht (\bNE\b/\bAB\b), damit umgangssprachliches 'ne' (= 'eine') und die
+  # Praeposition 'ab' keine Fehltreffer erzeugen. Die punktierte Form n.e. ist
+  # eindeutig und wird case-insensitiv erkannt.
   dplyr::case_when(
-    stringr::str_detect(x, "storn|abgesagt|verschoben|cancel")                      ~ "storniert",
-    stringr::str_detect(x, "no[ -]?show|nicht erschienen|nicht da|kam nicht|nicht aufgetaucht") ~ "no_show",
+    stringr::str_detect(x, "storn|abgesagt|verschob|verschieb|cancel")              ~ "storniert",
+    stringr::str_detect(x, "no[ -]?show|nicht erschienen|nicht da|kam nicht|nicht aufgetaucht|n\\.e\\.?") |
+      stringr::str_detect(raw, "\\bNE\\b|\\bAB\\b")                                  ~ "no_show",
     stringr::str_detect(x, "show[ -]?up|erschienen|stattgefunden|gehalten|durchgef|war da")     ~ "show_up",
     TRUE                                                                            ~ "unbekannt"
   )
