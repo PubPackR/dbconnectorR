@@ -43,6 +43,22 @@ test_that("classify_meeting_status priorisiert Storno vor No-Show vor Show-Up", 
   expect_equal(classify_meeting_status(NA_character_), "unbekannt")
 })
 
+test_that("classify_meeting_status erkennt NE-Kurzform + AB (Anrufbeantworter) als No-Show", {
+  # NE = 'nicht erschienen', die haeufigste Sales-Kurzform (Discovery 2026-08)
+  expect_equal(classify_meeting_status("n.e."), "no_show")
+  expect_equal(classify_meeting_status("N.E"), "no_show")
+  expect_equal(classify_meeting_status("NE"), "no_show")
+  expect_equal(classify_meeting_status("12.12.22 NE"), "no_show")
+  expect_equal(classify_meeting_status("14.12.22 NE / Direkt Mailbox"), "no_show")
+  # AB = Anrufbeantworter zaehlt als No-Show (Domaenen-Entscheidung Moritz)
+  expect_equal(classify_meeting_status("AB"), "no_show")
+  # verschieben (Infinitiv) muss wie verschoben Storno sein
+  expect_equal(classify_meeting_status("verschieben den Termin"), "storniert")
+  # Wortgrenzen + Case: KEIN False-Positive bei umgangssprachlichem 'ne'/Praeposition 'ab'
+  expect_equal(classify_meeting_status("hab ne Mail geschrieben"), "unbekannt")
+  expect_equal(classify_meeting_status("ruft ab naechster Woche zurueck"), "unbekannt")
+})
+
 test_that("filter_new_crm_meetings behaelt externe Tools immer und Teams nur ohne MSGraph-Match", {
   crm <- data.frame(
     crm_task_id     = 1:4,
