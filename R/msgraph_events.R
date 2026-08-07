@@ -109,8 +109,36 @@ msgraph_update_events <- function(con, access_token, startDate, user_id = NULL, 
   update_event_participants(con, msgraph_event_participants, source = "calendar")
 }
 
+#' Decide Whether Cancellation Marking Must Be Skipped This Run
+#'
+#' `update_events()` derives cancellations purely from absence: an event that
+#' exists locally but is missing from the fresh download is marked as canceled.
+#' An incomplete API response would therefore cancel everything it failed to
+#' return. That risk is highest for MS Bookings, where `bookingAppointment` has
+#' no status field in either API version, so disappearing from the download is
+#' the only cancellation signal there is.
+#'
+#' In normal operation the download covers nearly the whole local scope and
+#' genuine cancellations are individual cases. A low coverage therefore points
+#' at a broken response rather than at a wave of cancellations.
+#'
+#' @param in_scope_n Integer. Number of existing events in scope for this run.
+#' @param to_cancel_n Integer. How many of those are missing from the download.
+#' @param min_coverage Numeric. Minimum share of in-scope events the download
+#'   must cover for cancellations to be trusted. Defaults to 0.5.
+#' @return List with `coverage` (share of in-scope events present in the
+#'   download) and `skip` (TRUE when cancellations must not be applied).
+#' @keywords internal
+cancellation_coverage_check <- function(in_scope_n, to_cancel_n, min_coverage = 0.5) {
+  # ---- start ---- #
+  coverage <- if (in_scope_n == 0) 1 else 1 - to_cancel_n / in_scope_n
+  list(coverage = coverage, skip = coverage < min_coverage)
+}
+
+
 update_events <- function(con, all_calendar_events_, startDate,
-                          source = c("calendar", "booking")) {
+                          source = c("calendar", "booking"),
+                          min_download_coverage = 0.5) {
   source <- match.arg(source)
 
 
@@ -207,6 +235,60 @@ update_events <- function(con, all_calendar_events_, startDate,
   # Events to mark as cancelled: in scope but NOT in the new download
   events_to_cancel <- events_in_scope %>%
     dplyr::anti_join(new_event_identifiers, by = c("msgraph_ical_uid", "event_start"))
+
+  # Schutz gegen Massen-Stornierung durch unvollstaendige Downloads.
+  # events_to_cancel entsteht allein aus "war im Bestand, fehlt im Download".
+  # Liefert die API nur einen Teil -- Throttling, abgebrochene Paginierung,
+  # geaenderte Rechte -- wird der fehlende Rest faelschlich als abgesagt
+  # markiert. Fuer Bookings besonders kritisch: bookingAppointment hat weder in
+  # v1.0 noch in beta ein Status-Feld, das Verschwinden aus der API ist dort
+  # das EINZIGE Absage-Signal (gemessen: 6 von 8 Booking-Absagen stammen
+  # daraus). Bisher fing nur der Fall "Business liefert null Termine" ab.
+  #
+  # Im Normalbetrieb deckt der Download fast den kompletten Bestand im
+  # Zeitfenster ab; echte Absagen sind Einzelfaelle. Faellt die Abdeckung unter
+  # die Schwelle, wird in diesem Lauf gar nicht storniert. Bewusst
+  # log-and-degrade statt stop(): der Rest der Ingestion soll weiterlaufen und
+  # der Vorfall sichtbar geloggt werden.
+  # Der Tradeoff ist bewusst asymmetrisch -- lieber eine Stornierung verpassen
+  # als eine falsche Absage-Welle. ACHTUNG, zwei Grenzen, die das mitkauft:
+  #  (1) Ist das Verschwinden ECHT (geloeschte Serie, geraeumter Kalender,
+  #      Massen-Storno), heilt sich die Abdeckung nicht von selbst -- die
+  #      Stornierung bleibt dauerhaft aus, bis unabhaengige Neu-Events das
+  #      Verhaeltnis ueber die Schwelle verduennen. Das ist der akzeptierte Preis.
+  #  (2) Der Guard rechnet AGGREGIERT ueber alle Booking-Businesses eines Laufs.
+  #      Faellt ein Minderheits-Business still aus (HTTP 200 mit leerem value,
+  #      kein error), drueckt das die Abdeckung nur anteilig; bleibt sie > Schwelle,
+  #      greift der Guard NICHT und dessen Events werden faelschlich storniert.
+  #      Harte Fehler crashen den Lauf ohnehin vorher (retrieve_* stop()). Eine
+  #      Pro-Business-Abdeckungspruefung waere der saubere Fix (Follow-up).
+  in_scope_n <- nrow(events_in_scope)
+  coverage_check <- cancellation_coverage_check(
+    in_scope_n   = in_scope_n,
+    to_cancel_n  = nrow(events_to_cancel),
+    min_coverage = min_download_coverage
+  )
+  download_coverage <- coverage_check$coverage
+
+  if (coverage_check$skip) {
+    coverage_msg <- sprintf(
+      paste0("update_events(source = '%s'): Download deckt nur %.1f%% des Bestands ",
+             "im Zeitfenster ab (%d von %d Events), Schwelle %.0f%%. Es wird in ",
+             "diesem Lauf NICHTS storniert -- %d Events waeren betroffen gewesen. ",
+             "Vermutlich unvollstaendige API-Antwort, Lauf pruefen."),
+      source, 100 * download_coverage,
+      in_scope_n - nrow(events_to_cancel), in_scope_n,
+      100 * min_download_coverage, nrow(events_to_cancel)
+    )
+    warning(coverage_msg, call. = FALSE, immediate. = TRUE)
+    message(coverage_msg)
+    events_to_cancel <- events_to_cancel[0, , drop = FALSE]
+  } else if (nrow(events_to_cancel) > 0) {
+    message(sprintf(
+      "update_events(source = '%s'): %d Events als abgesagt markiert (Abdeckung %.1f%%).",
+      source, nrow(events_to_cancel), 100 * download_coverage
+    ))
+  }
 
   # Mark events as cancelled
   existing_events_updated <- existing_events %>%

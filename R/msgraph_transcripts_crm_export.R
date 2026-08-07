@@ -15,6 +15,83 @@
 # This is typically the user ID of the technical/admin account
 CRM_DEFAULT_AUTHOR_USER_ID <- 199146L
 
+
+#' Propagate occurred_at to the CRM activity via a partial PUT
+#'
+#' CentralStation stores occurred_at on the protocol when it is sent with the
+#' POST, but the feed is driven by a separate activity object that the POST does
+#' not touch. Per CRM support (2026-04-27) the API mirrors the app's own
+#' behaviour only on UPDATE: "Wenn du beim Update eines protocols occurred_at
+#' uebergibst, wird das auch auf die activity durchgeschliffen."
+#'
+#' A protocol created via POST therefore shows the creation time in the UI until
+#' a PUT follows. The payload is deliberately minimal so the content stays
+#' untouched — same shape as the proven implementation in
+#' base-11-CRM_Tagging/func/set_template_protocols.R (update_protocol_occurred_at).
+#'
+#' @param headers Named vector with request headers (content-type, X-apikey, Accept)
+#' @param crm_protocol_id CRM-facing protocol ID from the POST response
+#' @param occurred_at Timestamp as "YYYY-MM-DDTHH:MM:SS" (local wall clock)
+#'
+#' @return List with success (logical), status_code and error (character or NULL)
+#' @keywords internal
+# ---- start ---- #
+crm_push_occurred_at_to_activity <- function(headers, crm_protocol_id, occurred_at) {
+
+  if (is.null(crm_protocol_id) || is.na(crm_protocol_id) ||
+      is.null(occurred_at) || is.na(occurred_at) || !nzchar(as.character(occurred_at))) {
+    return(list(success = FALSE, status_code = NA_integer_,
+                error = "protocol id or occurred_at missing"))
+  }
+
+  body_string <- jsonlite::toJSON(
+    list(protocol = list(
+      updated_by_user_id = CRM_DEFAULT_AUTHOR_USER_ID,
+      occurred_at        = as.character(occurred_at)
+    )),
+    auto_unbox = TRUE
+  )
+
+  response <- Billomatics::crm_PUT(
+    paste0("https://api.centralstationcrm.net/api/protocols/", crm_protocol_id),
+    headers,
+    body   = body_string,
+    encode = "json"
+  )
+
+  status_code <- httr::status_code(response)
+
+  if (status_code == 200) {
+    list(success = TRUE, status_code = status_code, error = NULL)
+  } else {
+    list(success = FALSE, status_code = status_code,
+         error = sprintf("PUT occurred_at failed with HTTP %s", status_code))
+  }
+}
+
+
+#' Read the protocol ID out of a CRM create response
+#'
+#' @param response httr response object of the POST
+#' @return Protocol ID or NULL
+#' @keywords internal
+# ---- start ---- #
+crm_extract_protocol_id <- function(response) {
+  body <- tryCatch(httr::content(response, as = "text", encoding = "UTF-8"),
+                   error = function(e) "")
+  if (length(body) == 0 || is.na(body[1]) || !nzchar(body[1])) return(NULL)
+
+  parsed <- tryCatch(jsonlite::fromJSON(body[1], simplifyVector = FALSE),
+                     error = function(e) NULL)
+  if (is.null(parsed)) return(NULL)
+
+  id <- parsed$protocol$id
+  if (is.null(id)) id <- parsed$id
+  if (is.null(id) || length(id) == 0) return(NULL)
+
+  id[[1]]
+}
+
 ################################################################################
 # Main Wrapper Function
 ################################################################################
@@ -447,14 +524,26 @@ export_transcripts_to_crm <- function(con, crm_api_key, transcript_mappings,
   crm_protocols <- transcript_mappings %>%
     dplyr::mutate(
       transcript_id = id,  # Preserve transcript ID for tracking
+      # transcript_created_at is UTC. as.Date() on a POSIXct defaults to UTC and
+      # would shift late-afternoon meetings to the previous day, so the timezone
+      # is passed explicitly. Same value feeds the header and occurred_at.
+      meeting_date = as.Date(transcript_created_at, tz = "Europe/Berlin"),
       protocol_header = paste("Teams Meeting Summary -",
-                            format(as.Date(transcript_created_at), "%Y-%m-%d")),
+                            format(meeting_date, "%Y-%m-%d")),
+      # CRM protocols carry occurred_at separately from their creation time.
+      # Without it CentralStation stamps "now", which puts backfilled or
+      # delayed summaries at the wrong place in the lead's feed.
+      # Full local timestamp, not just the date: CentralStation reads a naive
+      # value as Europe/Berlin wall clock, so the protocol lands at the actual
+      # meeting time instead of midnight.
+      occurred_at = format(transcript_created_at, "%Y-%m-%dT%H:%M:%S",
+                           tz = "Europe/Berlin"),
       content = format_transcript_for_crm(transcript_summary, sales_user_names),
       field_type = "protocols",
       action = "add",
       badge = "meeting-summary"
     ) %>%
-    dplyr::select(transcript_id, protocol_header, content, attachable_id, attachable_type, author_user_id, field_type, action, badge, sales_user_names) %>%
+    dplyr::select(transcript_id, protocol_header, occurred_at, content, attachable_id, attachable_type, author_user_id, field_type, action, badge, sales_user_names) %>%
     dplyr::filter(!is.na(content), content != "") %>%
     dplyr::mutate(attachable_id = as.integer(attachable_id)) %>%
     # Map internal CRM lead IDs to external IDs
@@ -467,7 +556,7 @@ export_transcripts_to_crm <- function(con, crm_api_key, transcript_mappings,
     dplyr::mutate(attachable_id = crm_lead_id) %>%
     dplyr::select(-crm_lead_id) %>%
     dplyr::filter(!is.na(attachable_id)) %>%
-    dplyr::select(transcript_id, protocol_header, content, attachable_id, attachable_type, author_user_id, field_type, action, badge, sales_user_names)
+    dplyr::select(transcript_id, protocol_header, occurred_at, content, attachable_id, attachable_type, author_user_id, field_type, action, badge, sales_user_names)
 
   # Export statistics tracking
   exported_count <- 0
@@ -612,6 +701,17 @@ export_single_protocol_to_crm <- function(con, headers, protocol_data, use_test_
     )
   )
 
+  # Date of the meeting, not of the API call. The field name is confirmed by
+  # analytics_04_sales/move_duplicate_template_protocols.R, which set it via
+  # PUT /api/protocols/{id} with {"protocol":{"occurred_at":"YYYY-MM-DD"}}.
+  # Only sent when known, so a missing date keeps the previous behaviour
+  # (CentralStation stamps the creation time) instead of writing "NA".
+  occurred_at <- protocol_data$occurred_at
+  if (!is.null(occurred_at) && length(occurred_at) == 1 && !is.na(occurred_at) &&
+      nzchar(occurred_at)) {
+    json_data$protocol$occurred_at <- as.character(occurred_at)
+  }
+
   # Convert to JSON string
   body_string <- jsonlite::toJSON(json_data, auto_unbox = TRUE)
 
@@ -628,6 +728,28 @@ export_single_protocol_to_crm <- function(con, headers, protocol_data, use_test_
   status_code <- httr::status_code(response)
 
   if (status_code == 201) {
+    # The POST stores occurred_at on the protocol but does not move the activity
+    # that drives the CRM feed. A partial PUT does — see
+    # crm_push_occurred_at_to_activity(). A failure here leaves the protocol in
+    # place with the wrong feed position, so it is reported as a warning rather
+    # than turning the whole export into an error.
+    if (!is.null(json_data$protocol$occurred_at)) {
+      crm_protocol_id <- crm_extract_protocol_id(response)
+
+      if (is.null(crm_protocol_id)) {
+        warning("Protocol created but its ID could not be read from the response ",
+                "— occurred_at was not propagated to the CRM activity.")
+      } else {
+        put_result <- crm_push_occurred_at_to_activity(
+          headers, crm_protocol_id, json_data$protocol$occurred_at
+        )
+        if (!isTRUE(put_result$success)) {
+          warning(sprintf("Protocol %s created, but propagating occurred_at failed: %s",
+                          crm_protocol_id, put_result$error))
+        }
+      }
+    }
+
     return(list(success = TRUE, error = NULL))
   } else {
     response_text <- tryCatch({
@@ -659,6 +781,10 @@ export_single_protocol_to_crm <- function(con, headers, protocol_data, use_test_
 #' @param sales_user_names Optional sales user names to append to content header and protocol name.
 #' @param protocol_name Optional custom protocol name. If NULL, auto-generated as
 #'   "Teams Meeting Summary - {date}".
+#' @param occurred_at Optional date of the meeting as "YYYY-MM-DD". Determines
+#'   where the protocol appears in the lead's feed. If NULL and a transcript_id
+#'   is given, it is derived from transcript_created_at in Europe/Berlin. If it
+#'   stays NULL, the field is omitted and CentralStation stamps the creation time.
 #' @param use_test_account Logical, whether to use test CRM account. Default: FALSE
 #'
 #' @return List with success (logical) and error (character or NULL)
@@ -701,6 +827,7 @@ msgraph_export_single_transcript_to_crm <- function(con,
                                                      protocol_id = NULL,
                                                      sales_user_names = NULL,
                                                      protocol_name = NULL,
+                                                     occurred_at = NULL,
                                                      use_test_account = FALSE) {
 
   # Validate input: either transcript_id or content must be provided
@@ -723,10 +850,24 @@ msgraph_export_single_transcript_to_crm <- function(con,
       stop(sprintf("Transcript %s has no valid summary (content is NA or empty).", transcript_id))
     }
 
-    # Auto-generate protocol name from transcript date if not provided
-    if (is.null(protocol_name) && !is.null(transcript_data$transcript_created_at)) {
-      protocol_name <- paste("Teams Meeting Summary -",
-                             format(as.Date(transcript_data$transcript_created_at[1]), "%Y-%m-%d"))
+    # Auto-generate protocol name from transcript date if not provided.
+    # transcript_created_at is UTC — as.Date() without tz would move late
+    # meetings to the previous day.
+    if (!is.null(transcript_data$transcript_created_at)) {
+      meeting_date <- as.Date(transcript_data$transcript_created_at[1],
+                              tz = "Europe/Berlin")
+
+      if (is.null(protocol_name)) {
+        protocol_name <- paste("Teams Meeting Summary -",
+                               format(meeting_date, "%Y-%m-%d"))
+      }
+      # Fall back to the meeting timestamp so the protocol lands at the right
+      # spot in the lead's feed instead of being stamped with the API call time.
+      # Local wall clock — CentralStation reads a naive value as Europe/Berlin.
+      if (is.null(occurred_at)) {
+        occurred_at <- format(transcript_data$transcript_created_at[1],
+                              "%Y-%m-%dT%H:%M:%S", tz = "Europe/Berlin")
+      }
     }
   }
 
@@ -760,6 +901,13 @@ msgraph_export_single_transcript_to_crm <- function(con,
       format = "markdown"
     )
   )
+
+  # Only send occurred_at when known. Passing it inside list() would keep a NULL
+  # entry that toJSON serialises as {} — an empty object rather than no field.
+  if (!is.null(occurred_at) && length(occurred_at) == 1 && !is.na(occurred_at) &&
+      nzchar(as.character(occurred_at))) {
+    json_data$protocol$occurred_at <- as.character(occurred_at)
+  }
 
   body_string <- jsonlite::toJSON(json_data, auto_unbox = TRUE)
 
@@ -797,6 +945,29 @@ msgraph_export_single_transcript_to_crm <- function(con,
   if (status_code == expected_status) {
     action <- if (is.null(protocol_id)) "created" else "updated"
     message(sprintf("Successfully %s protocol for lead %s", action, lead_id))
+
+    # Only the create path needs the follow-up PUT: an update already carries
+    # occurred_at through to the activity that drives the CRM feed.
+    if (is.null(protocol_id) && !is.null(json_data$protocol$occurred_at)) {
+      crm_protocol_id <- crm_extract_protocol_id(response)
+
+      if (is.null(crm_protocol_id)) {
+        warning("Protocol created but its ID could not be read from the response ",
+                "— occurred_at was not propagated to the CRM activity.")
+      } else {
+        put_result <- crm_push_occurred_at_to_activity(
+          headers, crm_protocol_id, json_data$protocol$occurred_at
+        )
+        if (isTRUE(put_result$success)) {
+          message(sprintf("occurred_at propagated to activity (protocol %s)",
+                          crm_protocol_id))
+        } else {
+          warning(sprintf("Protocol %s created, but propagating occurred_at failed: %s",
+                          crm_protocol_id, put_result$error))
+        }
+      }
+    }
+
     return(list(success = TRUE, error = NULL))
   } else {
     response_text <- tryCatch({
@@ -1018,9 +1189,11 @@ export_unmappable_to_debug_lead <- function(con, crm_api_key, unmappable_transcr
     formatted_summary <- format_transcript_for_crm(transcript$transcript_summary)
     full_content <- paste0(debug_header, formatted_summary)
 
-    # Build protocol name
+    # Build protocol name. transcript_created_at is UTC — pass the timezone so
+    # late meetings do not end up dated on the previous day.
+    meeting_date <- as.Date(transcript$transcript_created_at, tz = "Europe/Berlin")
     protocol_name <- paste("Teams Meeting Summary -",
-                           format(as.Date(transcript$transcript_created_at), "%Y-%m-%d"),
+                           format(meeting_date, "%Y-%m-%d"),
                            "- UNMAPPED")
 
     # Create JSON payload — always goes to debug_lead_id
@@ -1039,6 +1212,10 @@ export_unmappable_to_debug_lead <- function(con, crm_api_key, unmappable_transcr
         format = "markdown"
       )
     )
+
+    if (!is.na(meeting_date)) {
+      json_data$protocol$occurred_at <- format(meeting_date, "%Y-%m-%d")
+    }
 
     body_string <- jsonlite::toJSON(json_data, auto_unbox = TRUE)
 
