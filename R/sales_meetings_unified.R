@@ -99,18 +99,36 @@ update_sales_meetings_unified <- function(con) {
       dplyr::tbl(con, I("mapping.msgraph_call_event")) %>%
         dplyr::select(id, event_id, event_date),
       by = c("call_event_mapping_id" = "id")) %>%
-    dplyr::left_join(
+    dplyr::collect()
+  msgraph_meetings$event_id   <- as.character(msgraph_meetings$event_id)
+  msgraph_meetings$event_date <- as.Date(msgraph_meetings$event_date, tz = "Europe/Berlin")
+  # Eine Zeile je Meeting (mehrere verantwortliche Kontakte -> mehrere Zeilen).
+  msgraph_meetings <- dplyr::distinct(msgraph_meetings, call_event_mapping_id, .keep_all = TRUE)
+
+  # Lead je Meeting ueber die EXTERNEN Teilnehmer ableiten (NICHT ueber den
+  # verantwortlichen Kontakt - der ist oft der Organisator/Rep und liefert den
+  # falschen Lead; DB-verifiziert: verantwortlich-Pfad = 0 gemeinsame Leads,
+  # externer Pfad = 7255). Wie get_event_customer_status:
+  #   msgraph_call_event -> msgraph_event_participants (extern) -> crm_lead_msgraph_contact.
+  meeting_lead <- dplyr::tbl(con, I("mapping.msgraph_call_event")) %>%
+    dplyr::select(call_event_mapping_id = id, event_id) %>%
+    dplyr::inner_join(
+      dplyr::tbl(con, I("raw.msgraph_event_participants")) %>%
+        dplyr::filter(is_organizer == FALSE) %>%
+        dplyr::select(event_id, contact_id),
+      by = "event_id") %>%
+    dplyr::inner_join(
       dplyr::tbl(con, I("mapping.crm_lead_msgraph_contact")) %>%
         dplyr::filter(is_primary_crm == TRUE) %>%
         dplyr::select(contact_id = msgraph_contact_id, lead_id = crm_lead_id),
       by = "contact_id") %>%
+    dplyr::distinct(call_event_mapping_id, lead_id) %>%
     dplyr::collect()
-  msgraph_meetings$event_id   <- as.character(msgraph_meetings$event_id)
-  msgraph_meetings$event_date <- as.Date(msgraph_meetings$event_date, tz = "Europe/Berlin")
-  # Fan-out-Guard: der Left-Join auf mapping.crm_lead_msgraph_contact kann
-  # pro call_event_mapping_id mehrere Zeilen erzeugen (analog Phase 2).
-  # meeting_key = as.character(call_event_mapping_id) muss eindeutig sein.
-  msgraph_meetings <- dplyr::distinct(msgraph_meetings, call_event_mapping_id, .keep_all = TRUE)
+  # Mehrere externe Leads je Meeting -> deterministisch einen waehlen (kleinste id).
+  meeting_lead <- meeting_lead %>%
+    dplyr::group_by(call_event_mapping_id) %>%
+    dplyr::summarise(lead_id = min(lead_id, na.rm = TRUE), .groups = "drop")
+  msgraph_meetings <- dplyr::left_join(msgraph_meetings, meeting_lead, by = "call_event_mapping_id")
 
   message("  leite CRM-VC-Termine aus Rohdaten ab (ohne Anti-Join) ...")
   tasks <- dplyr::tbl(con, I("raw.crm_lead_tasks")) %>%
