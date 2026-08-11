@@ -22,7 +22,7 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
     meeting_key          = as.character(msgraph_meetings$call_event_mapping_id),
     source               = "msgraph",
     event_date           = msgraph_meetings$event_date,
-    contact_id           = msgraph_meetings$contact_id,
+    contact_id           = as.character(msgraph_meetings$contact_id),
     lead_id              = msgraph_meetings$lead_id,
     is_no_show           = msgraph_meetings$is_no_show,
     no_show_source       = "msgraph",
@@ -46,7 +46,7 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
     fl <- crm_status_flags(cm$meeting_status)
     netto_neu <- function() data.frame(
       meeting_key = paste0("crm_", cm$crm_task_id), source = "crm_task",
-      event_date = cm$event_date, contact_id = cm$contact_id, lead_id = cm$lead_id,
+      event_date = cm$event_date, contact_id = as.character(cm$contact_id), lead_id = cm$lead_id,
       is_no_show = fl$is_no_show, no_show_source = "crm_only",
       meeting_status = cm$meeting_status, meeting_tool = cm$meeting_tool,
       is_external_tool = cm$is_external_tool, excluded = fl$excluded,
@@ -55,6 +55,8 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
       stringsAsFactors = FALSE)
 
     if (isTRUE(cm$is_external_tool)) { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
+
+    if (is.na(cm$lead_id)) { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
 
     idx <- which(ms_key == paste(cm$lead_id, cm$event_date))
     if (length(idx) == 0) { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
@@ -105,6 +107,10 @@ update_sales_meetings_unified <- function(con) {
     dplyr::collect()
   msgraph_meetings$event_id   <- as.character(msgraph_meetings$event_id)
   msgraph_meetings$event_date <- as.Date(msgraph_meetings$event_date, tz = "Europe/Berlin")
+  # Fan-out-Guard: der Left-Join auf mapping.crm_lead_msgraph_contact kann
+  # pro call_event_mapping_id mehrere Zeilen erzeugen (analog Phase 2).
+  # meeting_key = as.character(call_event_mapping_id) muss eindeutig sein.
+  msgraph_meetings <- dplyr::distinct(msgraph_meetings, call_event_mapping_id, .keep_all = TRUE)
 
   message("  leite CRM-VC-Termine aus Rohdaten ab (ohne Anti-Join) ...")
   tasks <- dplyr::tbl(con, I("raw.crm_lead_tasks")) %>%

@@ -90,3 +90,20 @@ test_that("Override + unbekannt: MSGraph is_no_show/excluded bleiben unveraender
   expect_false(r$excluded)
   expect_equal(r$meeting_tool, "teams")
 })
+
+test_that("NA-lead-Guard: CRM-Zeile mit lead_id=NA matcht nicht faelschlich MSGraph-Zeile mit lead_id=NA", {
+  # lokale msgraph-Fixture mit einer NA-lead-Zeile (key 13) am selben Datum wie die CRM-Zeile
+  ms_na <- mk_msgraph()
+  ms_na <- rbind(ms_na, transform(ms_na[1, ],
+                                   call_event_mapping_id = 13L, event_id = "e13",
+                                   lead_id = NA_integer_, event_date = as.Date("2026-08-04")))
+  cm <- crm_row(10, NA_integer_, "2026-08-04", "teams", "no_show", FALSE)
+  res <- assemble_unified_meetings(ms_na, mk_crm(list(cm)))
+
+  crm_r <- res[res$meeting_key == "crm_10", ]
+  expect_equal(crm_r$source, "crm_task")
+  expect_equal(crm_r$no_show_source, "crm_only")
+
+  ms_r <- res[res$meeting_key == "13", ]
+  expect_equal(ms_r$no_show_source, "msgraph")  # nicht ueberschrieben
+})
