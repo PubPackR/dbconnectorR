@@ -6,6 +6,14 @@
 \usage{
 crm_status_flags(status)
 }
+\arguments{
+\item{status}{character vector mit CRM-Meeting-Status (z.B. "no_show",
+"show_up", "storniert", "unbekannt").}
+}
+\value{
+list mit \code{is_no_show} (logical, NA falls nicht definitiv) und
+\code{excluded} (logical).
+}
 \description{
 CRM-Status -> (is_no_show, excluded)
 }

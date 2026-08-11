@@ -1,4 +1,8 @@
 #' CRM-Status -> (is_no_show, excluded)
+#' @param status character vector mit CRM-Meeting-Status (z.B. "no_show",
+#'   "show_up", "storniert", "unbekannt").
+#' @return list mit `is_no_show` (logical, NA falls nicht definitiv) und
+#'   `excluded` (logical).
 #' @keywords internal
 crm_status_flags <- function(status) {
   is_no_show <- ifelse(status == "no_show", TRUE, ifelse(status == "show_up", FALSE, NA))
@@ -56,7 +60,13 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
     if (length(idx) == 0) { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
     if (length(idx) > 1) next  # mehrdeutig -> verwerfen
 
-    # eindeutiger Match -> Override (nur definitiver Status setzt is_no_show)
+    # eindeutiger Match -> Override (nur definitiver Status setzt is_no_show).
+    # Die netto-neu-Tabelle (is_no_show, excluded) aus crm_status_flags() gilt
+    # NUR fuer crm_only-Zeilen. Im Override wirkt nur definitiver Status:
+    # no_show/show_up -> is_no_show, storniert -> excluded. "unbekannt" laesst
+    # die MSGraph-Zeile unveraendert, sonst wuerde ein echtes, per MSGraph
+    # getracktes Meeting wegen eines nicht klassifizierbaren CRM-Kommentars
+    # faelschlich aus dem No-Show-Nenner ausgeschlossen.
     j <- idx[1]
     if (cm$meeting_status %in% c("no_show", "show_up")) base$is_no_show[j] <- fl$is_no_show
     if (cm$meeting_status == "storniert") base$excluded[j] <- TRUE

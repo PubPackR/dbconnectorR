@@ -71,3 +71,22 @@ test_that("meeting_key eindeutig (keine Doppelzaehlung)", {
            mk_crm(list(crm_row(7, 77L, "2026-08-03", "zoom", "show_up", TRUE))))
   expect_equal(anyDuplicated(res$meeting_key), 0L)
 })
+
+test_that("Override + storniert: MSGraph-Termin wird excluded", {
+  # lead 20 / 2026-07-02 -> genau ein MSGraph-Termin (key 11)
+  res <- assemble_unified_meetings(mk_msgraph(),
+           mk_crm(list(crm_row(8, 20L, "2026-07-02", "teams", "storniert", FALSE))))
+  r <- res[res$meeting_key == "11", ]
+  expect_true(r$excluded)
+  expect_equal(r$no_show_source, "crm_override")
+})
+
+test_that("Override + unbekannt: MSGraph is_no_show/excluded bleiben unveraendert", {
+  # lead 30 / 2026-07-03 -> genau ein MSGraph-Termin (key 12), is_no_show=TRUE, excluded=FALSE
+  res <- assemble_unified_meetings(mk_msgraph(),
+           mk_crm(list(crm_row(9, 30L, "2026-07-03", "teams", "unbekannt", FALSE))))
+  r <- res[res$meeting_key == "12", ]
+  expect_true(r$is_no_show)
+  expect_false(r$excluded)
+  expect_equal(r$meeting_tool, "teams")
+})
