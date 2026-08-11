@@ -149,6 +149,13 @@ update_sales_meetings_unified <- function(con) {
     original_created_at = vc$task_created_at, stringsAsFactors = FALSE)
 
   rows <- assemble_unified_meetings(msgraph_meetings, crm_meetings)
+
+  # ID-Spalten auf integer64 (=bigint) casten: assemble haelt contact_id im
+  # CHARACTER-Raum (rbind-sicher gegen die integer64-Falle), aber die DB-Spalten
+  # sind bigint und postgres_upsert_data castet text->bigint nicht.
+  rows$contact_id <- bit64::as.integer64(rows$contact_id)
+  rows$lead_id    <- bit64::as.integer64(rows$lead_id)
+
   message(paste0("  ", nrow(rows), " Zeilen -> processed.sales_meetings_unified"))
 
   pool::poolWithTransaction(con, function(conn) {
