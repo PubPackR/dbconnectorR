@@ -2,6 +2,7 @@
 
 export(INTERNAL_EMAIL_PATTERNS)
 export(assemble_crm_classification_rows)
+export(assemble_unified_meetings)
 export(classify_meeting_status)
 export(crm_update_cal_events)
 export(crm_update_companies)
