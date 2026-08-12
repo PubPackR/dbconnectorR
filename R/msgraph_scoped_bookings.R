@@ -69,12 +69,16 @@ parse_scoped_bookings <- function(appointments_value, staff_map) {
 #'   app-only Provider.
 #' @param cfg
 #'   load_scoped_config(); `raw_schema`/`processed_schema` steuern das Ziel-Schema.
+#' @param suppression_pepper
+#'   DSGVO-Pepper; wenn gesetzt, werden gesperrte PII (config.privacy_deletion_log) vor dem Upsert getombstoned.
+#' @param dry_run
+#'   Wenn TRUE: nur zaehlen/loggen, kein Upsert.
 #'
 #' @return
 #'   invisible(Anzahl Events).
 #'
 #' @export
-msgraph_scoped_update_bookings <- function(con, app_token, cfg) {
+msgraph_scoped_update_bookings <- function(con, app_token, cfg, suppression_pepper = NULL, dry_run = FALSE) {
   # ---- start ---- #
   rs <- cfg$raw_schema %||% "raw"
   ps <- cfg$processed_schema %||% "processed"
@@ -100,6 +104,19 @@ msgraph_scoped_update_bookings <- function(con, app_token, cfg) {
     all_part   <- dplyr::bind_rows(all_part, parsed$participants)
   }
   if (nrow(all_events) == 0) { message("Keine Bookings."); return(invisible(0L)) }
+
+  # DSGVO: PII gesperrter Personen in den Teilnehmern tombstonen (vor Kontakt-/Teilnehmer-Upsert)
+  if (!is.null(suppression_pepper) && nrow(all_part) > 0) {
+    sup <- Billomatics::dsgvo_load_suppression(con)
+    all_part <- Billomatics::dsgvo_suppress_msgraph_record(
+      all_part, sup$email_hashes, suppression_pepper, mail_col = "email", name_col = "ms_name")
+  }
+
+  if (dry_run) {
+    message(sprintf("[dry-run] %d Booking-Events, %d Teilnehmer (kein Upsert).",
+                    nrow(all_events), nrow(all_part)))
+    return(invisible(nrow(all_events)))
+  }
 
   Billomatics::postgres_upsert_data(con, rs, "msgraph_events", all_events,
                                     match_cols = c("msgraph_ical_uid", "event_start"))

@@ -4,7 +4,13 @@
 \alias{msgraph_scoped_update_calls_attendance}
 \title{Calls/Teilnehmer gescopt via Attendance aktualisieren (app-only, policy-gescoped)}
 \usage{
-msgraph_scoped_update_calls_attendance(con, app_token, cfg)
+msgraph_scoped_update_calls_attendance(
+  con,
+  app_token,
+  cfg,
+  suppression_pepper = NULL,
+  dry_run = FALSE
+)
 }
 \arguments{
 \item{con}{DB-Pool.}
@@ -12,6 +18,10 @@ msgraph_scoped_update_calls_attendance(con, app_token, cfg)
 \item{app_token}{app-only Provider.}
 
 \item{cfg}{load_scoped_config(); \code{raw_schema}/\code{processed_schema} steuern das Ziel-Schema.}
+
+\item{suppression_pepper}{DSGVO-Pepper; wenn gesetzt, werden gesperrte PII (config.privacy_deletion_log) vor dem Upsert getombstoned.}
+
+\item{dry_run}{Wenn TRUE: nur zaehlen/loggen, kein Upsert.}
 }
 \value{
 invisible(Anzahl Calls).

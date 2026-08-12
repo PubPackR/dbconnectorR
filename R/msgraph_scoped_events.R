@@ -81,12 +81,16 @@ extract_meeting_id_safe <- function(url) {
 #'   delegierter Token-Provider.
 #' @param cfg
 #'   load_scoped_config(); `raw_schema`/`processed_schema` steuern das Ziel-Schema.
+#' @param suppression_pepper
+#'   DSGVO-Pepper; wenn gesetzt, werden gesperrte PII (config.privacy_deletion_log) vor dem Upsert getombstoned.
+#' @param dry_run
+#'   Wenn TRUE: nur zaehlen/loggen, kein Upsert.
 #'
 #' @return
 #'   invisible(Anzahl geschriebener Events).
 #'
 #' @export
-msgraph_scoped_update_events <- function(con, del_token, cfg) {
+msgraph_scoped_update_events <- function(con, del_token, cfg, suppression_pepper = NULL, dry_run = FALSE) {
   # ---- start ---- #
   rs <- cfg$raw_schema %||% "raw"
   ps <- cfg$processed_schema %||% "processed"
@@ -117,6 +121,19 @@ msgraph_scoped_update_events <- function(con, del_token, cfg) {
 
   parsed <- parse_scoped_events(all_events)
   if (nrow(parsed$events) == 0) { message("Keine Events."); return(invisible(0L)) }
+
+  # DSGVO: PII gesperrter Personen in den Teilnehmern tombstonen (vor Kontakt-/Teilnehmer-Upsert)
+  if (!is.null(suppression_pepper) && nrow(parsed$participants) > 0) {
+    sup <- Billomatics::dsgvo_load_suppression(con)
+    parsed$participants <- Billomatics::dsgvo_suppress_msgraph_record(
+      parsed$participants, sup$email_hashes, suppression_pepper, mail_col = "email", name_col = "ms_name")
+  }
+
+  if (dry_run) {
+    message(sprintf("[dry-run] %d Events, %d Teilnehmer (kein Upsert).",
+                    nrow(parsed$events), nrow(parsed$participants)))
+    return(invisible(nrow(parsed$events)))
+  }
 
   # 2) Events upserten
   Billomatics::postgres_upsert_data(con, rs, "msgraph_events", parsed$events,

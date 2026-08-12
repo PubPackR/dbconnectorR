@@ -68,9 +68,11 @@ attendance_records <- function(object_id, meeting_id, app_token) {
 #' @param con DB-Pool.
 #' @param app_token app-only Provider.
 #' @param cfg load_scoped_config(); `raw_schema`/`processed_schema` steuern das Ziel-Schema.
+#' @param suppression_pepper DSGVO-Pepper; wenn gesetzt, werden gesperrte PII (config.privacy_deletion_log) vor dem Upsert getombstoned.
+#' @param dry_run Wenn TRUE: nur zaehlen/loggen, kein Upsert.
 #' @return invisible(Anzahl Calls).
 #' @export
-msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg) {
+msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppression_pepper = NULL, dry_run = FALSE) {
   # ---- start ---- #
   rs <- cfg$raw_schema %||% "raw"
   ps <- cfg$processed_schema %||% "processed"
@@ -107,6 +109,20 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg) {
   if (length(calls) == 0) { message("Keine Calls/Attendance."); return(invisible(0L)) }
   calls_df <- dplyr::distinct(dplyr::bind_rows(calls), msgraph_call_id, .keep_all = TRUE)
   parts_df <- dplyr::bind_rows(parts) %>% dplyr::filter(!is.na(email)) %>% dplyr::distinct()
+
+  # DSGVO: PII gesperrter Personen tombstonen (email -> Tombstone, ms_name -> NA),
+  # BEVOR Kontakte + Teilnehmer daraus abgeleitet werden -> beide Seiten nutzen
+  # denselben Tombstone, der Email-Join bleibt konsistent (wie base-35 msgraph_update_calls).
+  if (!is.null(suppression_pepper)) {
+    sup <- Billomatics::dsgvo_load_suppression(con)
+    parts_df <- Billomatics::dsgvo_suppress_msgraph_record(
+      parts_df, sup$email_hashes, suppression_pepper, mail_col = "email", name_col = "ms_name")
+  }
+
+  if (dry_run) {
+    message(sprintf("[dry-run] %d Calls, %d Teilnehmer (kein Upsert).", nrow(calls_df), nrow(parts_df)))
+    return(invisible(nrow(calls_df)))
+  }
 
   # Kontakte upserten
   contacts <- parts_df %>% dplyr::transmute(email, ms_name) %>% dplyr::distinct(email, .keep_all = TRUE)
