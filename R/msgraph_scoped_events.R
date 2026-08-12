@@ -123,11 +123,7 @@ msgraph_scoped_update_events <- function(con, del_token, cfg, suppression_pepper
   if (nrow(parsed$events) == 0) { message("Keine Events."); return(invisible(0L)) }
 
   # DSGVO: PII gesperrter Personen in den Teilnehmern tombstonen (vor Kontakt-/Teilnehmer-Upsert)
-  if (!is.null(suppression_pepper) && nrow(parsed$participants) > 0) {
-    sup <- Billomatics::dsgvo_load_suppression(con)
-    parsed$participants <- Billomatics::dsgvo_suppress_msgraph_record(
-      parsed$participants, sup$email_hashes, suppression_pepper, mail_col = "email", name_col = "ms_name")
-  }
+  parsed$participants <- dsgvo_suppress_participants(parsed$participants, con, suppression_pepper)
 
   if (dry_run) {
     message(sprintf("[dry-run] %d Events, %d Teilnehmer (kein Upsert).",

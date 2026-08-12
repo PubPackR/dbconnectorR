@@ -47,3 +47,23 @@ resolve_user_id <- function(upn, token) {
   list(status = res$status,
        id = if (!is.null(v) && length(v) > 0) v[[1]]$id %||% NA_character_ else NA_character_)
 }
+
+#' Gesperrte PII in Teilnehmern tombstonen (DSGVO), no-op ohne Pepper/Zeilen
+#'
+#' Laedt die Sperrliste und ersetzt gesperrte E-Mails durch den stabilen Tombstone
+#' (Name -> NA). Reine Durchleitung an die Billomatics-Primitive; zentralisiert die
+#' zuvor in calls/events/bookings duplizierte Logik, damit alle Ingest-Pfade
+#' identisch suppressen (kein Drift).
+#'
+#' @param participants tibble mit den Spalten `email` und `ms_name`.
+#' @param con DB-Pool (fuer die Sperrliste config.privacy_deletion_log).
+#' @param suppression_pepper Pepper-Geheimnis; NULL -> keine Suppression.
+#' @return participants (ggf. mit getombstoneten Zeilen), unveraendert bei NULL/0 Zeilen.
+#' @keywords internal
+dsgvo_suppress_participants <- function(participants, con, suppression_pepper) {
+  # ---- start ---- #
+  if (is.null(suppression_pepper) || nrow(participants) == 0) return(participants)
+  sup <- Billomatics::dsgvo_load_suppression(con)
+  Billomatics::dsgvo_suppress_msgraph_record(
+    participants, sup$email_hashes, suppression_pepper, mail_col = "email", name_col = "ms_name")
+}

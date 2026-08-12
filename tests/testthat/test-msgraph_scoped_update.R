@@ -41,3 +41,44 @@ test_that("msgraph_scoped_update_users: ohne dry_run upsertet und macht KEINEN M
   mockery::expect_called(upsert, 1)
   mockery::expect_called(exec, 0)
 })
+
+# --- Organizer-Aufloesung (try-all) -------------------------------------------
+
+test_that("resolve_transcript_source nimmt den ersten Kandidaten mit 200 + Transkripten", {
+  mockery::stub(resolve_transcript_source, "graph_collect", function(url, token, query = NULL) {
+    if (grepl("/users/ORG/", url, fixed = TRUE)) list(status = 200, value = list(list(id = "t1")))
+    else list(status = 403, value = list())
+  })
+  src <- resolve_transcript_source(c("NOPE", "ORG"), mid = "MID1", app_token = "t")
+  expect_equal(src$oid, "ORG")
+  expect_equal(length(src$value), 1)
+})
+
+test_that("resolve_transcript_source gibt NULL, wenn kein Kandidat 200 liefert", {
+  mockery::stub(resolve_transcript_source, "graph_collect",
+                function(url, token, query = NULL) list(status = 403, value = list()))
+  expect_null(resolve_transcript_source(c("A", "B"), mid = "MID1", app_token = "t"))
+})
+
+# --- DSGVO-Suppression --------------------------------------------------------
+
+test_that("dsgvo_suppress_participants ist no-op ohne Pepper (kein DB-Zugriff)", {
+  load_mock <- mockery::mock()
+  mockery::stub(dsgvo_suppress_participants, "Billomatics::dsgvo_load_suppression", load_mock)
+  df <- tibble::tibble(email = "a@x.de", ms_name = "A")
+  out <- dsgvo_suppress_participants(df, con = NULL, suppression_pepper = NULL)
+  expect_identical(out, df)
+  mockery::expect_called(load_mock, 0)
+})
+
+test_that("dsgvo_suppress_participants tombstonet gesperrte Mail, laesst andere unveraendert", {
+  del_hash <- Billomatics::dsgvo_hash_email("del@x.de", "pep")
+  mockery::stub(dsgvo_suppress_participants, "Billomatics::dsgvo_load_suppression",
+                function(con) list(email_hashes = del_hash, phone_hashes = character(0)))
+  df <- tibble::tibble(email = c("del@x.de", "keep@x.de"), ms_name = c("Del", "Keep"))
+  out <- dsgvo_suppress_participants(df, con = NULL, suppression_pepper = "pep")
+  expect_true(grepl("^\\[geloescht\\]-", out$email[1]))
+  expect_true(is.na(out$ms_name[1]))
+  expect_equal(out$email[2], "keep@x.de")
+  expect_equal(out$ms_name[2], "Keep")
+})

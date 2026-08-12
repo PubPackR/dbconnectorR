@@ -113,11 +113,7 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
   # DSGVO: PII gesperrter Personen tombstonen (email -> Tombstone, ms_name -> NA),
   # BEVOR Kontakte + Teilnehmer daraus abgeleitet werden -> beide Seiten nutzen
   # denselben Tombstone, der Email-Join bleibt konsistent (wie base-35 msgraph_update_calls).
-  if (!is.null(suppression_pepper)) {
-    sup <- Billomatics::dsgvo_load_suppression(con)
-    parts_df <- Billomatics::dsgvo_suppress_msgraph_record(
-      parts_df, sup$email_hashes, suppression_pepper, mail_col = "email", name_col = "ms_name")
-  }
+  parts_df <- dsgvo_suppress_participants(parts_df, con, suppression_pepper)
 
   if (dry_run) {
     message(sprintf("[dry-run] %d Calls, %d Teilnehmer (kein Upsert).", nrow(calls_df), nrow(parts_df)))

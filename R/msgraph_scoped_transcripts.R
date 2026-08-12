@@ -18,6 +18,31 @@ vtt_to_plaintext <- function(vtt) {
   paste(trimws(keep), collapse = "\n")
 }
 
+#' Transkript-Quelle je Meeting aufloesen (Organisator-oid durchprobieren)
+#'
+#' Das onlineMeeting ist organizer-scoped: nur die oid des Organisators liefert am
+#' `/onlineMeetings/{id}/transcripts`-Endpoint HTTP 200 mit Transkripten;
+#' nicht-Organisatoren geben 403/leer. Der Organisator wird (noch) nicht separat
+#' gespeichert, daher werden alle internen Teilnehmer-Kandidaten durchprobiert und
+#' der erste mit 200 + Transkripten genommen.
+#'
+#' @param cands Character-Vektor kandidierender object_ids (interne Teilnehmer).
+#' @param mid onlineMeeting-id.
+#' @param app_token app-only Provider.
+#' @return list(oid, value) des ersten treffenden Kandidaten, oder NULL.
+#' @keywords internal
+resolve_transcript_source <- function(cands, mid, app_token) {
+  # ---- start ---- #
+  for (cand in cands) {
+    resp <- tryCatch(graph_collect(sprintf(
+      "https://graph.microsoft.com/v1.0/users/%s/onlineMeetings/%s/transcripts",
+      cand, utils::URLencode(mid, reserved = TRUE)), app_token),
+      error = function(e) list(status = NA, value = list()))
+    if (isTRUE(resp$status == 200) && length(resp$value) > 0) return(list(oid = cand, value = resp$value))
+  }
+  NULL
+}
+
 #' Transkripte gescopet aktualisieren (Sliding Window, policy-gescopte Meeting-Kette)
 #'
 #' @param con
@@ -45,24 +70,23 @@ msgraph_scoped_update_transcripts <- function(con, app_token, cfg, dry_run = FAL
   calls <- dplyr::tbl(con, I(paste0(rs, ".msgraph_calls"))) %>%
     dplyr::filter(!is.na(meeting_id) & call_start >= !!format(window_start, "%Y-%m-%d")) %>%
     dplyr::select(call_db_id = id, msgraph_call_id, meeting_id) %>% dplyr::collect()
+  if (nrow(calls) == 0) { message("Keine Calls im Fenster."); return(invisible(0L)) }
   have <- dplyr::tbl(con, I(paste0(ps, ".msgraph_call_transcripts"))) %>%
     dplyr::select(transcript_id, call_id) %>% dplyr::collect()
 
-  # Kandidaten-object_ids je Meeting = alle INTERNEN Teilnehmer des Calls.
-  # Das onlineMeeting ist organizer-scoped: nur die oid des Organisators liefert das
-  # Transkript. Der Organisator wird (noch) nicht separat gespeichert, und der
-  # fruehere Event-Organizer-Join griff NIE (events.meeting_id = Thread-id, aber
-  # calls.meeting_id = onlineMeeting-id) -> es wurde still ein BELIEBIGER interner
-  # Teilnehmer gewaehlt, wodurch Multi-intern-Meetings kein Transkript zogen. Daher:
-  # alle internen Teilnehmer als Kandidaten sammeln und in der Schleife durchprobieren.
-  # rs kommt aus der Config (kein User-Input) -> sichere String-Interpolation.
+  # Kandidaten-object_ids je Meeting = alle INTERNEN Teilnehmer der FENSTER-Calls
+  # (Details zur Organizer-Scoping-Logik siehe resolve_transcript_source). Auf die
+  # Fenster-Calls beschraenkt, statt die ganze Calls-/Teilnehmer-Tabelle zu joinen.
+  # rs kommt aus der Config (kein User-Input) -> sichere String-Interpolation;
+  # die msgraph_call_ids werden per dbQuoteLiteral sicher gequotet.
+  quoted_ids <- paste(DBI::dbQuoteLiteral(con, calls$msgraph_call_id), collapse = ", ")
   cand_lookup <- DBI::dbGetQuery(con, sprintf("
     SELECT DISTINCT c.msgraph_call_id, u.msgraph_user_id AS object_id
     FROM %1$s.msgraph_calls c
     JOIN %1$s.msgraph_call_participants p ON p.call_id = c.id
     JOIN %1$s.msgraph_contacts ct          ON ct.id = p.contact_id
     JOIN %1$s.msgraph_users u              ON lower(u.email) = lower(ct.email)
-    WHERE u.is_internal AND NOT u.is_deleted", rs))
+    WHERE u.is_internal AND NOT u.is_deleted AND c.msgraph_call_id IN (%2$s)", rs, quoted_ids))
   cand_map <- split(cand_lookup$object_id, cand_lookup$msgraph_call_id)
 
   new_rows <- list()
@@ -70,18 +94,10 @@ msgraph_scoped_update_transcripts <- function(con, app_token, cfg, dry_run = FAL
     mid <- calls$meeting_id[i]; call_db_id <- calls$call_db_id[i]
     cands <- cand_map[[calls$msgraph_call_id[i]]]
     if (is.null(cands) || length(cands) == 0) next
-    # Kandidaten durchprobieren: nur die Organisator-oid liefert am organizer-scopeden
-    # onlineMeeting ein HTTP 200 mit Transkripten; nicht-Organisatoren geben 403/leer.
-    tr <- NULL; oid <- NA_character_
-    for (cand in cands) {
-      resp <- tryCatch(graph_collect(sprintf(
-        "https://graph.microsoft.com/v1.0/users/%s/onlineMeetings/%s/transcripts",
-        cand, utils::URLencode(mid, reserved = TRUE)), app_token),
-        error = function(e) list(status = NA, value = list()))
-      if (isTRUE(resp$status == 200) && length(resp$value) > 0) { tr <- resp; oid <- cand; break }
-    }
-    if (is.null(tr)) next
-    for (t in tr$value) {
+    src <- resolve_transcript_source(cands, mid, app_token)
+    if (is.null(src)) next
+    oid <- src$oid
+    for (t in src$value) {
       tid <- t$id %||% NA_character_
       if (is.na(tid) || tid %in% have$transcript_id) next
       url <- sprintf("https://graph.microsoft.com/v1.0/users/%s/onlineMeetings/%s/transcripts/%s/content",

@@ -106,11 +106,7 @@ msgraph_scoped_update_bookings <- function(con, app_token, cfg, suppression_pepp
   if (nrow(all_events) == 0) { message("Keine Bookings."); return(invisible(0L)) }
 
   # DSGVO: PII gesperrter Personen in den Teilnehmern tombstonen (vor Kontakt-/Teilnehmer-Upsert)
-  if (!is.null(suppression_pepper) && nrow(all_part) > 0) {
-    sup <- Billomatics::dsgvo_load_suppression(con)
-    all_part <- Billomatics::dsgvo_suppress_msgraph_record(
-      all_part, sup$email_hashes, suppression_pepper, mail_col = "email", name_col = "ms_name")
-  }
+  all_part <- dsgvo_suppress_participants(all_part, con, suppression_pepper)
 
   if (dry_run) {
     message(sprintf("[dry-run] %d Booking-Events, %d Teilnehmer (kein Upsert).",
