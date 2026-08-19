@@ -4,7 +4,7 @@
 \alias{msgraph_scoped_update_transcripts}
 \title{Transkripte gescopet aktualisieren (Sliding Window, policy-gescopte Meeting-Kette)}
 \usage{
-msgraph_scoped_update_transcripts(con, app_token, cfg)
+msgraph_scoped_update_transcripts(con, app_token, cfg, dry_run = FALSE)
 }
 \arguments{
 \item{con}{DB-Pool.}
@@ -12,6 +12,8 @@ msgraph_scoped_update_transcripts(con, app_token, cfg)
 \item{app_token}{app-only Provider.}
 
 \item{cfg}{load_scoped_config(); \code{raw_schema}/\code{processed_schema} steuern das Ziel-Schema.}
+
+\item{dry_run}{Wenn TRUE: nur zaehlen/loggen, kein Upsert.}
 }
 \value{
 invisible(Anzahl neu geholter Transkripte).

@@ -20,15 +20,17 @@ parse_scoped_user <- function(user_obj) {
 #'
 #' Owner der dem Service-Account freigegebenen Kalender (del_token) werden per
 #' app-only User.ReadBasic.All aufgeloest und in raw.msgraph_users upsertet.
-#' Interne User, die nicht mehr auftauchen, werden soft-deleted (is_deleted = TRUE).
+#' KEIN Soft-Delete: is_deleted wird vom Directory-Sync (base-35) gepflegt, nicht
+#' ueber die Kalender-Freigabe (siehe Kommentar im Rumpf).
 #'
 #' @param con DB-Pool.
 #' @param app_token app-only Token-Provider (User.ReadBasic.All).
 #' @param del_token delegierter Token-Provider (Calendars.Read.Shared).
 #' @param cfg load_scoped_config(); `raw_schema`/`processed_schema` steuern das Ziel-Schema.
+#' @param dry_run Wenn TRUE: nur zaehlen/loggen, kein Upsert.
 #' @return invisible(Anzahl aktiver interner User).
 #' @export
-msgraph_scoped_update_users <- function(con, app_token, del_token, cfg) {
+msgraph_scoped_update_users <- function(con, app_token, del_token, cfg, dry_run = FALSE) {
   # ---- start ---- #
   rs <- cfg$raw_schema %||% "raw"
   ps <- cfg$processed_schema %||% "processed"
@@ -54,16 +56,20 @@ msgraph_scoped_update_users <- function(con, app_token, del_token, cfg) {
   if (length(rows) == 0) { message("Keine User aufloesbar."); return(invisible(0L)) }
   users_df <- dplyr::distinct(dplyr::bind_rows(rows), msgraph_user_id, .keep_all = TRUE)
 
+  if (dry_run) {
+    message(sprintf("[dry-run] %d interne User (kein Upsert).", nrow(users_df)))
+    return(invisible(nrow(users_df)))
+  }
+
   Billomatics::postgres_upsert_data(con, rs, "msgraph_users", users_df,
                                     match_cols = "msgraph_user_id")
 
-  # Soft-Delete: interne User, die diesmal NICHT geliefert wurden.
-  # active_ids stammen aus der Graph-API -> sicher quoten (kein rohes paste0 in SQL).
-  active_ids <- users_df$msgraph_user_id
-  quoted_ids <- paste(DBI::dbQuoteLiteral(con, active_ids), collapse = ", ")
-  DBI::dbExecute(con, paste0(
-    "UPDATE ", rs, ".msgraph_users SET is_deleted = TRUE ",
-    "WHERE is_internal AND NOT is_deleted AND msgraph_user_id NOT IN (", quoted_ids, ")"))
+  # BEWUSST KEIN Soft-Delete: base-62 leitet interne User NUR aus den freigegebenen
+  # Kalendern ab (eine Handvoll). Ein Soft-Delete "alle is_internal, die diesmal
+  # fehlen" wuerde im Koexistenz-Betrieb die ~290 vom base-35-Directory-Load geladenen
+  # internen User faelschlich als geloescht markieren und bei transient nicht
+  # propagierter Freigabe einen ganzen Rep-Lauf still ueberspringen. is_deleted wird
+  # vom Directory-Sync (base-35 msgraph_update_users) gepflegt, nicht ueber Freigabe.
 
   invisible(nrow(users_df))
 }

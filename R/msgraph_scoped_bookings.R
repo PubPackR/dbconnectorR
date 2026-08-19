@@ -25,6 +25,7 @@ parse_scoped_bookings <- function(appointments_value, staff_map) {
       event_start = astart,
       event_end = lubridate::ymd_hms(a$end$dateTime %||% NA_character_, quiet = TRUE),
       meeting_id = if (!is.na(ju)) extract_meeting_id_safe(ju) else NA_character_,
+      join_url = ju,
       is_single_instance = TRUE,
       is_online_meeting = !is.na(ju),
       is_canceled = (a$status %||% "") %in% c("cancelled", "noShow"))
@@ -61,45 +62,62 @@ parse_scoped_bookings <- function(appointments_value, staff_map) {
     } else tibble::tibble())
 }
 
-#' Bookings-Termine gescopt aktualisieren (app-only Bookings.Read.All)
+#' Bookings-Termine gescopt aktualisieren (delegiert, Bookings.Read.All)
+#'
+#' Delegiert statt app-only: der Service-Account sieht nur Bookings-Businesses,
+#' in denen er selbst Mitglied ist — das ersetzt das tenant-weite app-only-Lesen.
+#' Voraussetzung: "https://graph.microsoft.com/Bookings.Read.All" in cfg$scopes.
 #'
 #' @param con
 #'   DB-Pool.
-#' @param app_token
-#'   app-only Provider.
+#' @param del_token
+#'   delegierter Token-Provider.
 #' @param cfg
 #'   load_scoped_config(); `raw_schema`/`processed_schema` steuern das Ziel-Schema.
+#' @param suppression_pepper
+#'   DSGVO-Pepper; wenn gesetzt, werden gesperrte PII (config.privacy_deletion_log) vor dem Upsert getombstoned.
+#' @param dry_run
+#'   Wenn TRUE: nur zaehlen/loggen, kein Upsert.
 #'
 #' @return
 #'   invisible(Anzahl Events).
 #'
 #' @export
-msgraph_scoped_update_bookings <- function(con, app_token, cfg) {
+msgraph_scoped_update_bookings <- function(con, del_token, cfg, suppression_pepper = NULL, dry_run = FALSE) {
   # ---- start ---- #
   rs <- cfg$raw_schema %||% "raw"
   ps <- cfg$processed_schema %||% "processed"
   start_dt <- format(Sys.Date() - cfg$events_days_back, "%Y-%m-%dT00:00:00Z")
   end_dt   <- format(Sys.Date() + cfg$events_days_forward, "%Y-%m-%dT23:59:59Z")
-  biz <- graph_collect("https://graph.microsoft.com/v1.0/solutions/bookingBusinesses", app_token)
+  biz <- graph_collect("https://graph.microsoft.com/v1.0/solutions/bookingBusinesses", del_token)
   if (biz$status != 200) stop("bookingBusinesses HTTP ", biz$status)
 
   all_events <- tibble::tibble(); all_part <- tibble::tibble()
   for (b in biz$value) {
     bid <- b$id %||% next
     staff <- graph_collect(paste0("https://graph.microsoft.com/v1.0/solutions/bookingBusinesses/",
-                                  utils::URLencode(bid, reserved = TRUE), "/staffMembers"), app_token)
+                                  utils::URLencode(bid, reserved = TRUE), "/staffMembers"), del_token)
     staff_map <- if (staff$status == 200 && length(staff$value) > 0)
       stats::setNames(tolower(vapply(staff$value, function(s) s$emailAddress %||% NA_character_, character(1))),
                       vapply(staff$value, function(s) s$id %||% NA_character_, character(1))) else character(0)
     appts <- graph_collect(paste0("https://graph.microsoft.com/v1.0/solutions/bookingBusinesses/",
                                   utils::URLencode(bid, reserved = TRUE), "/calendarView"),
-                           app_token, query = list(start = start_dt, end = end_dt, `$top` = 400))
+                           del_token, query = list(start = start_dt, end = end_dt, `$top` = 400))
     if (appts$status != 200) next
     parsed <- parse_scoped_bookings(appts$value, staff_map)
     all_events <- dplyr::bind_rows(all_events, parsed$events)
     all_part   <- dplyr::bind_rows(all_part, parsed$participants)
   }
   if (nrow(all_events) == 0) { message("Keine Bookings."); return(invisible(0L)) }
+
+  # DSGVO: PII gesperrter Personen in den Teilnehmern tombstonen (vor Kontakt-/Teilnehmer-Upsert)
+  all_part <- dsgvo_suppress_participants(all_part, con, suppression_pepper)
+
+  if (dry_run) {
+    message(sprintf("[dry-run] %d Booking-Events, %d Teilnehmer (kein Upsert).",
+                    nrow(all_events), nrow(all_part)))
+    return(invisible(nrow(all_events)))
+  }
 
   Billomatics::postgres_upsert_data(con, rs, "msgraph_events", all_events,
                                     match_cols = c("msgraph_ical_uid", "event_start"))

@@ -18,6 +18,31 @@ vtt_to_plaintext <- function(vtt) {
   paste(trimws(keep), collapse = "\n")
 }
 
+#' Transkript-Quelle je Meeting aufloesen (Organisator-oid durchprobieren)
+#'
+#' Das onlineMeeting ist organizer-scoped: nur die oid des Organisators liefert am
+#' `/onlineMeetings/{id}/transcripts`-Endpoint HTTP 200 mit Transkripten;
+#' nicht-Organisatoren geben 403/leer. Der Organisator wird (noch) nicht separat
+#' gespeichert, daher werden alle internen Teilnehmer-Kandidaten durchprobiert und
+#' der erste mit 200 + Transkripten genommen.
+#'
+#' @param cands Character-Vektor kandidierender object_ids (interne Teilnehmer).
+#' @param mid onlineMeeting-id.
+#' @param app_token app-only Provider.
+#' @return list(oid, value) des ersten treffenden Kandidaten, oder NULL.
+#' @keywords internal
+resolve_transcript_source <- function(cands, mid, app_token) {
+  # ---- start ---- #
+  for (cand in cands) {
+    resp <- tryCatch(graph_collect(sprintf(
+      "https://graph.microsoft.com/v1.0/users/%s/onlineMeetings/%s/transcripts",
+      cand, utils::URLencode(mid, reserved = TRUE)), app_token),
+      error = function(e) list(status = NA, value = list()))
+    if (isTRUE(resp$status == 200) && length(resp$value) > 0) return(list(oid = cand, value = resp$value))
+  }
+  NULL
+}
+
 #' Transkripte gescopet aktualisieren (Sliding Window, policy-gescopte Meeting-Kette)
 #'
 #' @param con
@@ -29,11 +54,14 @@ vtt_to_plaintext <- function(vtt) {
 #' @param cfg
 #'   load_scoped_config(); `raw_schema`/`processed_schema` steuern das Ziel-Schema.
 #'
+#' @param dry_run
+#'   Wenn TRUE: nur zaehlen/loggen, kein Upsert.
+#'
 #' @return
 #'   invisible(Anzahl neu geholter Transkripte).
 #'
 #' @export
-msgraph_scoped_update_transcripts <- function(con, app_token, cfg) {
+msgraph_scoped_update_transcripts <- function(con, app_token, cfg, dry_run = FALSE) {
   # ---- start ---- #
   rs <- cfg$raw_schema %||% "raw"
   ps <- cfg$processed_schema %||% "processed"
@@ -42,49 +70,34 @@ msgraph_scoped_update_transcripts <- function(con, app_token, cfg) {
   calls <- dplyr::tbl(con, I(paste0(rs, ".msgraph_calls"))) %>%
     dplyr::filter(!is.na(meeting_id) & call_start >= !!format(window_start, "%Y-%m-%d")) %>%
     dplyr::select(call_db_id = id, msgraph_call_id, meeting_id) %>% dplyr::collect()
+  if (nrow(calls) == 0) { message("Keine Calls im Fenster."); return(invisible(0L)) }
   have <- dplyr::tbl(con, I(paste0(ps, ".msgraph_call_transcripts"))) %>%
     dplyr::select(transcript_id, call_id) %>% dplyr::collect()
 
-  # object_id je Meeting: bevorzugt der echte Event-Organizer, sonst Fallback auf
-  # den ersten internen Call-Teilnehmer (Mapping-Job laeuft erst nach den Transkripten).
-  # rs kommt aus der Config (kein User-Input) -> sichere String-Interpolation.
-  org_lookup <- DBI::dbGetQuery(con, sprintf("
-    WITH organizer AS (
-      SELECT DISTINCT c.meeting_id, u.msgraph_user_id AS object_id
-      FROM %1$s.msgraph_calls c
-      JOIN %1$s.msgraph_events e            ON e.meeting_id = c.meeting_id
-      JOIN %1$s.msgraph_event_participants p ON p.event_id = e.id AND p.is_organizer
-      JOIN %1$s.msgraph_contacts ct          ON ct.id = p.contact_id
-      JOIN %1$s.msgraph_users u              ON lower(u.email) = lower(ct.email)
-      WHERE u.is_internal AND NOT u.is_deleted
-    ),
-    fallback AS (
-      SELECT DISTINCT c.msgraph_call_id AS meeting_id, u.msgraph_user_id AS object_id
-      FROM %1$s.msgraph_calls c
-      JOIN %1$s.msgraph_call_participants p ON p.call_id = c.id
-      JOIN %1$s.msgraph_contacts ct          ON ct.id = p.contact_id
-      JOIN %1$s.msgraph_users u              ON lower(u.email) = lower(ct.email)
-      WHERE u.is_internal AND NOT u.is_deleted
-    )
-    SELECT c.msgraph_call_id,
-           COALESCE(o.object_id, f.object_id) AS object_id
+  # Kandidaten-object_ids je Meeting = alle INTERNEN Teilnehmer der FENSTER-Calls
+  # (Details zur Organizer-Scoping-Logik siehe resolve_transcript_source). Auf die
+  # Fenster-Calls beschraenkt, statt die ganze Calls-/Teilnehmer-Tabelle zu joinen.
+  # rs kommt aus der Config (kein User-Input) -> sichere String-Interpolation;
+  # die msgraph_call_ids werden per dbQuoteLiteral sicher gequotet.
+  quoted_ids <- paste(DBI::dbQuoteLiteral(con, calls$msgraph_call_id), collapse = ", ")
+  cand_lookup <- DBI::dbGetQuery(con, sprintf("
+    SELECT DISTINCT c.msgraph_call_id, u.msgraph_user_id AS object_id
     FROM %1$s.msgraph_calls c
-    LEFT JOIN organizer o ON o.meeting_id = c.meeting_id
-    LEFT JOIN fallback  f ON f.meeting_id = c.msgraph_call_id
-    WHERE COALESCE(o.object_id, f.object_id) IS NOT NULL", rs))
-  org_map <- stats::setNames(org_lookup$object_id, org_lookup$msgraph_call_id)
+    JOIN %1$s.msgraph_call_participants p ON p.call_id = c.id
+    JOIN %1$s.msgraph_contacts ct          ON ct.id = p.contact_id
+    JOIN %1$s.msgraph_users u              ON lower(u.email) = lower(ct.email)
+    WHERE u.is_internal AND NOT u.is_deleted AND c.msgraph_call_id IN (%2$s)", rs, quoted_ids))
+  cand_map <- split(cand_lookup$object_id, cand_lookup$msgraph_call_id)
 
   new_rows <- list()
   for (i in seq_len(nrow(calls))) {
     mid <- calls$meeting_id[i]; call_db_id <- calls$call_db_id[i]
-    oid <- unname(org_map[calls$msgraph_call_id[i]])
-    if (is.na(oid)) next
-    tr <- tryCatch(graph_collect(sprintf(
-      "https://graph.microsoft.com/v1.0/users/%s/onlineMeetings/%s/transcripts",
-      oid, utils::URLencode(mid, reserved = TRUE)), app_token),
-      error = function(e) list(status = NA, value = list()))
-    if (!isTRUE(tr$status == 200) || length(tr$value) == 0) next
-    for (t in tr$value) {
+    cands <- cand_map[[calls$msgraph_call_id[i]]]
+    if (is.null(cands) || length(cands) == 0) next
+    src <- resolve_transcript_source(cands, mid, app_token)
+    if (is.null(src)) next
+    oid <- src$oid
+    for (t in src$value) {
       tid <- t$id %||% NA_character_
       if (is.na(tid) || tid %in% have$transcript_id) next
       url <- sprintf("https://graph.microsoft.com/v1.0/users/%s/onlineMeetings/%s/transcripts/%s/content",
@@ -101,6 +114,10 @@ msgraph_scoped_update_transcripts <- function(con, app_token, cfg) {
   }
   if (length(new_rows) == 0) { message("Keine neuen Transkripte."); return(invisible(0L)) }
   df <- dplyr::bind_rows(new_rows)
+  if (dry_run) {
+    message(sprintf("[dry-run] %d neue Transkripte (kein Upsert).", nrow(df)))
+    return(invisible(nrow(df)))
+  }
   Billomatics::postgres_upsert_data(con, ps, "msgraph_call_transcripts", df,
                                     match_cols = "transcript_id")
   invisible(nrow(df))

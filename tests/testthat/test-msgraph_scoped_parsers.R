@@ -41,6 +41,9 @@ test_that("parse_scoped_events mappt Felder und extrahiert Teilnehmer inkl. Orga
   expect_equal(nrow(out$events), 1)
   expect_equal(out$events$msgraph_ical_uid, "ICAL1")
   expect_true(out$events$is_single_instance)
+  # join_url wird roh persistiert (Meeting-Discovery des Calls-Jobs haengt daran)
+  expect_equal(out$events$join_url,
+               "https://teams.microsoft.com/l/meetup-join/19%3ameeting_ABC%40thread.v2/0")
   # event_start / event_end sind POSIXct (Join-Key muss zum DB-Reread passen)
   expect_s3_class(out$events$event_start, "POSIXct")
   expect_s3_class(out$participants$event_start, "POSIXct")
@@ -68,6 +71,8 @@ test_that("parse_scoped_bookings praefixt booking: und synthetisiert Gast-Email"
   out <- parse_scoped_bookings(appts, staff_map = c(S1 = "rep.b@studyflix.de"))
   expect_equal(out$events$msgraph_ical_uid, "booking:APT1")
   expect_equal(out$events$subject, "Beratung")
+  expect_equal(out$events$join_url,
+               "https://teams.microsoft.com/l/meetup-join/19%3ameeting_XYZ%40thread.v2/0")
   # Staff-Organizer + 2 Kunden (einer synthetisch)
   expect_equal(nrow(out$participants), 3)
   expect_true(any(grepl("@external.guest$", out$participants$email)))

@@ -4,7 +4,7 @@
 \alias{msgraph_scoped_update_users}
 \title{Interne User aus den freigegebenen Kalendern pflegen (delegiert + app-only)}
 \usage{
-msgraph_scoped_update_users(con, app_token, del_token, cfg)
+msgraph_scoped_update_users(con, app_token, del_token, cfg, dry_run = FALSE)
 }
 \arguments{
 \item{con}{DB-Pool.}
@@ -14,6 +14,8 @@ msgraph_scoped_update_users(con, app_token, del_token, cfg)
 \item{del_token}{delegierter Token-Provider (Calendars.Read.Shared).}
 
 \item{cfg}{load_scoped_config(); \code{raw_schema}/\code{processed_schema} steuern das Ziel-Schema.}
+
+\item{dry_run}{Wenn TRUE: nur zaehlen/loggen, kein Upsert.}
 }
 \value{
 invisible(Anzahl aktiver interner User).
@@ -21,5 +23,6 @@ invisible(Anzahl aktiver interner User).
 \description{
 Owner der dem Service-Account freigegebenen Kalender (del_token) werden per
 app-only User.ReadBasic.All aufgeloest und in raw.msgraph_users upsertet.
-Interne User, die nicht mehr auftauchen, werden soft-deleted (is_deleted = TRUE).
+KEIN Soft-Delete: is_deleted wird vom Directory-Sync (base-35) gepflegt, nicht
+ueber die Kalender-Freigabe (siehe Kommentar im Rumpf).
 }

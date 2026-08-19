@@ -22,7 +22,52 @@ parse_attendance_records <- function(reports_value, meeting_id) {
                    role = character(), total_seconds = numeric())
 }
 
+#' Meeting-Discovery aus den delegiert ingestierten Kalender-Events (DB, kein Graph)
+#'
+#' Ersetzt das fruehere app-only calendarView-Lesen in der Discovery
+#' (403 — `Calendars.Read` als Application-Permission wird nie granted):
+#' die delegiert ingestierten Events liefern `join_url`; der Organizer wird
+#' ueber `is_organizer` -> msgraph_contacts -> msgraph_users (Email-Match)
+#' auf seine object_id aufgeloest. Nur intern organisierte Meetings sind
+#' aufloesbar — extern organisierte deckt die CsApplicationAccessPolicy
+#' ohnehin nicht.
+#'
+#' @param con DB-Pool.
+#' @param cfg load_scoped_config(); `raw_schema` steuert das Quell-Schema,
+#'   `events_days_back` das Fenster (nur vergangene/laufende Meetings),
+#'   `tenant_id` filtert auf Meetings des eigenen Tenants (Alt-Tenant-URLs
+#'   sind app-only unerreichbar).
+#' @return data.frame(join_url, organizer_oid), distinct.
+#' @keywords internal
+discover_meetings_from_events <- function(con, cfg) {
+  # ---- start ---- #
+  rs <- cfg$raw_schema %||% "raw"
+  window_start <- format(Sys.Date() - cfg$events_days_back, "%Y-%m-%d")
+  # rs kommt aus der Config (kein User-Input) -> sichere String-Interpolation;
+  # event_start liegt als UTC-timestamp -> Vergleich gegen now() AT TIME ZONE 'UTC'.
+  DBI::dbGetQuery(con, sprintf("
+    SELECT DISTINCT e.join_url, u.msgraph_user_id AS organizer_oid
+    FROM %1$s.msgraph_events e
+    JOIN %1$s.msgraph_event_participants p ON p.event_id = e.id AND p.is_organizer
+    JOIN %1$s.msgraph_contacts ct          ON ct.id = p.contact_id
+    JOIN %1$s.msgraph_users u              ON lower(u.email) = lower(ct.email)
+    WHERE u.is_internal AND NOT u.is_deleted
+      AND e.join_url IS NOT NULL
+      AND NOT e.is_canceled
+      AND e.event_start >= %2$s
+      AND e.event_start <= (now() AT TIME ZONE 'UTC')
+      AND e.join_url LIKE %3$s",
+    rs, DBI::dbQuoteLiteral(con, window_start),
+    # Nur Meetings des EIGENEN Tenants: die joinUrl traegt die Tenant-GUID im
+    # context-Parameter. Meetings aus dem Alt-Tenant (vor der Migration) sind
+    # app-only prinzipiell unerreichbar und wuerden per 403 faelschlich den
+    # Organizer fuer seine gueltigen neuen Meetings blocken.
+    DBI::dbQuoteLiteral(con, paste0("%", cfg$tenant_id, "%"))))
+}
+
 # --- interne Fetch-Helfer (portiert aus scope_01) ---
+# rep_online_meetings ist NICHT mehr Teil des Jobs (app-only calendarView = 403);
+# bleibt nur als Diagnose-Helfer fuer one-off/probe_calls_attendance*.R erhalten.
 rep_online_meetings <- function(upn, app_token, start_dt, end_dt) {
   url <- paste0("https://graph.microsoft.com/v1.0/users/", utils::URLencode(upn, reserved = TRUE),
                 "/calendar/calendarView")
@@ -64,49 +109,61 @@ attendance_records <- function(object_id, meeting_id, app_token) {
        reports = res$value)
 }
 
-#' Calls/Teilnehmer gescopt via Attendance aktualisieren (app-only, policy-gescoped)
+#' Calls/Teilnehmer gescopt via Attendance aktualisieren
+#'
+#' Discovery aus den delegiert ingestierten Events (`discover_meetings_from_events`),
+#' Meeting-Aufloesung + Attendance app-only (CsApplicationAccessPolicy-gescoped).
+#'
 #' @param con DB-Pool.
-#' @param app_token app-only Provider.
+#' @param app_token app-only Provider (Meeting-Aufloesung + Attendance).
 #' @param cfg load_scoped_config(); `raw_schema`/`processed_schema` steuern das Ziel-Schema.
+#' @param suppression_pepper DSGVO-Pepper; wenn gesetzt, werden gesperrte PII (config.privacy_deletion_log) vor dem Upsert getombstoned.
+#' @param dry_run Wenn TRUE: nur zaehlen/loggen, kein Upsert.
 #' @return invisible(Anzahl Calls).
 #' @export
-msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg) {
+msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppression_pepper = NULL, dry_run = FALSE) {
   # ---- start ---- #
   rs <- cfg$raw_schema %||% "raw"
   ps <- cfg$processed_schema %||% "processed"
-  start_dt <- format(Sys.Date() - cfg$events_days_back, "%Y-%m-%dT00:00:00Z")
-  end_dt   <- format(Sys.Date(), "%Y-%m-%dT23:59:59Z")
-  users <- dplyr::tbl(con, I(paste0(rs, ".msgraph_users"))) %>%
-    dplyr::filter(is_internal & !is_deleted) %>%
-    dplyr::select(msgraph_user_id, user_principal_name) %>% dplyr::collect()
+  disc <- discover_meetings_from_events(con, cfg)
+  if (nrow(disc) == 0) { message("Keine Meetings im Fenster (Discovery aus Events)."); return(invisible(0L)) }
 
   calls <- list(); parts <- list()
-  for (i in seq_len(nrow(users))) {
-    upn <- users$user_principal_name[i]; oid <- users$msgraph_user_id[i]
-    if (is.na(upn)) next
-    joins <- tryCatch(rep_online_meetings(upn, app_token, start_dt, end_dt),
-                      error = function(e) { message("meetings ", upn, ": ", e$message); character(0) })
-    for (ju in joins) {
-      mt <- tryCatch(resolve_meeting(oid, ju, app_token), error = function(e) list(status = NA, id = NA_character_))
-      if (isTRUE(mt$status == 403)) break            # Policy-Block definitiv -> Rest sparen
-      if (!isTRUE(mt$status == 200) || is.na(mt$id)) next
-      at <- tryCatch(attendance_records(oid, mt$id, app_token),
-                     error = function(e) list(status = NA, meeting_start = NA, meeting_end = NA, reports = list()))
-      if (!isTRUE(at$status == 200) || length(at$reports) == 0) next
-      df <- parse_attendance_records(at$reports, mt$id)
-      if (nrow(df) == 0) next
-      cs <- lubridate::ymd_hms(at$meeting_start, quiet = TRUE)
-      ce <- lubridate::ymd_hms(at$meeting_end, quiet = TRUE)
-      if (is.na(ce)) ce <- cs   # Fallback: NOT NULL column, use start when end missing
-      calls[[length(calls) + 1]] <- tibble::tibble(
-        msgraph_call_id = mt$id, call_start = cs, call_end = ce,
-        meeting_id = mt$id)
-      parts[[length(parts) + 1]] <- df
-    }
+  blocked_oids <- character(0)   # 403 = Policy deckt diesen Organizer nicht -> Rest sparen
+  for (i in seq_len(nrow(disc))) {
+    ju <- disc$join_url[i]; oid <- disc$organizer_oid[i]
+    if (oid %in% blocked_oids) next
+    mt <- tryCatch(resolve_meeting(oid, ju, app_token), error = function(e) list(status = NA, id = NA_character_))
+    if (isTRUE(mt$status == 403)) { blocked_oids <- c(blocked_oids, oid); next }
+    if (!isTRUE(mt$status == 200) || is.na(mt$id)) next
+    at <- tryCatch(attendance_records(oid, mt$id, app_token),
+                   error = function(e) list(status = NA, meeting_start = NA, meeting_end = NA, reports = list()))
+    if (!isTRUE(at$status == 200) || length(at$reports) == 0) next
+    df <- parse_attendance_records(at$reports, mt$id)
+    if (nrow(df) == 0) next
+    cs <- lubridate::ymd_hms(at$meeting_start, quiet = TRUE)
+    ce <- lubridate::ymd_hms(at$meeting_end, quiet = TRUE)
+    if (is.na(ce)) ce <- cs   # Fallback: NOT NULL column, use start when end missing
+    calls[[length(calls) + 1]] <- tibble::tibble(
+      msgraph_call_id = mt$id, call_start = cs, call_end = ce,
+      meeting_id = mt$id)
+    parts[[length(parts) + 1]] <- df
   }
+  if (length(blocked_oids) > 0)
+    message("Policy-403 fuer ", length(blocked_oids), " Organizer-oid(s) — deren Meetings uebersprungen.")
   if (length(calls) == 0) { message("Keine Calls/Attendance."); return(invisible(0L)) }
   calls_df <- dplyr::distinct(dplyr::bind_rows(calls), msgraph_call_id, .keep_all = TRUE)
   parts_df <- dplyr::bind_rows(parts) %>% dplyr::filter(!is.na(email)) %>% dplyr::distinct()
+
+  # DSGVO: PII gesperrter Personen tombstonen (email -> Tombstone, ms_name -> NA),
+  # BEVOR Kontakte + Teilnehmer daraus abgeleitet werden -> beide Seiten nutzen
+  # denselben Tombstone, der Email-Join bleibt konsistent (wie base-35 msgraph_update_calls).
+  parts_df <- dsgvo_suppress_participants(parts_df, con, suppression_pepper)
+
+  if (dry_run) {
+    message(sprintf("[dry-run] %d Calls, %d Teilnehmer (kein Upsert).", nrow(calls_df), nrow(parts_df)))
+    return(invisible(nrow(calls_df)))
+  }
 
   # Kontakte upserten
   contacts <- parts_df %>% dplyr::transmute(email, ms_name) %>% dplyr::distinct(email, .keep_all = TRUE)

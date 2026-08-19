@@ -2,20 +2,31 @@
 % Please edit documentation in R/msgraph_scoped_calls.R
 \name{msgraph_scoped_update_calls_attendance}
 \alias{msgraph_scoped_update_calls_attendance}
-\title{Calls/Teilnehmer gescopt via Attendance aktualisieren (app-only, policy-gescoped)}
+\title{Calls/Teilnehmer gescopt via Attendance aktualisieren}
 \usage{
-msgraph_scoped_update_calls_attendance(con, app_token, cfg)
+msgraph_scoped_update_calls_attendance(
+  con,
+  app_token,
+  cfg,
+  suppression_pepper = NULL,
+  dry_run = FALSE
+)
 }
 \arguments{
 \item{con}{DB-Pool.}
 
-\item{app_token}{app-only Provider.}
+\item{app_token}{app-only Provider (Meeting-Aufloesung + Attendance).}
 
 \item{cfg}{load_scoped_config(); \code{raw_schema}/\code{processed_schema} steuern das Ziel-Schema.}
+
+\item{suppression_pepper}{DSGVO-Pepper; wenn gesetzt, werden gesperrte PII (config.privacy_deletion_log) vor dem Upsert getombstoned.}
+
+\item{dry_run}{Wenn TRUE: nur zaehlen/loggen, kein Upsert.}
 }
 \value{
 invisible(Anzahl Calls).
 }
 \description{
-Calls/Teilnehmer gescopt via Attendance aktualisieren (app-only, policy-gescoped)
+Discovery aus den delegiert ingestierten Events (\code{discover_meetings_from_events}),
+Meeting-Aufloesung + Attendance app-only (CsApplicationAccessPolicy-gescoped).
 }
