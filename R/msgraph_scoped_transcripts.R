@@ -108,7 +108,9 @@ msgraph_scoped_update_transcripts <- function(con, app_token, cfg, dry_run = FAL
       if (is.null(vtt)) next
       new_rows[[length(new_rows) + 1]] <- tibble::tibble(
         transcript_id = tid, call_id = call_db_id, transcript_url = url,
-        transcript_created_at = t$createdDateTime %||% NA_character_,
+        # Graph liefert createdDateTime als ISO-String -> parsen, die Zielspalte
+        # ist timestamp (Upsert scheitert sonst am Typ-Mismatch)
+        transcript_created_at = lubridate::ymd_hms(t$createdDateTime %||% NA_character_, quiet = TRUE),
         transcript_content = vtt_to_plaintext(vtt))
     }
   }
