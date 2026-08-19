@@ -2,7 +2,7 @@
 % Please edit documentation in R/msgraph_scoped_calls.R
 \name{msgraph_scoped_update_calls_attendance}
 \alias{msgraph_scoped_update_calls_attendance}
-\title{Calls/Teilnehmer gescopt via Attendance aktualisieren (app-only, policy-gescoped)}
+\title{Calls/Teilnehmer gescopt via Attendance aktualisieren}
 \usage{
 msgraph_scoped_update_calls_attendance(
   con,
@@ -15,7 +15,7 @@ msgraph_scoped_update_calls_attendance(
 \arguments{
 \item{con}{DB-Pool.}
 
-\item{app_token}{app-only Provider.}
+\item{app_token}{app-only Provider (Meeting-Aufloesung + Attendance).}
 
 \item{cfg}{load_scoped_config(); \code{raw_schema}/\code{processed_schema} steuern das Ziel-Schema.}
 
@@ -27,5 +27,6 @@ msgraph_scoped_update_calls_attendance(
 invisible(Anzahl Calls).
 }
 \description{
-Calls/Teilnehmer gescopt via Attendance aktualisieren (app-only, policy-gescoped)
+Discovery aus den delegiert ingestierten Events (\code{discover_meetings_from_events}),
+Meeting-Aufloesung + Attendance app-only (CsApplicationAccessPolicy-gescoped).
 }
