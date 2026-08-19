@@ -329,7 +329,12 @@ anonymize_speaker <- function(con, tokens, all_participants = NULL, contacts = N
   )]))
 
   if (length(speaker_tokens) == 0) {
-    return(tokens)
+    # Kein <v ...>-Speaker-Tag gefunden -> keine Sprecher-Info.
+    # Leeren Frame zurueckgeben (wie anonymize_names / id_anonymize_persons),
+    # NICHT den rohen Token-Frame: dessen `id`-Spalte ist der CoreNLP-Token-Index
+    # (character) und wuerde beim bind_rows mit der integer64-Kontakt-`id` der
+    # anderen Frames kollidieren.
+    return(tibble::tibble())
   }
 
   # Step 1: Fetch existing speaker mappings from DB
