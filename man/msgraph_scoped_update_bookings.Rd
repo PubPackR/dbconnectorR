@@ -2,11 +2,11 @@
 % Please edit documentation in R/msgraph_scoped_bookings.R
 \name{msgraph_scoped_update_bookings}
 \alias{msgraph_scoped_update_bookings}
-\title{Bookings-Termine gescopt aktualisieren (app-only Bookings.Read.All)}
+\title{Bookings-Termine gescopt aktualisieren (delegiert, Bookings.Read.All)}
 \usage{
 msgraph_scoped_update_bookings(
   con,
-  app_token,
+  del_token,
   cfg,
   suppression_pepper = NULL,
   dry_run = FALSE
@@ -15,7 +15,7 @@ msgraph_scoped_update_bookings(
 \arguments{
 \item{con}{DB-Pool.}
 
-\item{app_token}{app-only Provider.}
+\item{del_token}{delegierter Token-Provider.}
 
 \item{cfg}{load_scoped_config(); \code{raw_schema}/\code{processed_schema} steuern das Ziel-Schema.}
 
@@ -27,5 +27,7 @@ msgraph_scoped_update_bookings(
 invisible(Anzahl Events).
 }
 \description{
-Bookings-Termine gescopt aktualisieren (app-only Bookings.Read.All)
+Delegiert statt app-only: der Service-Account sieht nur Bookings-Businesses,
+in denen er selbst Mitglied ist — das ersetzt das tenant-weite app-only-Lesen.
+Voraussetzung: "https://graph.microsoft.com/Bookings.Read.All" in cfg$scopes.
 }

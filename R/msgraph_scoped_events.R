@@ -26,6 +26,7 @@ parse_scoped_events <- function(events_value) {
       event_start        = estart,
       event_end          = lubridate::ymd_hms(e$end$dateTime %||% NA_character_, quiet = TRUE),
       meeting_id         = if (!is.na(ju)) extract_meeting_id_safe(ju) else NA_character_,
+      join_url           = ju,
       is_single_instance = identical(e$type, "singleInstance"),
       is_online_meeting  = isTRUE(e$isOnlineMeeting),
       is_canceled        = canceled)
