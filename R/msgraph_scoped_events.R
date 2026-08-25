@@ -61,6 +61,53 @@ parse_scoped_events <- function(events_value) {
     } else tibble::tibble())
 }
 
+#' Build a (msgraph_ical_uid, event_start, email) -> showAs Lookup (gescoped)
+#'
+#' Jede freigegebene Kalender-Kopie eines Events traegt ihr eigenes `showAs`.
+#' `msgraph_scoped_update_events()` taggt jedes abgerufene Event vor dem
+#' Zusammenfuehren mit der Owner-E-Mail des Kalenders, aus dem es kommt
+#' (`X_cal_owner_email`, siehe dort). Diese Funktion baut daraus die
+#' Zuordnung, die gebraucht wird, um `show_as` in `parse_scoped_events()`s
+#' Teilnehmer-Output zu annotieren.
+#'
+#' @param events_value
+#'   Liste von Graph-Event-Objekten, getaggt mit `X_cal_owner_email` (siehe
+#'   `msgraph_scoped_update_events()`).
+#'
+#' @return
+#'   Tibble mit `msgraph_ical_uid`, `event_start`, `email` (die getaggte
+#'   Owner-E-Mail, lowercased), `show_as`. Events ohne Owner-Tag, ohne
+#'   `iCalUId` oder ohne Start werden verworfen - kein show_as zuweisbar,
+#'   erwarteter Zustand, kein Fehlerfall.
+#'
+#' @keywords internal
+# ---- start ---- #
+build_show_as_lookup_scoped <- function(events_value) {
+  # lapply() statt einer in der Schleife wachsenden Liste: `rows[[length(rows)+1]] <- ...`
+  # kopiert bei jedem Schritt die komplette Liste neu (R-Anti-Pattern, quadratische statt
+  # lineare Laufzeit bei grossen events_value - siehe parse_scoped_events() im selben File,
+  # dort dasselbe Muster, dort mitgemessen: ~O(n^1.3) bei 15.5k Events statt Sekunden).
+  # lapply() praeallokiert die Ergebnisliste korrekt.
+  rows <- lapply(events_value, function(e) {
+    ical  <- e$iCalUId %||% NA_character_
+    estart <- lubridate::ymd_hms(e$start$dateTime %||% NA_character_, quiet = TRUE)
+    owner_email <- e$X_cal_owner_email %||% NA_character_
+    if (is.na(ical) || is.na(estart) || is.na(owner_email) || !nzchar(owner_email)) return(NULL)
+    tibble::tibble(
+      msgraph_ical_uid = ical,
+      event_start       = estart,
+      email             = tolower(owner_email),
+      show_as           = e$showAs %||% NA_character_)
+  })
+  rows <- rows[!vapply(rows, is.null, logical(1))]
+  if (length(rows) == 0) {
+    return(tibble::tibble(
+      msgraph_ical_uid = character(), event_start = as.POSIXct(character()),
+      email = character(), show_as = character()))
+  }
+  dplyr::distinct(dplyr::bind_rows(rows), msgraph_ical_uid, event_start, email, .keep_all = TRUE)
+}
+
 #' Meeting-ID-Extraktion, NA-sicher
 #'
 #' @param url
@@ -116,12 +163,30 @@ msgraph_scoped_update_events <- function(con, del_token, cfg, suppression_pepper
       del_token,
       query = list(startDateTime = start_dt, endDateTime = end_dt, `$top` = 100,
                    `$select` = paste0("iCalUId,type,createdDateTime,lastModifiedDateTime,subject,",
-                                      "start,end,isCancelled,isOnlineMeeting,onlineMeeting,organizer,attendees")))
-    if (res$status == 200) all_events <- c(all_events, res$value)
+                                      "start,end,isCancelled,isOnlineMeeting,onlineMeeting,organizer,attendees,showAs")))
+    if (res$status == 200) {
+      # Owner-E-Mail pro Event mitfuehren, bevor sie beim Zusammenfuehren
+      # verschiedener freigegebener Kalender verloren geht - wird von
+      # build_show_as_lookup_scoped() gebraucht, um show_as der jeweiligen
+      # Kalender-Kopie zuzuordnen.
+      cal_owner_email <- tolower(cal$owner$address %||% "")
+      tagged <- lapply(res$value, function(ev) {
+        ev$X_cal_owner_email <- cal_owner_email
+        ev
+      })
+      all_events <- c(all_events, tagged)
+    }
   }
 
   parsed <- parse_scoped_events(all_events)
   if (nrow(parsed$events) == 0) { message("Keine Events."); return(invisible(0L)) }
+
+  # show_as pro Teilnehmer-Kopie annotieren, siehe build_show_as_lookup_scoped().
+  parsed$participants <- parsed$participants %>%
+    dplyr::left_join(
+      build_show_as_lookup_scoped(all_events),
+      by = c("msgraph_ical_uid", "event_start", "email")
+    )
 
   # DSGVO: PII gesperrter Personen in den Teilnehmern tombstonen (vor Kontakt-/Teilnehmer-Upsert)
   parsed$participants <- dsgvo_suppress_participants(parsed$participants, con, suppression_pepper)
@@ -153,7 +218,7 @@ msgraph_scoped_update_events <- function(con, del_token, cfg, suppression_pepper
     dplyr::rename(event_id = id) %>%
     dplyr::left_join(ct_ids, by = "email") %>%
     dplyr::filter(!is.na(event_id), !is.na(contact_id)) %>%
-    dplyr::transmute(event_id, contact_id, is_organizer, source)
+    dplyr::transmute(event_id, contact_id, is_organizer, source, show_as)
   Billomatics::postgres_upsert_data(con, rs, "msgraph_event_participants", part,
                                     match_cols = c("event_id", "contact_id"))
   invisible(nrow(parsed$events))
