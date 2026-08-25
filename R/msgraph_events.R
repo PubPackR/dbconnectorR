@@ -1,3 +1,41 @@
+#' Build a (event_id, event_start, email) -> showAs Lookup
+#'
+#' Jede Kalender-Kopie eines internen Users traegt ihr eigenes `showAs`
+#' (oof/free/busy/...) - `msgraph_update_events()` laedt pro internem User
+#' eine eigene `calendarView()`-Kopie, eine Zeile pro (Event,
+#' Kalender-Kopie). Diese Funktion baut daraus die Zuordnung, die gebraucht
+#' wird, um `show_as` pro Teilnehmer in `msgraph_event_participants` zu
+#' annotieren.
+#'
+#' @param all_calendar_events_ Data frame mit mindestens `iCalUId`,
+#'   `start_dateTime`, `user_id`, `showAs` - eine Zeile pro (Event,
+#'   Kalender-Kopie), wie von `msgraph_update_events()` aus der Graph-API
+#'   gebaut.
+#' @param users Data frame mit mindestens `id` (interner User, matcht
+#'   `user_id` oben) und `email`.
+#' @return Data frame mit `event_id` (character), `event_start` (POSIXct),
+#'   `attendees_emailAddress_address` (lowercased email), `show_as`. Eine
+#'   Zeile pro (Event, Kalender-Kopie) mit auflösbarer E-Mail; Kopien ohne
+#'   internen User-Match werden verworfen (kein `show_as` zuweisbar - z.B.
+#'   fehlende Kalenderfreigabe oder ausgeschiedene Person, erwarteter
+#'   dauerhafter Zustand, kein Fehlerfall).
+#' @keywords internal
+# ---- start ---- #
+build_show_as_lookup <- function(all_calendar_events_, users) {
+  all_calendar_events_ %>%
+    dplyr::mutate(event_start = lubridate::ymd_hms(start_dateTime)) %>%
+    dplyr::select(event_id = iCalUId, event_start, user_id, showAs) %>%
+    dplyr::mutate(event_id = as.character(event_id)) %>%
+    dplyr::left_join(
+      users %>% dplyr::select(user_id = id, attendees_emailAddress_address = email),
+      by = "user_id"
+    ) %>%
+    dplyr::filter(!is.na(attendees_emailAddress_address)) %>%
+    dplyr::mutate(attendees_emailAddress_address = tolower(attendees_emailAddress_address)) %>%
+    dplyr::distinct(event_id, event_start, attendees_emailAddress_address, .keep_all = TRUE) %>%
+    dplyr::select(event_id, event_start, attendees_emailAddress_address, show_as = showAs)
+}
+
 #' Retrieve and Update Calendar Events from MSGraph
 #'
 #' Retrieves calendar events for users from MSGraph since a given start date, processes them, and updates relevant database tables.
@@ -94,6 +132,13 @@ msgraph_update_events <- function(con, access_token, startDate, user_id = NULL, 
     dplyr::group_by(attendees_emailAddress_address, attendees_emailAddress_name, event_id, event_start) %>%
     dplyr::summarise(is_organizer = any(is_organizer)) %>%
     dplyr::ungroup()
+
+  # show_as pro Teilnehmer-Kopie annotieren, siehe build_show_as_lookup().
+  msgraph_event_participants <- msgraph_event_participants %>%
+    dplyr::left_join(
+      build_show_as_lookup(all_calendar_events_, all_users),
+      by = c("event_id", "event_start", "attendees_emailAddress_address")
+    )
 
   # DSGVO-Suppression VOR allen Writes: msgraph_event_participants traegt die Attendee-PII,
   # die in raw.msgraph_contacts + raw.msgraph_event_participants fliesst. (update_events schreibt
@@ -361,10 +406,17 @@ update_event_participants <- function(con, msgraph_event_participants,
   events <- dplyr::tbl(con, I("raw.msgraph_events")) %>% dplyr::collect()
   contacts <- dplyr::tbl(con, I("raw.msgraph_contacts")) %>% dplyr::collect()
 
+  # show_as kommt nur vom calendar-Pfad (msgraph_update_events()); Booking hat
+  # kein showAs-Aequivalent. Defensiv ergaenzen, damit der Rest der Funktion
+  # unabhaengig vom Aufrufer dieselbe Spalte erwarten kann.
+  if (!"show_as" %in% names(msgraph_event_participants)) {
+    msgraph_event_participants$show_as <- NA_character_
+  }
+
   # Process new event participants
   msgraph_event_participants_new <- msgraph_event_participants %>%
       dplyr::ungroup() %>%
-      dplyr::distinct(event_id, attendees_emailAddress_address, is_organizer, event_start) %>%
+      dplyr::distinct(event_id, attendees_emailAddress_address, is_organizer, event_start, .keep_all = TRUE) %>%
       dplyr::left_join(contacts %>% dplyr::select(email, id), by = c("attendees_emailAddress_address" = "email")) %>% dplyr::mutate(contact_id = id) %>% dplyr::select(-id, -attendees_emailAddress_address) %>%
       dplyr::left_join(events %>% dplyr::select(msgraph_ical_uid, event_start, id), by = c("event_id" = "msgraph_ical_uid", "event_start")) %>% dplyr::mutate(event_id = id) %>% dplyr::select(-id) %>%
       dplyr::filter(!is.na(contact_id)) %>%
