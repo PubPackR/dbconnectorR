@@ -25,6 +25,7 @@ Imports:
     progress,
     glue,
     dbplyr,
+    digest,
     DBI,
     coreNLP,
     stringdist,
