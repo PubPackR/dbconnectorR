@@ -126,13 +126,14 @@ update_sales_meetings_unified <- function(con) {
       dplyr::tbl(con, I("mapping.msgraph_call_event")) %>%
         dplyr::select(id, event_id, event_date),
       by = c("call_event_mapping_id" = "id")) %>%
-    dplyr::inner_join(
+    dplyr::left_join(
       dplyr::tbl(con, I("raw.msgraph_events")) %>%
         dplyr::select(id, event_start),
       by = c("event_id" = "id")) %>%
     dplyr::collect()
-  msgraph_meetings$event_id   <- as.character(msgraph_meetings$event_id)
-  msgraph_meetings$event_date <- as.Date(msgraph_meetings$event_date, tz = "Europe/Berlin")
+  msgraph_meetings$event_id    <- as.character(msgraph_meetings$event_id)
+  msgraph_meetings$event_date  <- as.Date(msgraph_meetings$event_date, tz = "Europe/Berlin")
+  msgraph_meetings$event_start <- as.POSIXct(msgraph_meetings$event_start, tz = "UTC")
   # Eine Zeile je Meeting (mehrere verantwortliche Kontakte -> ersten waehlen).
   msgraph_meetings <- dplyr::distinct(msgraph_meetings, call_event_mapping_id, .keep_all = TRUE)
 
