@@ -65,11 +65,13 @@ msgraph_scoped_update_transcripts <- function(con, app_token, cfg, dry_run = FAL
   # ---- start ---- #
   rs <- cfg$raw_schema %||% "raw"
   ps <- cfg$processed_schema %||% "processed"
-  # Calls im Sliding Window, deren meeting_id noch KEIN Transkript hat
+  # Calls im Sliding Window, die noch KEIN Transkript haben. Angesprochen wird
+  # Graph ueber die onlineMeeting-id, die in msgraph_call_id steht - NICHT ueber
+  # meeting_id, das seit dem Mapping-Fix die thread-id des Events traegt.
   window_start <- Sys.Date() - cfg$transcripts_sliding_window_days
   calls <- dplyr::tbl(con, I(paste0(rs, ".msgraph_calls"))) %>%
-    dplyr::filter(!is.na(meeting_id) & call_start >= !!format(window_start, "%Y-%m-%d")) %>%
-    dplyr::select(call_db_id = id, msgraph_call_id, meeting_id) %>% dplyr::collect()
+    dplyr::filter(!is.na(msgraph_call_id) & call_start >= !!format(window_start, "%Y-%m-%d")) %>%
+    dplyr::select(call_db_id = id, msgraph_call_id) %>% dplyr::collect()
   if (nrow(calls) == 0) { message("Keine Calls im Fenster."); return(invisible(0L)) }
   have <- dplyr::tbl(con, I(paste0(ps, ".msgraph_call_transcripts"))) %>%
     dplyr::select(transcript_id, call_id) %>% dplyr::collect()
@@ -91,7 +93,7 @@ msgraph_scoped_update_transcripts <- function(con, app_token, cfg, dry_run = FAL
 
   new_rows <- list()
   for (i in seq_len(nrow(calls))) {
-    mid <- calls$meeting_id[i]; call_db_id <- calls$call_db_id[i]
+    mid <- calls$msgraph_call_id[i]; call_db_id <- calls$call_db_id[i]
     cands <- cand_map[[calls$msgraph_call_id[i]]]
     if (is.null(cands) || length(cands) == 0) next
     src <- resolve_transcript_source(cands, mid, app_token)
