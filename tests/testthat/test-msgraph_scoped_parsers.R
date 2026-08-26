@@ -162,6 +162,9 @@ test_that("synthetische Gast-Email ist invariant unter lower() und deterministis
   out  <- parse_scoped_bookings(mk("AAADx9CKAAA="), staff_map = character(0))
   again <- parse_scoped_bookings(mk("AAADx9CKAAA="), staff_map = character(0))
 
+  # ohne diese Laengenpruefung liefen die drei Assertions bei leerem Ergebnis
+  # vakuum durch und der Test waere gruen, obwohl gar kein Gast erzeugt wurde
+  expect_length(out$participants$email, 1)
   # invariant: der Wert ueberlebt lower(email) unveraendert
   expect_equal(out$participants$email, tolower(out$participants$email))
   # deterministisch: derselbe Termin ergibt bei jedem Lauf denselben Kontakt
