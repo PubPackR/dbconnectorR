@@ -65,14 +65,17 @@ msgraph_scoped_update_transcripts <- function(con, app_token, cfg, dry_run = FAL
   # ---- start ---- #
   rs <- cfg$raw_schema %||% "raw"
   ps <- cfg$processed_schema %||% "processed"
-  # Calls im Sliding Window, die an ein Meeting gebunden sind. Der Filter bleibt
-  # auf meeting_id: ist die leer, liess sich kein Meeting ableiten und der Call
-  # taugt auch nicht als Transkriptquelle. Angesprochen wird Graph aber ueber die
-  # onlineMeeting-id aus msgraph_call_id - meeting_id traegt seit dem Mapping-Fix
-  # die thread-id des Events und passt nicht in die Graph-URL.
+  # Calls im Sliding Window. KEIN Filter auf meeting_id: das Feld traegt seit dem
+  # Mapping-Fix die thread-id des Events und sagt nichts darueber aus, ob der Call
+  # in Graph adressierbar ist. Das tut msgraph_call_id (onlineMeeting-id, NOT
+  # NULL), und genau die geht in die Graph-URL. Ein Filter auf meeting_id wuerde
+  # Calls aussortieren, deren joinUrl sich nicht parsen liess, obwohl ihr
+  # Transkript abrufbar waere. Transkriptverlust waere schlimmer als die paar
+  # Fehlversuche auf Alt-Calls aus dem base-35-Bestand, die ohnehin im Fenster
+  # liegen und dort auch vor diesem Fix schon mitliefen.
   window_start <- Sys.Date() - cfg$transcripts_sliding_window_days
   calls <- dplyr::tbl(con, I(paste0(rs, ".msgraph_calls"))) %>%
-    dplyr::filter(!is.na(meeting_id) & call_start >= !!format(window_start, "%Y-%m-%d")) %>%
+    dplyr::filter(call_start >= !!format(window_start, "%Y-%m-%d")) %>%
     dplyr::select(call_db_id = id, msgraph_call_id) %>% dplyr::collect()
   if (nrow(calls) == 0) { message("Keine Calls im Fenster."); return(invisible(0L)) }
   have <- dplyr::tbl(con, I(paste0(ps, ".msgraph_call_transcripts"))) %>%
