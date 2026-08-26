@@ -144,9 +144,18 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
     cs <- lubridate::ymd_hms(at$meeting_start, quiet = TRUE)
     ce <- lubridate::ymd_hms(at$meeting_end, quiet = TRUE)
     if (is.na(ce)) ce <- cs   # Fallback: NOT NULL column, use start when end missing
+    # meeting_id = thread-id aus der joinUrl, identische Ableitung wie in
+    # parse_scoped_events und im alten base-35-Pfad (msgraph_calls.R:414). Nur so
+    # paart msgraph_map_calls_events den Call mit seinem Event; ohne das bleibt
+    # jedes Event ohne Call und wird als No-Show klassifiziert. Die
+    # onlineMeeting-id bleibt als Graph-Griff in msgraph_call_id erhalten.
+    mid_thread <- extract_meeting_id_safe(ju)
+    if (is.na(mid_thread))
+      message("meeting_id nicht aus joinUrl ableitbar, Call bleibt ohne Event-Zuordnung: ",
+              substr(ju, 1, 90))
     calls[[length(calls) + 1]] <- tibble::tibble(
       msgraph_call_id = mt$id, call_start = cs, call_end = ce,
-      meeting_id = mt$id)
+      meeting_id = mid_thread)
     parts[[length(parts) + 1]] <- df
   }
   if (length(blocked_oids) > 0)
