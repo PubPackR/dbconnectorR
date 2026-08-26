@@ -133,3 +133,41 @@ test_that("parse_scoped_bookings dedupt Events per (ical, event_start)", {
   out <- parse_scoped_bookings(list(a("Svc A"), a("Svc B")), staff_map = c(S1 = "rep@studyflix.de"))
   expect_equal(nrow(out$events), 1)
 })
+
+test_that("synthetische Gast-Email kollidiert nicht unter lower() (email_normalized ist UNIQUE)", {
+  # Bookings-Appointment-IDs sind Exchange-EntryIDs in Base64, also case-signifikant.
+  # Zwei verschiedene Termine desselben Postfachs koennen sich allein in der
+  # Gross-/Kleinschreibung unterscheiden. raw.msgraph_contacts.email_normalized ist
+  # GENERATED ALWAYS AS lower(email) UNIQUE -> die Gast-Email muss unter lower()
+  # unterscheidbar bleiben, sonst bricht der Upsert mit duplicate key ab.
+  mk <- function(id) list(list(
+    id = id, serviceName = "Beratung", status = "confirmed",
+    start = list(dateTime = "2026-07-11T09:00:00Z"), end = list(dateTime = "2026-07-11T09:30:00Z"),
+    staffMemberIds = list(),
+    customers = list(list(name = "Gast ohne Mail", emailAddress = NULL))))
+
+  a <- parse_scoped_bookings(mk("AAADx9CKAAA="), staff_map = character(0))
+  b <- parse_scoped_bookings(mk("AAADx9cKAAA="), staff_map = character(0))
+
+  expect_false(identical(tolower(a$participants$email), tolower(b$participants$email)))
+})
+
+test_that("synthetische Gast-Email ist invariant unter lower() und deterministisch", {
+  mk <- function(id) list(list(
+    id = id, serviceName = "Beratung", status = "confirmed",
+    start = list(dateTime = "2026-07-11T09:00:00Z"), end = list(dateTime = "2026-07-11T09:30:00Z"),
+    staffMemberIds = list(),
+    customers = list(list(name = "Gast ohne Mail", emailAddress = NULL))))
+
+  out  <- parse_scoped_bookings(mk("AAADx9CKAAA="), staff_map = character(0))
+  again <- parse_scoped_bookings(mk("AAADx9CKAAA="), staff_map = character(0))
+
+  # ohne diese Laengenpruefung liefen die drei Assertions bei leerem Ergebnis
+  # vakuum durch und der Test waere gruen, obwohl gar kein Gast erzeugt wurde
+  expect_length(out$participants$email, 1)
+  # invariant: der Wert ueberlebt lower(email) unveraendert
+  expect_equal(out$participants$email, tolower(out$participants$email))
+  # deterministisch: derselbe Termin ergibt bei jedem Lauf denselben Kontakt
+  expect_equal(out$participants$email, again$participants$email)
+  expect_match(out$participants$email, "@external[.]guest$")
+})
