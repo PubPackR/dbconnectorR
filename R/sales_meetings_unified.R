@@ -12,18 +12,34 @@ crm_status_flags <- function(status) {
 
 #' Baut die vereinheitlichte Meeting-Menge (rein, kein DB-Zugriff)
 #'
-#' @param msgraph_meetings data.frame (siehe Plan/Interfaces).
-#' @param crm_meetings data.frame (siehe Plan/Interfaces).
-#' @return data.frame im Schema von processed.sales_meetings_unified.
+#' Grain: eine Zeile pro (Meeting x externer Lead). `msgraph_meetings` ist bereits
+#' per-Lead expandiert (eine Zeile je (call_event_mapping_id, lead_id); `lead_id`
+#' = NA = externer Teilnehmer ohne gemappten Lead -> Platzhalter). CRM-VC-Termine
+#' werden auf (lead_id x event_date) gematcht; bei Mehrdeutigkeit ueber gleichen
+#' Rep-Kontakt + naechste `event_start` disambiguiert, echte Rest-Mehrdeutigkeit
+#' (gleicher Rep, gleicher Zeitpunkt) wird verworfen.
+#'
+#' `lead_id` und `contact_id` werden im CHARACTER-Raum gehalten (rbind-sicher
+#' gegen die integer64-Falle); der Caller castet vor dem Upsert auf bigint.
+#'
+#' @param msgraph_meetings data.frame mit call_event_mapping_id, lead_id,
+#'   event_date, event_start, contact_id (Rep), is_no_show, excluded,
+#'   is_short_lived_event, is_responsible, original_created_at, event_id.
+#' @param crm_meetings data.frame mit crm_task_id, lead_id, event_date,
+#'   precise_time, contact_id (Rep), meeting_tool, meeting_status,
+#'   is_external_tool, original_created_at.
+#' @return data.frame im Schema von processed.sales_meetings_unified (+ intern
+#'   genutzte, nicht geschriebene Spalten werden vom Caller entfernt).
 #' @export
 assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
-  # Basis: MSGraph-Zeilen
+  ms_lead <- as.character(msgraph_meetings$lead_id)  # NA fuer Platzhalter
   base <- data.frame(
-    meeting_key          = as.character(msgraph_meetings$call_event_mapping_id),
+    meeting_key          = paste0("msgraph_", msgraph_meetings$call_event_mapping_id,
+                                  "_", ms_lead),
     source               = "msgraph",
     event_date           = msgraph_meetings$event_date,
     contact_id           = as.character(msgraph_meetings$contact_id),
-    lead_id              = msgraph_meetings$lead_id,
+    lead_id              = ms_lead,
     is_no_show           = msgraph_meetings$is_no_show,
     no_show_source       = "msgraph",
     meeting_status       = NA_character_,
@@ -36,17 +52,18 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
     event_id             = msgraph_meetings$event_id,
     stringsAsFactors     = FALSE
   )
+  # Nur fuer den Tiebreak (nicht im DB-Schema): Rep-Kontakt + event_start je Zeile.
+  base_rep   <- as.character(msgraph_meetings$contact_id)
+  base_start <- msgraph_meetings$event_start
 
   new_rows <- list()
-  # Match-Index: wie viele MSGraph-Termine pro (lead_id, event_date)
-  ms_key <- paste(msgraph_meetings$lead_id, msgraph_meetings$event_date)
-
   for (i in seq_len(nrow(crm_meetings))) {
     cm <- crm_meetings[i, ]
     fl <- crm_status_flags(cm$meeting_status)
+    cm_lead <- as.character(cm$lead_id)
     netto_neu <- function() data.frame(
       meeting_key = paste0("crm_", cm$crm_task_id), source = "crm_task",
-      event_date = cm$event_date, contact_id = as.character(cm$contact_id), lead_id = cm$lead_id,
+      event_date = cm$event_date, contact_id = as.character(cm$contact_id), lead_id = cm_lead,
       is_no_show = fl$is_no_show, no_show_source = "crm_only",
       meeting_status = cm$meeting_status, meeting_tool = cm$meeting_tool,
       is_external_tool = cm$is_external_tool, excluded = fl$excluded,
@@ -54,22 +71,31 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
       original_created_at = cm$original_created_at, event_id = NA_character_,
       stringsAsFactors = FALSE)
 
+    # Externes Tool (kein MSGraph-Pendant) und Task ohne Lead -> immer netto-neu.
     if (isTRUE(cm$is_external_tool)) { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
+    if (is.na(cm$lead_id))          { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
 
-    if (is.na(cm$lead_id)) { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
+    # Kandidaten gleicher (lead_id, event_date). Platzhalter (lead_id NA) matchen nie.
+    cand <- which(!is.na(base$lead_id) & base$lead_id == cm_lead &
+                    base$event_date == cm$event_date)
+    if (length(cand) == 0) { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
+    if (length(cand) > 1) {
+      # Tiebreak 1: gleicher Rep-Kontakt.
+      same_rep <- cand[base_rep[cand] == as.character(cm$contact_id)]
+      if (length(same_rep) == 1) {
+        cand <- same_rep
+      } else if (length(same_rep) > 1 && !is.na(cm$precise_time)) {
+        # Tiebreak 2: naechste event_start zur precise_time (Sekunden-Distanz).
+        d <- abs(as.numeric(base_start[same_rep]) - as.numeric(cm$precise_time))
+        if (sum(d == min(d, na.rm = TRUE), na.rm = TRUE) == 1) {
+          cand <- same_rep[which.min(d)]
+        } else next  # echte Rest-Mehrdeutigkeit -> verwerfen
+      } else next    # kein eindeutiger Rep -> verwerfen
+    }
 
-    idx <- which(ms_key == paste(cm$lead_id, cm$event_date))
-    if (length(idx) == 0) { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
-    if (length(idx) > 1) next  # mehrdeutig -> verwerfen
-
-    # eindeutiger Match -> Override (nur definitiver Status setzt is_no_show).
-    # Die netto-neu-Tabelle (is_no_show, excluded) aus crm_status_flags() gilt
-    # NUR fuer crm_only-Zeilen. Im Override wirkt nur definitiver Status:
-    # no_show/show_up -> is_no_show, storniert -> excluded. "unbekannt" laesst
-    # die MSGraph-Zeile unveraendert, sonst wuerde ein echtes, per MSGraph
-    # getracktes Meeting wegen eines nicht klassifizierbaren CRM-Kommentars
-    # faelschlich aus dem No-Show-Nenner ausgeschlossen.
-    j <- idx[1]
+    # eindeutiger (bzw. aufgeloester) Match -> Override. Nur definitiver Status
+    # setzt is_no_show; storniert -> excluded; "unbekannt" laesst MSGraph unangetastet.
+    j <- cand[1]
     if (cm$meeting_status %in% c("no_show", "show_up")) base$is_no_show[j] <- fl$is_no_show
     if (cm$meeting_status == "storniert") base$excluded[j] <- TRUE
     base$no_show_source[j] <- "crm_override"
@@ -83,9 +109,10 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
 
 #' Rebuild processed.sales_meetings_unified (voll rueckwirkend)
 #'
-#' Laeuft nach update_crm_task_meeting_classification. MSGraph-Meetings +
-#' frisch aus Rohdaten abgeleitete CRM-VC-Termine (ohne Anti-Join) werden via
-#' assemble_unified_meetings() vereinheitlicht und komplett neu geschrieben.
+#' Laeuft nach update_crm_task_meeting_classification. MSGraph-Meetings (extern-only
+#' Lead-Ableitung, per (Meeting x Lead) expandiert) + frisch aus Rohdaten
+#' abgeleitete CRM-VC-Termine werden via assemble_unified_meetings() vereinheitlicht
+#' und komplett neu geschrieben.
 #' @param con Pool/DBI-Connection.
 #' @return invisible(Anzahl geschriebener Zeilen).
 #' @export
@@ -99,18 +126,19 @@ update_sales_meetings_unified <- function(con) {
       dplyr::tbl(con, I("mapping.msgraph_call_event")) %>%
         dplyr::select(id, event_id, event_date),
       by = c("call_event_mapping_id" = "id")) %>%
+    dplyr::inner_join(
+      dplyr::tbl(con, I("raw.msgraph_events")) %>%
+        dplyr::select(id, event_start),
+      by = c("event_id" = "id")) %>%
     dplyr::collect()
   msgraph_meetings$event_id   <- as.character(msgraph_meetings$event_id)
   msgraph_meetings$event_date <- as.Date(msgraph_meetings$event_date, tz = "Europe/Berlin")
-  # Eine Zeile je Meeting (mehrere verantwortliche Kontakte -> mehrere Zeilen).
+  # Eine Zeile je Meeting (mehrere verantwortliche Kontakte -> ersten waehlen).
   msgraph_meetings <- dplyr::distinct(msgraph_meetings, call_event_mapping_id, .keep_all = TRUE)
 
-  # Lead je Meeting ueber die EXTERNEN Teilnehmer ableiten (NICHT ueber den
-  # verantwortlichen Kontakt - der ist oft der Organisator/Rep und liefert den
-  # falschen Lead; DB-verifiziert: verantwortlich-Pfad = 0 gemeinsame Leads,
-  # externer Pfad = 7255). Wie get_event_customer_status:
-  #   msgraph_call_event -> msgraph_event_participants (extern) -> crm_lead_msgraph_contact.
-  meeting_lead <- dplyr::tbl(con, I("mapping.msgraph_call_event")) %>%
+  message("  leite externe Leads je Meeting ab (extern-only, is_primary_crm) ...")
+  # Nicht-Organisator-Teilnehmer mit Email -> extern/intern klassifizieren.
+  participants <- dplyr::tbl(con, I("mapping.msgraph_call_event")) %>%
     dplyr::select(call_event_mapping_id = id, event_id) %>%
     dplyr::inner_join(
       dplyr::tbl(con, I("raw.msgraph_event_participants")) %>%
@@ -118,19 +146,36 @@ update_sales_meetings_unified <- function(con) {
         dplyr::select(event_id, contact_id),
       by = "event_id") %>%
     dplyr::inner_join(
-      dplyr::tbl(con, I("mapping.crm_lead_msgraph_contact")) %>%
-        dplyr::filter(is_primary_crm == TRUE) %>%
-        dplyr::select(contact_id = msgraph_contact_id, lead_id = crm_lead_id),
-      by = "contact_id") %>%
-    dplyr::distinct(call_event_mapping_id, lead_id) %>%
+      dplyr::tbl(con, I("raw.msgraph_contacts")) %>%
+        dplyr::select(id, email),
+      by = c("contact_id" = "id")) %>%
+    dplyr::select(call_event_mapping_id, contact_id, email) %>%
     dplyr::collect()
-  # Mehrere externe Leads je Meeting -> deterministisch einen waehlen (kleinste id).
-  meeting_lead <- meeting_lead %>%
-    dplyr::group_by(call_event_mapping_id) %>%
-    dplyr::summarise(lead_id = min(lead_id, na.rm = TRUE), .groups = "drop")
-  msgraph_meetings <- dplyr::left_join(msgraph_meetings, meeting_lead, by = "call_event_mapping_id")
+  participants$is_external <- !is_internal_email(participants$email) &
+                              !is_synthetic_email(participants$email)
 
-  message("  leite CRM-VC-Termine aus Rohdaten ab (ohne Anti-Join) ...")
+  # Meetings mit >=1 externem Teilnehmer (sonst internal-only -> raus).
+  has_ext <- unique(participants$call_event_mapping_id[participants$is_external])
+
+  # Externe MAPPED Leads (is_primary_crm) je Meeting.
+  crm_map <- dplyr::tbl(con, I("mapping.crm_lead_msgraph_contact")) %>%
+    dplyr::filter(is_primary_crm == TRUE) %>%
+    dplyr::select(msgraph_contact_id, crm_lead_id) %>%
+    dplyr::collect()
+  ext_part <- participants[participants$is_external, c("call_event_mapping_id", "contact_id")]
+  meeting_lead <- merge(ext_part, crm_map, by.x = "contact_id", by.y = "msgraph_contact_id")
+  meeting_lead <- unique(data.frame(
+    call_event_mapping_id = meeting_lead$call_event_mapping_id,
+    lead_id               = meeting_lead$crm_lead_id,
+    stringsAsFactors      = FALSE))
+
+  # internal-only Meetings raus, dann per (Meeting x externer Lead) expandieren.
+  # all.x = TRUE -> Meetings mit externem Teilnehmer aber ohne gemappten Lead
+  # behalten EINE Zeile mit lead_id = NA (Platzhalter).
+  msgraph_meetings <- msgraph_meetings[msgraph_meetings$call_event_mapping_id %in% has_ext, , drop = FALSE]
+  msgraph_meetings <- merge(msgraph_meetings, meeting_lead, by = "call_event_mapping_id", all.x = TRUE)
+
+  message("  leite CRM-VC-Termine aus Rohdaten ab ...")
   tasks <- dplyr::tbl(con, I("raw.crm_lead_tasks")) %>%
     dplyr::filter(is_deleted == FALSE) %>%
     dplyr::select(id, crm_task_id, lead_id, user_id, assigned_to_user_id,
@@ -153,7 +198,8 @@ update_sales_meetings_unified <- function(con) {
   agg$meeting_status <- names(rank)[match(agg$rank, rank)]
   vc$meeting_status <- agg$meeting_status[match(as.character(vc$id), as.character(agg$task_id))]
   vc$meeting_status[is.na(vc$meeting_status)] <- "unbekannt"
-  vc$event_date <- as.Date(vc$precise_time, tz = "Europe/Berlin")
+  vc$precise_time <- as.POSIXct(vc$precise_time, tz = "UTC")
+  vc$event_date   <- as.Date(vc$precise_time, tz = "Europe/Berlin")
   # Rep-Kontakt (coalesce assigned_to_user_id/user_id im Character-Raum -> integer64-sicher)
   uid <- ifelse(!is.na(vc$assigned_to_user_id), as.character(vc$assigned_to_user_id),
                 as.character(vc$user_id))
@@ -162,15 +208,13 @@ update_sales_meetings_unified <- function(con) {
 
   crm_meetings <- data.frame(
     crm_task_id = vc$crm_task_id, lead_id = vc$lead_id, event_date = vc$event_date,
-    contact_id = vc$contact_id, meeting_tool = vc$meeting_tool,
+    precise_time = vc$precise_time, contact_id = vc$contact_id, meeting_tool = vc$meeting_tool,
     meeting_status = vc$meeting_status, is_external_tool = vc$is_external_tool,
     original_created_at = vc$task_created_at, stringsAsFactors = FALSE)
 
   rows <- assemble_unified_meetings(msgraph_meetings, crm_meetings)
 
-  # ID-Spalten auf integer64 (=bigint) casten: assemble haelt contact_id im
-  # CHARACTER-Raum (rbind-sicher gegen die integer64-Falle), aber die DB-Spalten
-  # sind bigint und postgres_upsert_data castet text->bigint nicht.
+  # ID-Spalten (im Assemble character) auf integer64 (=bigint) casten; NA -> NULL.
   rows$contact_id <- bit64::as.integer64(rows$contact_id)
   rows$lead_id    <- bit64::as.integer64(rows$lead_id)
 

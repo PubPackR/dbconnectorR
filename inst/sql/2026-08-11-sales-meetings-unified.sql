@@ -34,11 +34,11 @@ CREATE INDEX IF NOT EXISTS idx_sales_meetings_unified_lead_id    ON processed.sa
 CREATE INDEX IF NOT EXISTS idx_sales_meetings_unified_event_date ON processed.sales_meetings_unified (event_date);
 
 COMMENT ON TABLE processed.sales_meetings_unified IS 'Unified sales meetings (MSGraph + CRM-task-derived), one row per meeting, carrying the final no-show status after CRM override. Derived table, fully rebuilt by dbconnectorR::update_sales_meetings_unified(). Source of the No-Show analysis.';
-COMMENT ON COLUMN processed.sales_meetings_unified.meeting_key IS 'Stable per-meeting identity / dedup key: call_event_mapping_id for MSGraph meetings, ''crm_<crm_task_id>'' for CRM-only meetings.';
+COMMENT ON COLUMN processed.sales_meetings_unified.meeting_key IS 'Stable per-(meeting x external lead) identity / dedup key: ''msgraph_<call_event_mapping_id>_<lead_id>'' (lead_id NULL = external-but-unmapped placeholder) for MSGraph meetings, ''crm_<crm_task_id>'' for CRM-only meetings.';
 COMMENT ON COLUMN processed.sales_meetings_unified.source IS 'Origin of the base row: ''msgraph'' or ''crm_task''.';
 COMMENT ON COLUMN processed.sales_meetings_unified.event_date IS 'Date the meeting takes place; coalesce of the MSGraph mapping event_date and the CRM task precise_time.';
 COMMENT ON COLUMN processed.sales_meetings_unified.contact_id IS 'Responsible sales-rep contact (references raw.msgraph_contacts).';
-COMMENT ON COLUMN processed.sales_meetings_unified.lead_id IS 'CRM lead the meeting belongs to (surrogate raw.crm_leads.id).';
+COMMENT ON COLUMN processed.sales_meetings_unified.lead_id IS 'External CRM lead the meeting belongs to (surrogate raw.crm_leads.id); NULL = meeting had an external participant but none mapped to a lead (placeholder row, counts in the overall rate, not in per-lead breakdowns).';
 COMMENT ON COLUMN processed.sales_meetings_unified.is_no_show IS 'Final no-show flag after CRM override; NULL when the outcome is unknown.';
 COMMENT ON COLUMN processed.sales_meetings_unified.no_show_source IS 'Provenance of the final no-show value: ''msgraph'', ''crm_override'', or ''crm_only''.';
 COMMENT ON COLUMN processed.sales_meetings_unified.meeting_status IS 'CRM-comment-derived status (no_show/show_up/storniert/unbekannt), where available.';
