@@ -81,31 +81,37 @@ parse_scoped_events <- function(events_value) {
 #'   erwarteter Zustand, kein Fehlerfall.
 #'
 #' @keywords internal
-# ---- start ---- #
 build_show_as_lookup_scoped <- function(events_value) {
-  # lapply() statt einer in der Schleife wachsenden Liste: `rows[[length(rows)+1]] <- ...`
-  # kopiert bei jedem Schritt die komplette Liste neu (R-Anti-Pattern, quadratische statt
-  # lineare Laufzeit bei grossen events_value - siehe parse_scoped_events() im selben File,
-  # dort dasselbe Muster, dort mitgemessen: ~O(n^1.3) bei 15.5k Events statt Sekunden).
-  # lapply() praeallokiert die Ergebnisliste korrekt.
-  rows <- lapply(events_value, function(e) {
-    ical  <- e$iCalUId %||% NA_character_
-    estart <- lubridate::ymd_hms(e$start$dateTime %||% NA_character_, quiet = TRUE)
-    owner_email <- e$X_cal_owner_email %||% NA_character_
-    if (is.na(ical) || is.na(estart) || is.na(owner_email) || !nzchar(owner_email)) return(NULL)
-    tibble::tibble(
-      msgraph_ical_uid = ical,
-      event_start       = estart,
-      email             = tolower(owner_email),
-      show_as           = e$showAs %||% NA_character_)
-  })
-  rows <- rows[!vapply(rows, is.null, logical(1))]
-  if (length(rows) == 0) {
+  # ---- start ---- #
+  # Vektoren statt einer Zeile pro tibble()/ymd_hms()-Aufruf: der eigentliche
+  # Kostentreiber bei grossen events_value ist nicht (wie ein frueherer
+  # Kommentar hier behauptete) der wachsende Liste-Anhang selbst - R-Listen
+  # wachsen seit R 3.4 amortisiert linear, gemessen bei n=15.000: 0,00s fuer
+  # den Listen-Anhang vs. 16,94s fuer per-row tibble() + 51,64s fuer per-row
+  # ymd_hms() (Review-Fund, Issue 3). Deshalb hier ein Extraktions-Pass in
+  # Basis-Vektoren, dann EIN tibble() und EIN vektorisiertes ymd_hms() statt
+  # 15.000 einzelner Aufrufe.
+  ical_v  <- vapply(events_value, function(e) e$iCalUId %||% NA_character_, character(1))
+  start_v <- vapply(events_value, function(e) e$start$dateTime %||% NA_character_, character(1))
+  owner_v <- vapply(events_value, function(e) e$X_cal_owner_email %||% NA_character_, character(1))
+  showas_v <- vapply(events_value, function(e) e$showAs %||% NA_character_, character(1))
+
+  estart_v <- lubridate::ymd_hms(start_v, quiet = TRUE)
+  keep <- !is.na(ical_v) & !is.na(estart_v) & !is.na(owner_v) & nzchar(owner_v)
+
+  if (!any(keep)) {
     return(tibble::tibble(
       msgraph_ical_uid = character(), event_start = as.POSIXct(character()),
       email = character(), show_as = character()))
   }
-  dplyr::distinct(dplyr::bind_rows(rows), msgraph_ical_uid, event_start, email, .keep_all = TRUE)
+
+  tibble::tibble(
+    msgraph_ical_uid = ical_v[keep],
+    event_start       = estart_v[keep],
+    email             = tolower(owner_v[keep]),
+    show_as           = showas_v[keep]
+  ) %>%
+    dplyr::distinct(msgraph_ical_uid, event_start, email, .keep_all = TRUE)
 }
 
 #' Meeting-ID-Extraktion, NA-sicher
@@ -169,7 +175,11 @@ msgraph_scoped_update_events <- function(con, del_token, cfg, suppression_pepper
       # verschiedener freigegebener Kalender verloren geht - wird von
       # build_show_as_lookup_scoped() gebraucht, um show_as der jeweiligen
       # Kalender-Kopie zuzuordnen.
-      cal_owner_email <- tolower(cal$owner$address %||% "")
+      # normalize_external_email() auch hier, symmetrisch zu den
+      # Teilnehmer-E-Mails in parse_scoped_events() (die dieselbe
+      # Normalisierung anwenden) - beide Seiten des Join-Keys muessen
+      # identisch normalisiert sein (Review-Fund).
+      cal_owner_email <- tolower(normalize_external_email(cal$owner$address %||% ""))
       tagged <- lapply(res$value, function(ev) {
         ev$X_cal_owner_email <- cal_owner_email
         ev
@@ -182,9 +192,27 @@ msgraph_scoped_update_events <- function(con, del_token, cfg, suppression_pepper
   if (nrow(parsed$events) == 0) { message("Keine Events."); return(invisible(0L)) }
 
   # show_as pro Teilnehmer-Kopie annotieren, siehe build_show_as_lookup_scoped().
+  # Der Lookup ist auf die Owner-E-Mail des jeweiligen Kalenders keyed - der
+  # Owner muss dafuer selbst als Teilnehmer (Organizer oder Attendee) im
+  # Event stehen, sonst matcht der left_join still nichts (Review-Fund,
+  # Issue 2). Anti-Join macht diesen Miss sichtbar statt ihn unbeobachtet zu
+  # lassen - genau der Fall, den D3 (base-41_personio) fuer Bot-organisierte
+  # Personio-System-Events braucht, um erkennbar zu bleiben.
+  show_as_lookup <- build_show_as_lookup_scoped(all_events)
+  unmatched_show_as <- dplyr::anti_join(
+    show_as_lookup, parsed$participants,
+    by = c("msgraph_ical_uid", "event_start", "email")
+  )
+  if (nrow(unmatched_show_as) > 0) {
+    message(sprintf(
+      "show_as: %d/%d Kalender-Kopien ohne passende Teilnehmer-Zeile (Owner nicht als Teilnehmer im Event - kein show_as zuweisbar).",
+      nrow(unmatched_show_as), nrow(show_as_lookup)
+    ))
+  }
+
   parsed$participants <- parsed$participants %>%
     dplyr::left_join(
-      build_show_as_lookup_scoped(all_events),
+      show_as_lookup,
       by = c("msgraph_ical_uid", "event_start", "email")
     )
 

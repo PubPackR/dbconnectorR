@@ -20,12 +20,23 @@
 #'   fehlende Kalenderfreigabe oder ausgeschiedene Person, erwarteter
 #'   dauerhafter Zustand, kein Fehlerfall).
 #' @keywords internal
-# ---- start ---- #
 build_show_as_lookup <- function(all_calendar_events_, users) {
+  # ---- start ---- #
   all_calendar_events_ %>%
     dplyr::mutate(event_start = lubridate::ymd_hms(start_dateTime)) %>%
     dplyr::select(event_id = iCalUId, event_start, user_id, showAs) %>%
-    dplyr::mutate(event_id = as.character(event_id)) %>%
+    dplyr::mutate(
+      event_id = as.character(event_id),
+      # all_calendar_events_ entsteht via as.data.frame(t(sapply(...))) und
+      # liefert fuer JEDES Feld eine List-Column (siehe die Casts der
+      # anderen Felder in diesem File, z.B. isCancelled/isOrganizer/subject
+      # weiter unten) - showAs war der eine Fall, der das bisher nicht
+      # bekam. Ohne diesen Cast bleibt show_as eine List-Column, was
+      # bind_rows() gegen die aus der DB gelesenen character-Werte crashen
+      # laesst bzw. postgres_upsert_data() als Postgres-Array-Literal
+      # ({oof} statt oof) schreibt (Review-Fund).
+      showAs = as.character(showAs)
+    ) %>%
     dplyr::left_join(
       users %>% dplyr::select(user_id = id, attendees_emailAddress_address = email),
       by = "user_id"
@@ -134,9 +145,25 @@ msgraph_update_events <- function(con, access_token, startDate, user_id = NULL, 
     dplyr::ungroup()
 
   # show_as pro Teilnehmer-Kopie annotieren, siehe build_show_as_lookup().
+  # Der Lookup ist auf den internen User (dessen eigene Kalender-Kopie) keyed
+  # - dieser User muss dafuer selbst als Teilnehmer im Event stehen, sonst
+  # matcht der left_join still nichts (Review-Fund, Issue 2, analog zum
+  # gescopten Pfad). Anti-Join macht diesen Miss sichtbar.
+  show_as_lookup <- build_show_as_lookup(all_calendar_events_, all_users)
+  unmatched_show_as <- dplyr::anti_join(
+    show_as_lookup, msgraph_event_participants,
+    by = c("event_id", "event_start", "attendees_emailAddress_address")
+  )
+  if (nrow(unmatched_show_as) > 0) {
+    message(sprintf(
+      "show_as: %d/%d Kalender-Kopien ohne passende Teilnehmer-Zeile (kein show_as zuweisbar).",
+      nrow(unmatched_show_as), nrow(show_as_lookup)
+    ))
+  }
+
   msgraph_event_participants <- msgraph_event_participants %>%
     dplyr::left_join(
-      build_show_as_lookup(all_calendar_events_, all_users),
+      show_as_lookup,
       by = c("event_id", "event_start", "attendees_emailAddress_address")
     )
 

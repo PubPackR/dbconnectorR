@@ -78,3 +78,57 @@ test_that("build_show_as_lookup_scoped dedups exact-duplicate tagged events", {
 
   expect_equal(nrow(result), 1)
 })
+
+test_that("build_show_as_lookup_scoped keeps two instances sharing an iCalUId but different event_start apart", {
+  # Wiederkehrende Serie - dieselbe iCalUId, zwei verschiedene Instanzen.
+  # Der Key (msgraph_ical_uid, event_start, email), auf den der Backfill
+  # spaeter gegen raw.msgraph_events joint, muss die beiden trennen.
+  events <- list(
+    list(iCalUId = "SERIES1", start = list(dateTime = "2026-06-01T09:00:00"),
+         showAs = "oof", X_cal_owner_email = "tim.roensch@studyflix.de"),
+    list(iCalUId = "SERIES1", start = list(dateTime = "2026-06-08T09:00:00"),
+         showAs = "busy", X_cal_owner_email = "tim.roensch@studyflix.de")
+  )
+
+  result <- build_show_as_lookup_scoped(events)
+
+  expect_equal(nrow(result), 2)
+  expect_setequal(result$show_as, c("oof", "busy"))
+})
+
+test_that("build_show_as_lookup_scoped dedup does not mask a real conflict between duplicate rows", {
+  # Bewusst unterschiedliche showAs-Werte statt wie im Test oben identische -
+  # der bestehende Dedup-Test kann Nichtdeterminismus beim Survivor nicht
+  # erkennen. Hier nur erzwungen, dass GENAU EINER der beiden gueltigen
+  # Werte ueberlebt.
+  events <- list(
+    list(iCalUId = "ABC123", start = list(dateTime = "2026-06-01T09:00:00"),
+         showAs = "oof", X_cal_owner_email = "tim.roensch@studyflix.de"),
+    list(iCalUId = "ABC123", start = list(dateTime = "2026-06-01T09:00:00"),
+         showAs = "busy", X_cal_owner_email = "tim.roensch@studyflix.de")
+  )
+
+  result <- build_show_as_lookup_scoped(events)
+
+  expect_equal(nrow(result), 1)
+  expect_true(result$show_as %in% c("oof", "busy"))
+})
+
+test_that("build_show_as_lookup_scoped: no fan-out across multiple owners of the same event", {
+  # Zwei verschiedene Kalender-Kopien desselben Events (gleiche iCalUId +
+  # event_start, unterschiedliche Owner) muessen zwei getrennte Zeilen
+  # bleiben, nicht eine mehrdeutige.
+  events <- list(
+    list(iCalUId = "EVT1", start = list(dateTime = "2026-06-01T00:00:00"),
+         showAs = "oof", X_cal_owner_email = "tim.roensch@studyflix.de"),
+    list(iCalUId = "EVT1", start = list(dateTime = "2026-06-01T00:00:00"),
+         showAs = "free", X_cal_owner_email = "ali.yildirim@studyflix.de"),
+    list(iCalUId = "EVT2", start = list(dateTime = "2026-06-02T00:00:00"),
+         showAs = "busy", X_cal_owner_email = "tim.roensch@studyflix.de")
+  )
+
+  result <- build_show_as_lookup_scoped(events)
+
+  expect_equal(nrow(result), 3)
+  expect_equal(nrow(dplyr::distinct(result, msgraph_ical_uid, event_start, email)), 3)
+})
