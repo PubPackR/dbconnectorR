@@ -247,6 +247,18 @@ msgraph_scoped_update_events <- function(con, del_token, cfg, suppression_pepper
     dplyr::left_join(ct_ids, by = "email") %>%
     dplyr::filter(!is.na(event_id), !is.na(contact_id)) %>%
     dplyr::transmute(event_id, contact_id, is_organizer, source, show_as)
+
+  # W6-Fix (Review-Fund): siehe coalesce_show_as() (msgraph_events.R) -
+  # schuetzt einen zuvor korrekt gesetzten show_as-Wert davor, durch einen
+  # neuen NA ueberschrieben zu werden (Owner-Lookup fand diesmal keinen
+  # Treffer, siehe Anti-Join-Logging oben).
+  existing_show_as <- dplyr::tbl(con, I(paste0(rs, ".msgraph_event_participants"))) %>%
+    dplyr::filter(source == "calendar") %>%
+    dplyr::select(event_id, contact_id, show_as) %>%
+    dplyr::collect()
+  part <- part %>%
+    coalesce_show_as(existing_show_as, by = c("event_id", "contact_id"))
+
   Billomatics::postgres_upsert_data(con, rs, "msgraph_event_participants", part,
                                     match_cols = c("event_id", "contact_id"))
   invisible(nrow(parsed$events))

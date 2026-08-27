@@ -47,6 +47,44 @@ build_show_as_lookup <- function(all_calendar_events_, users) {
     dplyr::select(event_id, event_start, attendees_emailAddress_address, show_as = showAs)
 }
 
+#' Coalesce a freshly-fetched show_as onto the previously stored value
+#'
+#' `show_as` ist eine normale Upsert-Spalte unter `match_cols`. Ohne diese
+#' Funktion wuerde ein frischer `show_as = NA` (der Lookup fand diesmal
+#' keinen Treffer - Kalenderfreigabe zwischenzeitlich entzogen, Person
+#' ausgeschieden, transienter Graph-Fehler) einen zuvor korrekt gesetzten
+#' Wert (z.B. `"oof"` aus dem D2-Backfill oder einem frueheren Lauf)
+#' unbemerkt ueberschreiben (Review-Fund W6). `coalesce()` behebt das: ein
+#' neuer `NA`-Wert behaelt den bestehenden Wert, nur ein neuer NICHT-`NA`-
+#' Wert darf ueberschreiben (auch ein anderer als vorher - z.B. bei einem
+#' echten Statuswechsel).
+#'
+#' @param new_participants Data frame mit den Join-Key-Spalten (siehe `by`)
+#'   plus `show_as` - die frisch aus Graph gefetchten Werte.
+#' @param existing_show_as Data frame mit den Join-Key-Spalten plus
+#'   `show_as` - die aktuell in der DB gespeicherten Werte (z.B. gefiltert
+#'   auf `source == "calendar"`, damit ein Booking-Lauf, der `show_as` nie
+#'   kennt, keinen echten Kalender-Wert scheinbar bestaetigt).
+#' @param by Character-Vektor der Join-Key-Spalten, z.B.
+#'   `c("contact_id", "event_id")`.
+#' @return `new_participants`, `show_as` ersetzt durch
+#'   `coalesce(show_as, bestehender show_as)` fuer Zeilen mit einem Match in
+#'   `existing_show_as`, unveraendert sonst.
+#' @keywords internal
+coalesce_show_as <- function(new_participants, existing_show_as, by) {
+  # ---- start ---- #
+  existing_show_as <- existing_show_as %>%
+    # Defensiv dedupliziert (Call-Sites tun das bereits selbst, aber die
+    # Funktion soll bei einem Verstoss keine Zeilen verdoppeln statt still
+    # zu faechern).
+    dplyr::distinct(dplyr::across(dplyr::all_of(by)), .keep_all = TRUE) %>%
+    dplyr::rename(show_as_existing_ = show_as)
+  new_participants %>%
+    dplyr::left_join(existing_show_as, by = by) %>%
+    dplyr::mutate(show_as = dplyr::coalesce(show_as, show_as_existing_)) %>%
+    dplyr::select(-show_as_existing_)
+}
+
 #' Retrieve and Update Calendar Events from MSGraph
 #'
 #' Retrieves calendar events for users from MSGraph since a given start date, processes them, and updates relevant database tables.
@@ -455,6 +493,18 @@ update_event_participants <- function(con, msgraph_event_participants,
   # Load existing event participants from DB
   existing_participants <- dplyr::tbl(con, I("raw.msgraph_event_participants")) %>%
     dplyr::collect()
+
+  # W6-Fix (Review-Fund): siehe coalesce_show_as() - schuetzt einen zuvor
+  # korrekt gesetzten show_as-Wert davor, durch einen neuen NA ueberschrieben
+  # zu werden. Nur Zeilen DERSELBEN Quelle, "calendar" ist die einzige, die
+  # show_as ueberhaupt kennt (siehe Defensiv-Ergaenzung oben).
+  existing_show_as <- existing_participants %>%
+    dplyr::filter(source == source_tag) %>%
+    dplyr::distinct(contact_id, event_id, .keep_all = TRUE) %>%
+    dplyr::select(contact_id, event_id, show_as)
+
+  msgraph_event_participants_new <- msgraph_event_participants_new %>%
+    coalesce_show_as(existing_show_as, by = c("contact_id", "event_id"))
 
   new_event_ids <- msgraph_event_participants_new %>%
     dplyr::distinct(event_id) %>%
