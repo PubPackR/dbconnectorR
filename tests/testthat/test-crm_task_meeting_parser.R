@@ -114,3 +114,14 @@ test_that("extract_meeting_type liefert unbekannt statt einer Fehlklassifikation
   expect_equal(extract_meeting_type("VC"), "unbekannt")
   expect_equal(extract_meeting_type(NA_character_), "unbekannt")
 })
+
+test_that("extract_meeting_type matcht Abkuerzungen nur in Grossbuchstaben", {
+  # Task-Namen tragen Lead-Namen in Titlecase - die duerfen nicht als Typ gelten.
+  expect_equal(extract_meeting_type("VC mit Frau Fu"), "unbekannt")
+  expect_equal(extract_meeting_type("VC Heineken Nv"), "unbekannt")
+  # Der bewusste Preis: klein geschriebene Abkuerzung wird nicht erkannt.
+  expect_equal(extract_meeting_type("vc fu"), "unbekannt")
+  # Ausgeschriebene Formen bleiben case-insensitiv.
+  expect_equal(extract_meeting_type("vc follow up"), "fu")
+  expect_equal(extract_meeting_type("vc updatecall"), "uc")
+})

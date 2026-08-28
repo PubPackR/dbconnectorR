@@ -18,10 +18,14 @@ Der Task-Name nennt fast nie das Tool, aber fast immer den Termin-Typ
 kanonisiert ihn.
 }
 \details{
-Zweistellige Abkuerzungen werden CASE-SENSITIV auf dem Rohtext gematcht, wo
-die Kleinschreibung ein deutsches Wort ergaebe (\code{ER} gegen das Pronomen
-\code{er}). Das ist dieselbe Schranke wie bei \code{NE}/\code{AB} in
-\code{\link[=classify_meeting_status]{classify_meeting_status()}}.
+Die Abkuerzungen (\code{NV}, \code{UC}, \code{FU}, \code{FUP}, \code{ER}, \code{ZR}) werden CASE-SENSITIV
+auf dem Rohtext gematcht, die ausgeschriebenen Formen (Updatecall, Follow-up,
+Report) case-insensitiv. Grund: Task-Namen tragen regelmaessig Personen- und
+Firmennamen, und die stehen in Titlecase. \verb{\\bFU\\b} trifft "VC FU", aber nicht
+"VC mit Frau Fu"; \verb{\\bER\\b} trifft nicht das Pronomen \code{er}. Dieselbe Schranke
+zieht \code{\link[=classify_meeting_status]{classify_meeting_status()}} fuer \code{NE} und \code{AB}. Der Preis ist bewusst:
+ein klein geschriebenes "vc fu" landet auf \code{unbekannt} statt auf einer
+Fehlklassifikation.
 
 Belegte Bedeutungen, weil Langform und Abkuerzung im Bestand in denselben
 Task-Namen vorkommen: \code{uc} = Updatecall, \code{fu} = Follow-up, \code{rep} =
