@@ -26,7 +26,7 @@ crm_status_flags <- function(status) {
 #'   event_date, event_start, contact_id (Rep), is_no_show, excluded,
 #'   is_short_lived_event, is_responsible, original_created_at, event_id.
 #' @param crm_meetings data.frame mit crm_task_id, lead_id, event_date,
-#'   precise_time, contact_id (Rep), meeting_tool, meeting_status,
+#'   precise_time, contact_id (Rep), meeting_tool, meeting_type, meeting_status,
 #'   is_external_tool, original_created_at.
 #' @return data.frame im Schema von processed.sales_meetings_unified (+ intern
 #'   genutzte, nicht geschriebene Spalten werden vom Caller entfernt).
@@ -44,6 +44,7 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
     no_show_source       = "msgraph",
     meeting_status       = NA_character_,
     meeting_tool         = NA_character_,
+    meeting_type         = NA_character_,
     is_external_tool     = NA,
     excluded             = msgraph_meetings$excluded,
     is_short_lived_event = msgraph_meetings$is_short_lived_event,
@@ -65,7 +66,7 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
       meeting_key = paste0("crm_", cm$crm_task_id), source = "crm_task",
       event_date = cm$event_date, contact_id = as.character(cm$contact_id), lead_id = cm_lead,
       is_no_show = fl$is_no_show, no_show_source = "crm_only",
-      meeting_status = cm$meeting_status, meeting_tool = cm$meeting_tool,
+      meeting_status = cm$meeting_status, meeting_tool = cm$meeting_tool, meeting_type = cm$meeting_type,
       is_external_tool = cm$is_external_tool, excluded = fl$excluded,
       is_short_lived_event = FALSE, is_responsible = TRUE,
       original_created_at = cm$original_created_at, event_id = NA_character_,
@@ -100,6 +101,7 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
     if (cm$meeting_status == "storniert") base$excluded[j] <- TRUE
     base$no_show_source[j] <- "crm_override"
     base$meeting_tool[j]   <- cm$meeting_tool
+    base$meeting_type[j]   <- cm$meeting_type
     base$meeting_status[j] <- cm$meeting_status
   }
 
@@ -191,6 +193,7 @@ update_sales_meetings_unified <- function(con) {
   vc <- tasks[is_vc_task(tasks$task_name), , drop = FALSE]
   vc$meeting_tool     <- extract_meeting_tool(vc$task_name)
   vc$is_external_tool <- is_external_tool(vc$meeting_tool)
+  vc$meeting_type     <- extract_meeting_type(vc$task_name)
   # staerkster Status je Task (Surrogat-id-Join, wie in Phase 2)
   rank <- c(storniert = 3L, no_show = 2L, show_up = 1L, unbekannt = 0L)
   comments$status <- classify_meeting_status(comments$comment_name)
@@ -210,6 +213,7 @@ update_sales_meetings_unified <- function(con) {
   crm_meetings <- data.frame(
     crm_task_id = vc$crm_task_id, lead_id = vc$lead_id, event_date = vc$event_date,
     precise_time = vc$precise_time, contact_id = vc$contact_id, meeting_tool = vc$meeting_tool,
+    meeting_type = vc$meeting_type,
     meeting_status = vc$meeting_status, is_external_tool = vc$is_external_tool,
     original_created_at = vc$task_created_at, stringsAsFactors = FALSE)
 

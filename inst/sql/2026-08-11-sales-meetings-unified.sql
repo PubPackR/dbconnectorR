@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS processed.sales_meetings_unified (
     no_show_source       text,
     meeting_status       text,
     meeting_tool         text,
+    meeting_type         text,
     is_external_tool     boolean,
     excluded             boolean     NOT NULL DEFAULT false,
     is_short_lived_event boolean     NOT NULL DEFAULT false,
@@ -43,6 +44,7 @@ COMMENT ON COLUMN processed.sales_meetings_unified.is_no_show IS 'Final no-show 
 COMMENT ON COLUMN processed.sales_meetings_unified.no_show_source IS 'Provenance of the final no-show value: ''msgraph'', ''crm_override'', or ''crm_only''.';
 COMMENT ON COLUMN processed.sales_meetings_unified.meeting_status IS 'CRM-comment-derived status (no_show/show_up/storniert/unbekannt), where available.';
 COMMENT ON COLUMN processed.sales_meetings_unified.meeting_tool IS 'Video-call tool parsed from the CRM task name (webex/zoom/teams/...), where known.';
+COMMENT ON COLUMN processed.sales_meetings_unified.meeting_type IS 'Termin-Typ aus dem CRM-Task-Namen (nv/uc/fu/rep/er/zr/planung/unbekannt). Die Abkuerzung des Vertriebs bleibt der Token; belegt sind uc = Updatecall, fu = Follow-up, rep = Reporting, unbestaetigt sind nv, er, zr.';
 COMMENT ON COLUMN processed.sales_meetings_unified.is_external_tool IS 'TRUE if the tool is an external (MSGraph-invisible) VC tool.';
 COMMENT ON COLUMN processed.sales_meetings_unified.excluded IS 'Excluded from the no-show analysis (cancelled / unknown-outcome CRM meetings, or MSGraph exclusions).';
 COMMENT ON COLUMN processed.sales_meetings_unified.is_short_lived_event IS 'MSGraph flag: event cancelled less than 24h after creation.';

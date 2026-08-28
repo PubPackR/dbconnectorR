@@ -33,6 +33,43 @@ extract_meeting_tool <- function(task_name) {
   )
 }
 
+#' Extrahiert den Termin-Typ aus dem CRM-Task-Namen
+#'
+#' Der Task-Name nennt fast nie das Tool, aber fast immer den Termin-Typ
+#' (`VC NV`, `VC UC`, `VC: Updatecall`, `VC FU`, ...). Diese Funktion
+#' kanonisiert ihn.
+#'
+#' Zweistellige Abkuerzungen werden CASE-SENSITIV auf dem Rohtext gematcht, wo
+#' die Kleinschreibung ein deutsches Wort ergaebe (`ER` gegen das Pronomen
+#' `er`). Das ist dieselbe Schranke wie bei `NE`/`AB` in
+#' [classify_meeting_status()].
+#'
+#' Belegte Bedeutungen, weil Langform und Abkuerzung im Bestand in denselben
+#' Task-Namen vorkommen: `uc` = Updatecall, `fu` = Follow-up, `rep` =
+#' Reporting. NICHT belegt und in T1 mit dem Vertrieb zu bestaetigen: `nv`,
+#' `er`, `zr`. Darum bleiben die Tokens die Abkuerzung selbst, eine
+#' ausgeschriebene Bedeutung waere geraten.
+#'
+#' Nennt ein Name zwei Typen (`VC NV/UC`), gewinnt `nv`.
+#'
+#' @param task_name Character(-Vektor) mit dem CRM-Task-Namen.
+#' @return Character(-Vektor): nv/uc/fu/rep/er/zr/planung/unbekannt.
+#' @export
+extract_meeting_type <- function(task_name) {
+  raw <- ifelse(is.na(task_name), "", task_name)
+  x   <- tolower(raw)
+  dplyr::case_when(
+    stringr::str_detect(x, "\\bnv\\b")                                          ~ "nv",
+    stringr::str_detect(x, "updatecall|update[ -]?call|\\buc\\b|\\bupdates?\\b") ~ "uc",
+    stringr::str_detect(x, "follow[ -]?up|\\bfup?\\b")                          ~ "fu",
+    stringr::str_detect(x, "report|\\brep\\b")                                  ~ "rep",
+    stringr::str_detect(raw, "\\bER\\b")                                        ~ "er",
+    stringr::str_detect(x, "\\bzr\\b")                                          ~ "zr",
+    stringr::str_detect(x, "kampagnenplanung|planungstermin")                   ~ "planung",
+    TRUE                                                                        ~ "unbekannt"
+  )
+}
+
 #' Ist das Tool ein externes (nicht-Teams) VC-Tool?
 #'
 #' @param tool Character(-Vektor) aus [extract_meeting_tool()].

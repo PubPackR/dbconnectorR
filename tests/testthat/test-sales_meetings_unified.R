@@ -11,10 +11,11 @@ mk_msgraph <- function() data.frame(
   stringsAsFactors = FALSE
 )
 mk_crm <- function(rows) do.call(rbind, rows)
-crm_row <- function(id, lead, date, tool, status, ext, rep = 500L, ptime = NA_character_) data.frame(
+crm_row <- function(id, lead, date, tool, status, ext, rep = 500L, ptime = NA_character_,
+                    type = "unbekannt") data.frame(
   crm_task_id=id, lead_id=lead, event_date=as.Date(date),
   precise_time=as.POSIXct(ptime, tz="UTC"), contact_id=rep,
-  meeting_tool=tool, meeting_status=status, is_external_tool=ext,
+  meeting_tool=tool, meeting_type=type, meeting_status=status, is_external_tool=ext,
   original_created_at=as.POSIXct("2026-06-15", tz="UTC"), stringsAsFactors=FALSE)
 
 test_that("nicht-extern eindeutiger Match: CRM-No-Show ueberschreibt MSGraph", {
@@ -128,4 +129,24 @@ test_that("Platzhalter-Guard: CRM-Zeile mit lead_id=NA matcht keine NA-lead-MSGr
 
   ms_r <- res[res$meeting_key == "msgraph_13_NA", ]
   expect_equal(ms_r$no_show_source, "msgraph")  # Platzhalter nicht ueberschrieben
+})
+
+test_that("meeting_type wandert auf die netto-neue CRM-Zeile", {
+  res <- assemble_unified_meetings(mk_msgraph(),
+           mk_crm(list(crm_row(40, 99L, "2026-07-09", "webex", "show_up", TRUE, type = "nv"))))
+  expect_equal(res[res$meeting_key == "crm_40", ]$meeting_type, "nv")
+})
+
+test_that("meeting_type wird beim Override auf die MSGraph-Zeile geschrieben", {
+  res <- assemble_unified_meetings(mk_msgraph(),
+           mk_crm(list(crm_row(41, 10L, "2026-07-01", "teams", "no_show", FALSE, type = "uc"))))
+  r <- res[res$meeting_key == "msgraph_10_10", ]
+  expect_equal(r$meeting_type, "uc")
+  expect_equal(r$no_show_source, "crm_override")
+})
+
+test_that("MSGraph-Zeilen ohne CRM-Pendant behalten meeting_type NA", {
+  leer <- crm_row(0, 1L, "2026-07-01", "teams", "unbekannt", FALSE)[0, ]
+  res  <- assemble_unified_meetings(mk_msgraph(), leer)
+  expect_true(all(is.na(res$meeting_type)))
 })

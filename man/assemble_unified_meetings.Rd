@@ -7,13 +7,27 @@
 assemble_unified_meetings(msgraph_meetings, crm_meetings)
 }
 \arguments{
-\item{msgraph_meetings}{data.frame (siehe Plan/Interfaces).}
+\item{msgraph_meetings}{data.frame mit call_event_mapping_id, lead_id,
+event_date, event_start, contact_id (Rep), is_no_show, excluded,
+is_short_lived_event, is_responsible, original_created_at, event_id.}
 
-\item{crm_meetings}{data.frame (siehe Plan/Interfaces).}
+\item{crm_meetings}{data.frame mit crm_task_id, lead_id, event_date,
+precise_time, contact_id (Rep), meeting_tool, meeting_type, meeting_status,
+is_external_tool, original_created_at.}
 }
 \value{
-data.frame im Schema von processed.sales_meetings_unified.
+data.frame im Schema von processed.sales_meetings_unified (+ intern
+genutzte, nicht geschriebene Spalten werden vom Caller entfernt).
 }
 \description{
-Baut die vereinheitlichte Meeting-Menge (rein, kein DB-Zugriff)
+Grain: eine Zeile pro (Meeting x externer Lead). \code{msgraph_meetings} ist bereits
+per-Lead expandiert (eine Zeile je (call_event_mapping_id, lead_id); \code{lead_id}
+= NA = externer Teilnehmer ohne gemappten Lead -> Platzhalter). CRM-VC-Termine
+werden auf (lead_id x event_date) gematcht; bei Mehrdeutigkeit ueber gleichen
+Rep-Kontakt + naechste \code{event_start} disambiguiert, echte Rest-Mehrdeutigkeit
+(gleicher Rep, gleicher Zeitpunkt) wird verworfen.
+}
+\details{
+\code{lead_id} und \code{contact_id} werden im CHARACTER-Raum gehalten (rbind-sicher
+gegen die integer64-Falle); der Caller castet vor dem Upsert auf bigint.
 }
