@@ -19,6 +19,14 @@ crm_status_flags <- function(status) {
 #' Rep-Kontakt + naechste `event_start` disambiguiert, echte Rest-Mehrdeutigkeit
 #' (gleicher Rep, gleicher Zeitpunkt) wird verworfen.
 #'
+#' Findet der Match keinen Kandidaten, greift der **Platzhalter-Fallback**: eine
+#' MSGraph-Zeile mit `lead_id = NA` (externer Teilnehmer ohne gemappten Lead)
+#' desselben Reps am selben Tag ist mit hoher Wahrscheinlichkeit derselbe Termin.
+#' Ohne ihn zaehlt der CRM-Task ein zweites Mal (Juni 2026: 76 von 178
+#' netto-neuen CRM-Terminen). Mehrere Platzhalter werden ueber `precise_time`
+#' aufgeloest; bleibt es mehrdeutig, wird die CRM-Zeile netto-neu geschrieben und
+#' nicht verworfen.
+#'
 #' `lead_id` und `contact_id` werden im CHARACTER-Raum gehalten (rbind-sicher
 #' gegen die integer64-Falle); der Caller castet vor dem Upsert auf bigint.
 #'
@@ -76,10 +84,30 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
     if (isTRUE(cm$is_external_tool)) { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
     if (is.na(cm$lead_id))          { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
 
-    # Kandidaten gleicher (lead_id, event_date). Platzhalter (lead_id NA) matchen nie.
+    # Kandidaten gleicher (lead_id, event_date).
     cand <- which(!is.na(base$lead_id) & base$lead_id == cm_lead &
                     base$event_date == cm$event_date)
-    if (length(cand) == 0) { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
+    if (length(cand) == 0) {
+      # Platzhalter-Fallback. Ein MSGraph-Meeting, dessen externer Teilnehmer
+      # keinem Lead zugeordnet ist, traegt lead_id = NA und kann per (Lead x Tag)
+      # nie gefunden werden. Der CRM-Task desselben Reps am selben Tag ist dann
+      # mit hoher Wahrscheinlichkeit derselbe Termin, und ohne diesen Zweig
+      # zaehlt er ein zweites Mal. Gemessen im Juni 2026: 76 von 178 netto-neuen
+      # CRM-Terminen, rund 5 Prozent zu hohe VC-Zahl.
+      # Bewusst NICHT "gleicher Rep, gleicher Tag" ohne die Platzhalter-Bedingung:
+      # das wuerde zwei erkennbar verschiedene Meetings verschmelzen, sobald ein
+      # Rep an einem Tag mehrere Termine hat.
+      ph <- which(is.na(base$lead_id) & base$event_date == cm$event_date &
+                    base_rep == as.character(cm$contact_id))
+      if (length(ph) == 1) {
+        cand <- ph
+      } else if (length(ph) > 1 && !is.na(cm$precise_time)) {
+        d <- abs(as.numeric(base_start[ph]) - as.numeric(cm$precise_time))
+        if (sum(d == min(d, na.rm = TRUE), na.rm = TRUE) == 1) {
+          cand <- ph[which.min(d)]
+        } else { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
+      } else { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
+    }
     if (length(cand) > 1) {
       # Tiebreak 1: gleicher Rep-Kontakt.
       same_rep <- cand[base_rep[cand] == as.character(cm$contact_id)]
