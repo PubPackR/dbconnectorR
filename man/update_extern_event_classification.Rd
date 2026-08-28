@@ -7,7 +7,9 @@
 update_extern_event_classification(
   con,
   min_date = Sys.Date() - 90,
-  use_date_filter = FALSE
+  use_date_filter = FALSE,
+  tenant_id = NULL,
+  now_utc = Sys.time()
 )
 }
 \arguments{
@@ -18,6 +20,16 @@ Defaults to 90 days ago. Only used when \code{use_date_filter = TRUE}.}
 
 \item{use_date_filter}{Logical. If TRUE, restrict processing to events with
 \code{event_date >= min_date}. Default FALSE (full table).}
+
+\item{tenant_id}{Character or NULL. GUID of the own Microsoft tenant. Meetings
+whose \code{join_url} does not carry this GUID were created in the previous tenant;
+their attendance data is unreachable app-only, so they are excluded instead of
+counted as no-shows (see \code{compute_observability_exclusions}). Pass
+\code{cfg$tenant_id} from the calling base-app. Defaults to NULL, which skips that
+exclusion and emits a warning -- the pre-cutover behaviour.}
+
+\item{now_utc}{POSIXct. Reference point for "is this meeting still in the
+future". Defaults to the current time. Only injectable for tests.}
 }
 \value{
 No return value. Updates database table \code{processed.msgraph_extern_event_classification}.
