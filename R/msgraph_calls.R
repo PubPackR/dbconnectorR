@@ -39,7 +39,23 @@ msgraph_update_calls <- function(con, access_token, days_back = NULL, user_id = 
   all_records <- retrieve_all_call_records(access_token, startDate)
   organizer_data <- extract_organizer_data(all_records)
   call_records_df <- as.data.frame(t(sapply(all_records, function(x) if(is.null(x)) NA else x)), stringsAsFactors = FALSE)
+  # Die Schwelle von 5 Records schuetzt den Inkrement-Modus vor Leerlaeufen.
+  # Im Fenster-Modus (days_back gesetzt) ist sie dagegen ein stiller Ausfall:
+  # 28 Tage Telefonie mit weniger als fuenf Calls gibt es nicht, das ist immer
+  # ein kaputter Abruf. Dann laut abbrechen statt kommentarlos nichts zu tun.
   new_call_found <- nrow(call_records_df) >= 5
+
+  if (!new_call_found && !is.null(days_back)) {
+    stop(sprintf(paste0(
+      "msgraph_update_calls: nur %d Call Records fuer die letzten %d Tage. ",
+      "Das ist kein plausibles Ergebnis, sondern ein fehlgeschlagener Abruf. ",
+      "Abbruch, statt die fehlenden Calls als No-Shows wirken zu lassen."),
+      nrow(call_records_df), days_back))
+  }
+  if (!new_call_found) {
+    message(sprintf("msgraph_update_calls: nur %d Call Records, unter der Schwelle - nichts geschrieben.",
+                    nrow(call_records_df)))
+  }
 
   if (new_call_found) {
 
@@ -123,7 +139,12 @@ retrieve_all_call_records <- function(access_token, startDate) {
                       httr::add_headers(Authorization = paste("Bearer", resolve_token(access_token))))
 
       if (httr::status_code(response) == 401) {
-        print("Access Token is not valid")
+        # Frueher nur ein print(): der Code lief weiter, parste den Fehler-Body
+        # zu null Records, und die Schwelle unten uebersprang das Schreiben
+        # lautlos. Der Job meldete Erfolg, waehrend nichts ankam - und jedes
+        # Event ohne Call wird downstream als No-Show gezaehlt.
+        stop("retrieve_all_call_records: HTTP 401 von communications/callRecords. ",
+             "Access Token ungueltig oder Application-Permission entzogen.")
       }
 
       if (httr::status_code(response) == 429) {
