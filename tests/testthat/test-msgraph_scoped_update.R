@@ -80,6 +80,64 @@ test_that("calls_attendance: 403 blockt den Organizer, weitere Meetings derselbe
   mockery::expect_called(resolve, 1)   # zweites Meeting derselben oid nicht mehr angefragt
 })
 
+test_that("calls_attendance bricht ab, wenn kein bewertbares Meeting einen Report liefert", {
+  # Der Fall aus August 2026: Meetings vorhanden, Graph liefert nichts. Frueher
+  # ein stilles return(0) - der Job meldete Erfolg und jedes Event wurde
+  # downstream zum No-Show.
+  mockery::stub(msgraph_scoped_update_calls_attendance, "discover_meetings_from_events",
+                function(con, cfg) data.frame(join_url = c("https://teams/a", "https://teams/b"),
+                                              organizer_oid = c("OID1", "OID2")))
+  mockery::stub(msgraph_scoped_update_calls_attendance, "resolve_meeting",
+                function(oid, ju, tok) list(status = 200, id = "MID1"))
+  # Alles meldet 200, es kommt nur nichts zurueck - der heimtueckische Fall:
+  # keine Fehlerquote, trotzdem kein einziger Call.
+  mockery::stub(msgraph_scoped_update_calls_attendance, "attendance_records",
+                function(oid, mid, tok) list(status = 200, meeting_start = NA,
+                                             meeting_end = NA, reports = list()))
+
+  expect_error(
+    msgraph_scoped_update_calls_attendance(con = NULL, app_token = "t",
+                                           cfg = fake_cfg, dry_run = TRUE),
+    "kein einziger Attendance-Report verwertbar"
+  )
+})
+
+test_that("calls_attendance bricht ab, wenn ueber die Haelfte der Meetings an Graph scheitert", {
+  # Vier Meetings, drei scheitern beim Resolve, eines liefert einen Report.
+  resolve <- function(oid, ju, tok) {
+    if (identical(oid, "OK")) list(status = 200, id = "MID1")
+    else list(status = 500, id = NA_character_)
+  }
+  mockery::stub(msgraph_scoped_update_calls_attendance, "discover_meetings_from_events",
+                function(con, cfg) data.frame(
+                  join_url = paste0("https://teams/", 1:4),
+                  organizer_oid = c("OK", "BAD1", "BAD2", "BAD3")))
+  mockery::stub(msgraph_scoped_update_calls_attendance, "resolve_meeting", resolve)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "attendance_records", fake_attendance)
+
+  expect_error(
+    msgraph_scoped_update_calls_attendance(con = NULL, app_token = "t",
+                                           cfg = fake_cfg, dry_run = TRUE),
+    "scheiterten"
+  )
+})
+
+test_that("calls_attendance bricht NICHT ab, wenn nur Policy-403 im Spiel ist", {
+  # 403 ist eine erwartete Abgrenzung. Sie darf die Fehlerquote nicht ausloesen,
+  # sonst kippt der Job bei jedem nicht abgedeckten Organizer.
+  mockery::stub(msgraph_scoped_update_calls_attendance, "discover_meetings_from_events",
+                function(con, cfg) data.frame(join_url = c("https://teams/a", "https://teams/b"),
+                                              organizer_oid = c("OID1", "OID2")))
+  mockery::stub(msgraph_scoped_update_calls_attendance, "resolve_meeting",
+                function(oid, ju, tok) list(status = 403, id = NA_character_))
+
+  expect_equal(
+    msgraph_scoped_update_calls_attendance(con = NULL, app_token = "t",
+                                           cfg = fake_cfg, dry_run = TRUE),
+    0
+  )
+})
+
 # --- Organizer-Aufloesung (try-all) -------------------------------------------
 
 test_that("resolve_transcript_source nimmt den ersten Kandidaten mit 200 + Transkripten", {
