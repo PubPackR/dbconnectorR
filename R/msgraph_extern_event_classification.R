@@ -16,6 +16,14 @@
 #'   Defaults to 90 days ago. Only used when `use_date_filter = TRUE`.
 #' @param use_date_filter Logical. If TRUE, restrict processing to events with
 #'   `event_date >= min_date`. Default FALSE (full table).
+#' @param tenant_id Character or NULL. GUID of the own Microsoft tenant. Meetings
+#'   whose `join_url` does not carry this GUID were created in the previous tenant;
+#'   their attendance data is unreachable app-only, so they are excluded instead of
+#'   counted as no-shows (see `compute_observability_exclusions`). Pass
+#'   `cfg$tenant_id` from the calling base-app. Defaults to NULL, which skips that
+#'   exclusion and emits a warning -- the pre-cutover behaviour.
+#' @param now_utc POSIXct. Reference point for "is this meeting still in the
+#'   future". Defaults to the current time. Only injectable for tests.
 #'
 #' @return No return value. Updates database table `processed.msgraph_extern_event_classification`.
 #'
@@ -35,7 +43,8 @@
 #' @examples
 #' update_extern_event_classification(con)
 #' update_extern_event_classification(con, min_date = as.Date("2025-05-01"))
-update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, use_date_filter = FALSE) {
+update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, use_date_filter = FALSE,
+                                               tenant_id = NULL, now_utc = Sys.time()) {
 
   # === 1. EVENTS LADEN & MAPPING-DEDUP ========================================
 
@@ -77,7 +86,8 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
   # Alle Events aus DB laden mit event_created_at und msgraph_ical_uid
   all_events <- dplyr::tbl(con, I("raw.msgraph_events")) %>%
     dplyr::select(id, msgraph_ical_uid, event_created_at, event_updated_at,
-                  event_start, event_end, is_canceled, is_online_meeting, subject) %>%
+                  event_start, event_end, is_canceled, is_online_meeting, subject,
+                  join_url) %>%
     dplyr::collect()
 
   # Pro msgraph_ical_uid: Minimum event_created_at berechnen
@@ -446,6 +456,23 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
                    dropped_events, " Events komplett entfernt"))
   }
 
+  # Nicht beobachtbare Events: Zukunft und Alt-Tenant. Ohne diese Ausschluesse
+  # zaehlt jedes Meeting, dessen Anwesenheit nie abrufbar ist, als No-Show.
+  if (is.null(tenant_id)) {
+    warning(paste0(
+      "update_extern_event_classification: kein tenant_id uebergeben. ",
+      "Meetings aus dem Alt-Tenant werden weiter als No-Show gezaehlt, ",
+      "obwohl ihre Anwesenheitsdaten app-only unerreichbar sind."
+    ))
+  }
+  observability <- compute_observability_exclusions(events_all, tenant_id = tenant_id,
+                                                    now_utc = now_utc)
+  future_ids     <- observability$event_id[observability$reason == "termin_in_zukunft"]
+  alt_tenant_ids <- observability$event_id[observability$reason == "alt_tenant_join_url"]
+
+  message(paste0("  ", length(future_ids), " Events in der Zukunft, ",
+                 length(alt_tenant_ids), " Events aus dem Alt-Tenant -> excluded"))
+
   # Join mit Events-Classification und Exclusion-Regeln
   result <- events_classified %>%
     dplyr::select(mapping_id = id, event_id, event_class) %>%
@@ -458,12 +485,15 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
     ) %>%
     dplyr::mutate(
       is_no_show = grepl("no_call|intern_call", event_class, ignore.case = TRUE),
-      excluded = event_id %in% c(verschobene_final, internal_meeting_ids, duplikat_ids, rescheduled_final),
+      excluded = event_id %in% c(verschobene_final, internal_meeting_ids, duplikat_ids,
+                                 rescheduled_final, future_ids, alt_tenant_ids),
       exclusion_reason = dplyr::case_when(
         event_id %in% rescheduled_final ~ "rescheduled_without_meeting_id",
         event_id %in% verschobene_final ~ "verschoben",
         event_id %in% internal_meeting_ids ~ "zu_viele_interne",
         event_id %in% duplikat_ids ~ "duplikat_event",
+        event_id %in% future_ids ~ "termin_in_zukunft",
+        event_id %in% alt_tenant_ids ~ "alt_tenant_join_url",
         TRUE ~ NA_character_
       )
     ) %>%
@@ -562,6 +592,78 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
 
   message(paste0("  ", nrow(to_upsert), " Zeilen aktiv nach Upsert"))
   message("Fertig!")
+}
+
+#' Determine Which Events Are Not Observable At All
+#'
+#' `is_no_show` is not a measured state -- it is derived from the *absence* of a
+#' matching call (`no_call` / `intern_call`). Every event whose attendance can
+#' never be observed therefore looks like a no-show. This helper names those
+#' events so they can be excluded from numerator *and* denominator instead.
+#'
+#' Two conditions, both permanent for the event in question:
+#'
+#' - **`termin_in_zukunft`** -- the meeting has not happened yet. There cannot be
+#'   a call record for it, so it is not a no-show. Relevant because the scoped
+#'   ingest pulls calendar events up to a year ahead (`events_days_forward`).
+#' - **`alt_tenant_join_url`** -- the `join_url` does not carry the own tenant's
+#'   GUID, so the meeting was created in the previous tenant. Its attendance
+#'   report is unreachable app-only; `discover_meetings_from_events` filters those
+#'   meetings out by the same rule, which is why no call ever arrives for them.
+#'   Recurring series created before the tenant migration keep their original
+#'   `join_url` indefinitely, so this does not age out on its own.
+#'
+#' Precedence when both apply: `termin_in_zukunft` wins while the meeting is still
+#' ahead, `alt_tenant_join_url` takes over once it has passed. The future reason is
+#' the one that changes, so reporting it first keeps "not due yet" separable from
+#' "never observable".
+#'
+#' Events with a missing `join_url` are never excluded here. They are not online
+#' meetings and were not counted differently before this fix; changing that is a
+#' separate decision.
+#'
+#' @param events Data frame of events with columns `id`, `event_start` and
+#'   `join_url`.
+#' @param tenant_id Character or NULL. GUID of the own tenant, matched literally
+#'   against `join_url` -- the same rule `discover_meetings_from_events` applies.
+#'   NULL skips the tenant check entirely.
+#' @param now_utc POSIXct. Reference point for the future check.
+#'
+#' @return Data frame with one row per excluded event: `event_id` and `reason`
+#'   (`"termin_in_zukunft"` or `"alt_tenant_join_url"`). Zero rows when nothing
+#'   is excluded.
+#'
+#' @details
+#' `event_start` is a `timestamp without time zone` holding UTC. Depending on the
+#' driver it may arrive tagged with the session timezone, which would shift the
+#' comparison by the local offset. `force_tz(..., "UTC")` fixes that case and is a
+#' no-op when the value is already tagged UTC.
+# ---- start ---- #
+compute_observability_exclusions <- function(events, tenant_id = NULL, now_utc = Sys.time()) {
+
+  empty <- data.frame(event_id = events$id[0], reason = character(0),
+                      stringsAsFactors = FALSE)
+
+  if (nrow(events) == 0) {
+    return(empty)
+  }
+
+  event_start_utc <- lubridate::force_tz(events$event_start, "UTC")
+  is_future <- !is.na(event_start_utc) & event_start_utc > now_utc
+
+  if (is.null(tenant_id)) {
+    is_alt_tenant <- rep(FALSE, nrow(events))
+  } else {
+    is_alt_tenant <- !is.na(events$join_url) &
+      !grepl(tenant_id, events$join_url, fixed = TRUE)
+  }
+
+  reason <- ifelse(is_future, "termin_in_zukunft",
+                   ifelse(is_alt_tenant, "alt_tenant_join_url", NA_character_))
+
+  out <- data.frame(event_id = events$id, reason = reason,
+                    stringsAsFactors = FALSE)
+  out[!is.na(out$reason), , drop = FALSE]
 }
 
 #' Identify Genuine No-Shows Among Reschedule-Excluded Events
