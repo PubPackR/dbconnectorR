@@ -635,12 +635,19 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
 #' meetings and were not counted differently before this fix; changing that is a
 #' separate decision.
 #'
-#' **An event with call evidence is never excluded**, whatever its `join_url`
-#' says. The tenant rule describes what *cannot be fetched now*; it must not be
-#' applied retroactively to the pre-migration history, where the tenant-wide
-#' base-35 ingest did deliver calls. Without this carve-out the whole historical
-#' no-show series -- the very baseline the fix is validated against -- would be
-#' excluded.
+#' **Two guards keep the tenant rule from eating the history.**
+#'
+#' - **Call evidence wins.** An event with a matching call was observed, whatever
+#'   its `join_url` says, and is never excluded as `alt_tenant_join_url`. Without
+#'   this the whole pre-migration series would disappear. It deliberately does
+#'   *not* apply to `termin_in_zukunft`: a meeting that has not happened yet is
+#'   no no-show even if some call row points at it -- that is a data
+#'   contradiction, not an observation.
+#' - **The rule has a start date (`alt_tenant_ab`).** Old-tenant meetings only
+#'   became unreachable once base-62 was the sole supplier. Before that base-35
+#'   fetched calls tenant-wide, so a missing call was a genuine no-show, not an
+#'   observability gap. Measured on 2026-08-31, dropping this guard removed 86
+#'   real no-shows from July alone and pushed its rate from 17.2 % to 11.5 %.
 #'
 #' @param events Data frame of events with columns `id`, `event_start` and
 #'   `join_url`.
@@ -649,8 +656,14 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
 #'   NULL skips the tenant check entirely.
 #' @param now_utc POSIXct. Reference point for the future check.
 #' @param event_ids_mit_call Vector of event ids for which a call was found
-#'   (`event_class` without `no_call`). These are observable by definition and
-#'   are never returned as excluded. Defaults to none.
+#'   (`event_class` without `no_call`). These were observed by definition and are
+#'   never returned as `alt_tenant_join_url`. Defaults to none.
+#' @param alt_tenant_ab Date. `alt_tenant_join_url` is only applied to events
+#'   starting on or after this date. Default 2026-08-19 -- the last successful
+#'   run of base-35's `msgraph_update_calls` (per `processed.data_job_events`),
+#'   and therefore the last day on which old-tenant calls could still be
+#'   fetched. Events without an `event_start` are never excluded by the tenant
+#'   rule, because the window cannot be decided for them.
 #' @keywords internal
 #'
 #' @return Data frame with one row per excluded event: `event_id` and `reason`
@@ -664,7 +677,8 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
 #' no-op when the value is already tagged UTC.
 # ---- start ---- #
 compute_observability_exclusions <- function(events, tenant_id = NULL, now_utc = Sys.time(),
-                                             event_ids_mit_call = NULL) {
+                                             event_ids_mit_call = NULL,
+                                             alt_tenant_ab = as.Date("2026-08-19")) {
 
   empty <- data.frame(event_id = events$id[0], reason = character(0),
                       stringsAsFactors = FALSE)
@@ -684,10 +698,21 @@ compute_observability_exclusions <- function(events, tenant_id = NULL, now_utc =
   }
 
   # Ein gefundener Call ist der Beweis, dass das Meeting beobachtbar war. Er
-  # sticht beide Regeln, sonst faellt der komplette Vor-Migrations-Bestand raus.
+  # sticht die Tenant-Regel, sonst faellt der komplette Vor-Migrations-Bestand
+  # raus. Beim Zukunfts-Grund gilt das NICHT: ein Termin, der noch bevorsteht,
+  # ist kein No-Show, auch wenn irgendwo ein Call daranhaengt - das waere ein
+  # Datenwiderspruch und keine Beobachtung.
   hat_call <- events$id %in% (event_ids_mit_call %||% events$id[0])
-  is_future     <- is_future     & !hat_call
-  is_alt_tenant <- is_alt_tenant & !hat_call
+
+  # Die Alt-Tenant-Unerreichbarkeit gilt erst, seit base-62 der einzige
+  # Lieferant ist. Davor hat base-35 tenantweit Calls geholt, ein fehlender Call
+  # war also ein echter No-Show und kein Beobachtungsproblem. Ohne diese Grenze
+  # verschwinden ruecwirkend echte No-Shows: gemessen am 31.08.2026 waren es 86
+  # allein im Juli, die Rate fiel dadurch von 17,2 auf 11,5 Prozent.
+  im_unerreichbaren_fenster <- !is.na(event_start_utc) &
+    as.Date(event_start_utc) >= alt_tenant_ab
+
+  is_alt_tenant <- is_alt_tenant & !hat_call & im_unerreichbaren_fenster
 
   reason <- ifelse(is_future, "termin_in_zukunft",
                    ifelse(is_alt_tenant, "alt_tenant_join_url", NA_character_))

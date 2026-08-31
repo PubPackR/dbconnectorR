@@ -8,7 +8,8 @@ compute_observability_exclusions(
   events,
   tenant_id = NULL,
   now_utc = Sys.time(),
-  event_ids_mit_call = NULL
+  event_ids_mit_call = NULL,
+  alt_tenant_ab = as.Date("2026-08-19")
 )
 }
 \arguments{
@@ -22,8 +23,15 @@ NULL skips the tenant check entirely.}
 \item{now_utc}{POSIXct. Reference point for the future check.}
 
 \item{event_ids_mit_call}{Vector of event ids for which a call was found
-(\code{event_class} without \code{no_call}). These are observable by definition and
-are never returned as excluded. Defaults to none.}
+(\code{event_class} without \code{no_call}). These were observed by definition and are
+never returned as \code{alt_tenant_join_url}. Defaults to none.}
+
+\item{alt_tenant_ab}{Date. \code{alt_tenant_join_url} is only applied to events
+starting on or after this date. Default 2026-08-19 -- the last successful
+run of base-35's \code{msgraph_update_calls} (per \code{processed.data_job_events}),
+and therefore the last day on which old-tenant calls could still be
+fetched. Events without an \code{event_start} are never excluded by the tenant
+rule, because the window cannot be decided for them.}
 }
 \value{
 Data frame with one row per excluded event: \code{event_id} and \code{reason}
@@ -59,12 +67,20 @@ Events with a missing \code{join_url} are never excluded here. They are not onli
 meetings and were not counted differently before this fix; changing that is a
 separate decision.
 
-\strong{An event with call evidence is never excluded}, whatever its \code{join_url}
-says. The tenant rule describes what \emph{cannot be fetched now}; it must not be
-applied retroactively to the pre-migration history, where the tenant-wide
-base-35 ingest did deliver calls. Without this carve-out the whole historical
-no-show series -- the very baseline the fix is validated against -- would be
-excluded.
+\strong{Two guards keep the tenant rule from eating the history.}
+\itemize{
+\item \strong{Call evidence wins.} An event with a matching call was observed, whatever
+its \code{join_url} says, and is never excluded as \code{alt_tenant_join_url}. Without
+this the whole pre-migration series would disappear. It deliberately does
+\emph{not} apply to \code{termin_in_zukunft}: a meeting that has not happened yet is
+no no-show even if some call row points at it -- that is a data
+contradiction, not an observation.
+\item \strong{The rule has a start date (\code{alt_tenant_ab}).} Old-tenant meetings only
+became unreachable once base-62 was the sole supplier. Before that base-35
+fetched calls tenant-wide, so a missing call was a genuine no-show, not an
+observability gap. Measured on 2026-08-31, dropping this guard removed 86
+real no-shows from July alone and pushed its rate from 17.2 \% to 11.5 \%.
+}
 
 \code{event_start} is a \verb{timestamp without time zone} holding UTC. Depending on the
 driver it may arrive tagged with the session timezone, which would shift the
