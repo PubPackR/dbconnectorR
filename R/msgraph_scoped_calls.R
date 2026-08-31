@@ -190,7 +190,13 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
   # jedes betroffene Event wird downstream sonst zum No-Show.
   n_fehler <- n_resolve_fehler + n_attendance_fehler
   n_bewertbar <- n_versucht - n_policy_403   # 403 ist Abgrenzung, kein Fehlschlag
-  if (n_bewertbar > 0 && n_fehler > 0.5 * n_bewertbar) {
+
+  # Mindestmenge, bevor eine Quote ueberhaupt aussagekraeftig ist. Ohne sie
+  # kippt ein einzelner transienter 500 an einem ruhigen Tag - Feiertag, Ferien,
+  # Wochenende - den kompletten Lauf: run_data_job wirft den Fehler weiter und
+  # reisst die uebrigen Jobs in do/main.R mit.
+  MIN_BEWERTBAR_FUER_QUOTE <- 10L
+  if (n_bewertbar >= MIN_BEWERTBAR_FUER_QUOTE && n_fehler > 0.5 * n_bewertbar) {
     stop(sprintf(paste0(
       "msgraph_scoped_update_calls_attendance: %d von %d bewertbaren Meetings scheiterten ",
       "an Graph (%d resolve, %d attendance). Ueber der Haelfte - vermutlich Token oder ",
@@ -198,13 +204,18 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
       n_fehler, n_bewertbar, n_resolve_fehler, n_attendance_fehler))
   }
   if (length(calls) == 0) {
-    if (n_bewertbar > 0) {
+    # Nur abbrechen, wenn tatsaechlich etwas fehlgeschlagen ist. Null Calls bei
+    # null Fehlern ist der Normalfall an einem Tag, an dem die gefundenen
+    # Meetings schlicht niemand besucht hat - das IST der echte No-Show und darf
+    # den Lauf nicht abbrechen.
+    if (n_fehler > 0) {
       stop(sprintf(paste0(
         "msgraph_scoped_update_calls_attendance: %d bewertbare Meetings versucht, kein ",
         "einziger Attendance-Report verwertbar (%d resolve-, %d attendance-Fehler). Abbruch."),
         n_bewertbar, n_resolve_fehler, n_attendance_fehler))
     }
-    message("Keine Calls/Attendance."); return(invisible(0L))
+    message(sprintf("Keine Calls/Attendance (%d bewertbare Meetings, keine Fehler).", n_bewertbar))
+    return(invisible(0L))
   }
   if (n_fehler > 0)
     message(sprintf("  %d von %d bewertbaren Meetings ohne Attendance (%d resolve, %d attendance).",

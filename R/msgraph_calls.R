@@ -45,16 +45,21 @@ msgraph_update_calls <- function(con, access_token, days_back = NULL, user_id = 
   # ein kaputter Abruf. Dann laut abbrechen statt kommentarlos nichts zu tun.
   new_call_found <- nrow(call_records_df) >= 5
 
+  # length(all_records), nicht nrow(call_records_df): bei leerer API-Antwort
+  # ergibt as.data.frame(t(sapply(list(), ...))) einen data.frame mit 1 Zeile und
+  # 0 Spalten, die Meldung wuerde sonst "1 Record" statt "0" nennen.
+  n_records <- length(all_records)
+
   if (!new_call_found && !is.null(days_back)) {
     stop(sprintf(paste0(
       "msgraph_update_calls: nur %d Call Records fuer die letzten %d Tage. ",
       "Das ist kein plausibles Ergebnis, sondern ein fehlgeschlagener Abruf. ",
       "Abbruch, statt die fehlenden Calls als No-Shows wirken zu lassen."),
-      nrow(call_records_df), days_back))
+      n_records, days_back))
   }
   if (!new_call_found) {
     message(sprintf("msgraph_update_calls: nur %d Call Records, unter der Schwelle - nichts geschrieben.",
-                    nrow(call_records_df)))
+                    n_records))
   }
 
   if (new_call_found) {

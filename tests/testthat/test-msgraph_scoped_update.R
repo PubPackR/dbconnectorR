@@ -80,20 +80,13 @@ test_that("calls_attendance: 403 blockt den Organizer, weitere Meetings derselbe
   mockery::expect_called(resolve, 1)   # zweites Meeting derselben oid nicht mehr angefragt
 })
 
-test_that("calls_attendance bricht ab, wenn kein bewertbares Meeting einen Report liefert", {
-  # Der Fall aus August 2026: Meetings vorhanden, Graph liefert nichts. Frueher
-  # ein stilles return(0) - der Job meldete Erfolg und jedes Event wurde
-  # downstream zum No-Show.
+test_that("calls_attendance bricht ab, wenn Fehler auftraten und nichts ankam", {
+  # Der Fall aus August 2026: Meetings vorhanden, Graph liefert nichts.
   mockery::stub(msgraph_scoped_update_calls_attendance, "discover_meetings_from_events",
                 function(con, cfg) data.frame(join_url = c("https://teams/a", "https://teams/b"),
                                               organizer_oid = c("OID1", "OID2")))
   mockery::stub(msgraph_scoped_update_calls_attendance, "resolve_meeting",
-                function(oid, ju, tok) list(status = 200, id = "MID1"))
-  # Alles meldet 200, es kommt nur nichts zurueck - der heimtueckische Fall:
-  # keine Fehlerquote, trotzdem kein einziger Call.
-  mockery::stub(msgraph_scoped_update_calls_attendance, "attendance_records",
-                function(oid, mid, tok) list(status = 200, meeting_start = NA,
-                                             meeting_end = NA, reports = list()))
+                function(oid, ju, tok) list(status = 401, id = NA_character_))
 
   expect_error(
     msgraph_scoped_update_calls_attendance(con = NULL, app_token = "t",
@@ -102,16 +95,36 @@ test_that("calls_attendance bricht ab, wenn kein bewertbares Meeting einen Repor
   )
 })
 
-test_that("calls_attendance bricht ab, wenn ueber die Haelfte der Meetings an Graph scheitert", {
-  # Vier Meetings, drei scheitern beim Resolve, eines liefert einen Report.
+test_that("calls_attendance bricht NICHT ab, wenn niemand teilgenommen hat", {
+  # Alles meldet 200, es kommt nur nichts zurueck, weil zu den gefundenen
+  # Meetings niemand erschienen ist. Das IST der echte No-Show und darf den Lauf
+  # nicht abbrechen - sonst kippt ein ruhiger Tag die ganze Pipeline.
+  mockery::stub(msgraph_scoped_update_calls_attendance, "discover_meetings_from_events",
+                function(con, cfg) data.frame(join_url = "https://teams/a",
+                                              organizer_oid = "OID1"))
+  mockery::stub(msgraph_scoped_update_calls_attendance, "resolve_meeting",
+                function(oid, ju, tok) list(status = 200, id = "MID1"))
+  mockery::stub(msgraph_scoped_update_calls_attendance, "attendance_records",
+                function(oid, mid, tok) list(status = 200, meeting_start = NA,
+                                             meeting_end = NA, reports = list()))
+
+  expect_equal(
+    msgraph_scoped_update_calls_attendance(con = NULL, app_token = "t",
+                                           cfg = fake_cfg, dry_run = TRUE),
+    0
+  )
+})
+
+test_that("calls_attendance bricht ab, wenn ueber die Haelfte von genug Meetings scheitert", {
+  # Zwoelf Meetings ueber der Mindestmenge, elf scheitern beim Resolve.
   resolve <- function(oid, ju, tok) {
     if (identical(oid, "OK")) list(status = 200, id = "MID1")
     else list(status = 500, id = NA_character_)
   }
   mockery::stub(msgraph_scoped_update_calls_attendance, "discover_meetings_from_events",
                 function(con, cfg) data.frame(
-                  join_url = paste0("https://teams/", 1:4),
-                  organizer_oid = c("OK", "BAD1", "BAD2", "BAD3")))
+                  join_url = paste0("https://teams/", 1:12),
+                  organizer_oid = c("OK", paste0("BAD", 1:11))))
   mockery::stub(msgraph_scoped_update_calls_attendance, "resolve_meeting", resolve)
   mockery::stub(msgraph_scoped_update_calls_attendance, "attendance_records", fake_attendance)
 
@@ -119,6 +132,26 @@ test_that("calls_attendance bricht ab, wenn ueber die Haelfte der Meetings an Gr
     msgraph_scoped_update_calls_attendance(con = NULL, app_token = "t",
                                            cfg = fake_cfg, dry_run = TRUE),
     "scheiterten"
+  )
+})
+
+test_that("calls_attendance bricht NICHT ab, wenn zu wenige Meetings fuer eine Quote da sind", {
+  # Zwei Meetings, eines scheitert. 50 Prozent, aber unter der Mindestmenge -
+  # ein transienter Fehler an einem ruhigen Tag darf den Lauf nicht kippen.
+  resolve <- function(oid, ju, tok) {
+    if (identical(oid, "OK")) list(status = 200, id = "MID1")
+    else list(status = 500, id = NA_character_)
+  }
+  mockery::stub(msgraph_scoped_update_calls_attendance, "discover_meetings_from_events",
+                function(con, cfg) data.frame(join_url = c("https://teams/1", "https://teams/2"),
+                                              organizer_oid = c("OK", "BAD")))
+  mockery::stub(msgraph_scoped_update_calls_attendance, "resolve_meeting", resolve)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "attendance_records", fake_attendance)
+
+  expect_equal(
+    msgraph_scoped_update_calls_attendance(con = NULL, app_token = "t",
+                                           cfg = fake_cfg, dry_run = TRUE),
+    1
   )
 })
 
