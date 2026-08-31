@@ -73,12 +73,49 @@ test_that("ein gefundener Call schuetzt das Event vor dem Alt-Tenant-Ausschluss"
   expect_false(2L %in% res$event_id)
 })
 
-test_that("ein gefundener Call schuetzt auch vor dem Zukunfts-Ausschluss", {
-  # 3 und 4 sind Zukunftstermine, tragen hier aber Call-Nachweis. Uebrig bleibt
-  # nur 2 (vergangen, Alt-Tenant, ohne Call).
+test_that("ein Call schuetzt NICHT vor dem Zukunfts-Ausschluss", {
+  # Ein Termin, der noch bevorsteht, ist kein No-Show - auch wenn ein Call an
+  # ihm haengt. Das waere ein Datenwiderspruch und keine Beobachtung.
   res <- compute_observability_exclusions(make_events(), TENANT, JETZT,
                                           event_ids_mit_call = c(3L, 4L))
-  expect_equal(res$event_id, 2L)
+  expect_equal(res$reason[res$event_id == 3L], "termin_in_zukunft")
+  expect_equal(res$reason[res$event_id == 4L], "termin_in_zukunft")
+})
+
+test_that("Alt-Tenant vor dem Stichtag ist ein echter No-Show, kein Ausschluss", {
+  # Solange base-35 tenantweit Calls holte, war ein fehlender Call ein echter
+  # No-Show. Ohne diese Grenze verschwanden im Juli 86 davon.
+  vorher <- data.frame(
+    id = 10L,
+    event_start = as.POSIXct("2026-07-15 10:00:00", tz = "UTC"),
+    join_url = join_url_fuer("99999999-0000-0000-0000-000000000000"),
+    stringsAsFactors = FALSE
+  )
+  res <- compute_observability_exclusions(vorher, TENANT, JETZT)
+  expect_equal(nrow(res), 0L)
+})
+
+test_that("Alt-Tenant ab dem Stichtag wird ausgeschlossen", {
+  nachher <- data.frame(
+    id = 11L,
+    event_start = as.POSIXct("2026-08-20 10:00:00", tz = "UTC"),
+    join_url = join_url_fuer("99999999-0000-0000-0000-000000000000"),
+    stringsAsFactors = FALSE
+  )
+  res <- compute_observability_exclusions(nachher, TENANT, JETZT)
+  expect_equal(res$reason, "alt_tenant_join_url")
+})
+
+test_that("der Stichtag ist verschiebbar", {
+  ev <- data.frame(
+    id = 12L,
+    event_start = as.POSIXct("2026-07-15 10:00:00", tz = "UTC"),
+    join_url = join_url_fuer("99999999-0000-0000-0000-000000000000"),
+    stringsAsFactors = FALSE
+  )
+  res <- compute_observability_exclusions(ev, TENANT, JETZT,
+                                          alt_tenant_ab = as.Date("2026-07-01"))
+  expect_equal(res$reason, "alt_tenant_join_url")
 })
 
 test_that("ohne event_ids_mit_call bleibt das Verhalten unveraendert", {
