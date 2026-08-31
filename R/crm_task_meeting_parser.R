@@ -33,6 +33,49 @@ extract_meeting_tool <- function(task_name) {
   )
 }
 
+#' Extrahiert den Termin-Typ aus dem CRM-Task-Namen
+#'
+#' Der Task-Name nennt fast nie das Tool, aber fast immer den Termin-Typ
+#' (`VC NV`, `VC UC`, `VC: Updatecall`, `VC FU`, ...). Diese Funktion
+#' kanonisiert ihn.
+#'
+#' Die Abkuerzungen (`NV`, `UC`, `FU`, `FUP`, `ER`, `ZR`) werden CASE-SENSITIV
+#' auf dem Rohtext gematcht, die ausgeschriebenen Formen (Updatecall, Follow-up,
+#' Report) case-insensitiv. Grund: Task-Namen tragen regelmaessig Personen- und
+#' Firmennamen, und die stehen in Titlecase. `\bFU\b` trifft "VC FU", aber nicht
+#' "VC mit Frau Fu"; `\bER\b` trifft nicht das Pronomen `er`. Dieselbe Schranke
+#' zieht [classify_meeting_status()] fuer `NE` und `AB`. Der Preis ist bewusst:
+#' ein klein geschriebenes "vc fu" landet auf `unbekannt` statt auf einer
+#' Fehlklassifikation.
+#'
+#' Belegte Bedeutungen, weil Langform und Abkuerzung im Bestand in denselben
+#' Task-Namen vorkommen: `uc` = Updatecall, `fu` = Follow-up, `rep` =
+#' Reporting. NICHT belegt und in T1 mit dem Vertrieb zu bestaetigen: `nv`,
+#' `er`, `zr`. Darum bleiben die Tokens die Abkuerzung selbst, eine
+#' ausgeschriebene Bedeutung waere geraten.
+#'
+#' Nennt ein Name zwei Typen (`VC NV/UC`), gewinnt `nv`.
+#'
+#' @param task_name Character(-Vektor) mit dem CRM-Task-Namen.
+#' @return Character(-Vektor): nv/uc/fu/rep/er/zr/planung/unbekannt.
+#' @export
+extract_meeting_type <- function(task_name) {
+  raw <- ifelse(is.na(task_name), "", task_name)
+  x   <- tolower(raw)
+  dplyr::case_when(
+    stringr::str_detect(raw, "\\bNV\\b")                                        ~ "nv",
+    stringr::str_detect(x, "updatecall|update[ -]?call|\\bupdates?\\b") |
+      stringr::str_detect(raw, "\\bUC\\b")                                      ~ "uc",
+    stringr::str_detect(x, "follow[ -]?up") |
+      stringr::str_detect(raw, "\\bFUP?\\b")                                    ~ "fu",
+    stringr::str_detect(x, "report|\\brep\\b")                                  ~ "rep",
+    stringr::str_detect(raw, "\\bER\\b")                                        ~ "er",
+    stringr::str_detect(raw, "\\bZR\\b")                                        ~ "zr",
+    stringr::str_detect(x, "kampagnenplanung|planungstermin")                   ~ "planung",
+    TRUE                                                                        ~ "unbekannt"
+  )
+}
+
 #' Ist das Tool ein externes (nicht-Teams) VC-Tool?
 #'
 #' @param tool Character(-Vektor) aus [extract_meeting_tool()].

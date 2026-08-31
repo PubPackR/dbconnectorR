@@ -19,6 +19,14 @@ crm_status_flags <- function(status) {
 #' Rep-Kontakt + naechste `event_start` disambiguiert, echte Rest-Mehrdeutigkeit
 #' (gleicher Rep, gleicher Zeitpunkt) wird verworfen.
 #'
+#' Findet der Match keinen Kandidaten, greift der **Platzhalter-Fallback**: eine
+#' MSGraph-Zeile mit `lead_id = NA` (externer Teilnehmer ohne gemappten Lead)
+#' desselben Reps am selben Tag ist mit hoher Wahrscheinlichkeit derselbe Termin.
+#' Ohne ihn zaehlt der CRM-Task ein zweites Mal (Juni 2026: 76 von 178
+#' netto-neuen CRM-Terminen). Mehrere Platzhalter werden ueber `precise_time`
+#' aufgeloest; bleibt es mehrdeutig, wird die CRM-Zeile netto-neu geschrieben und
+#' nicht verworfen.
+#'
 #' `lead_id` und `contact_id` werden im CHARACTER-Raum gehalten (rbind-sicher
 #' gegen die integer64-Falle); der Caller castet vor dem Upsert auf bigint.
 #'
@@ -26,7 +34,7 @@ crm_status_flags <- function(status) {
 #'   event_date, event_start, contact_id (Rep), is_no_show, excluded,
 #'   is_short_lived_event, is_responsible, original_created_at, event_id.
 #' @param crm_meetings data.frame mit crm_task_id, lead_id, event_date,
-#'   precise_time, contact_id (Rep), meeting_tool, meeting_status,
+#'   precise_time, contact_id (Rep), meeting_tool, meeting_type, meeting_status,
 #'   is_external_tool, original_created_at.
 #' @return data.frame im Schema von processed.sales_meetings_unified (+ intern
 #'   genutzte, nicht geschriebene Spalten werden vom Caller entfernt).
@@ -44,6 +52,7 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
     no_show_source       = "msgraph",
     meeting_status       = NA_character_,
     meeting_tool         = NA_character_,
+    meeting_type         = NA_character_,
     is_external_tool     = NA,
     excluded             = msgraph_meetings$excluded,
     is_short_lived_event = msgraph_meetings$is_short_lived_event,
@@ -55,6 +64,9 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
   # Nur fuer den Tiebreak (nicht im DB-Schema): Rep-Kontakt + event_start je Zeile.
   base_rep   <- as.character(msgraph_meetings$contact_id)
   base_start <- msgraph_meetings$event_start
+  # Buchfuehrung fuer den Platzhalter-Fallback: jede Platzhalter-Zeile darf
+  # hoechstens einen CRM-Termin aufnehmen.
+  ph_used    <- rep(FALSE, nrow(base))
 
   new_rows <- list()
   for (i in seq_len(nrow(crm_meetings))) {
@@ -65,7 +77,7 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
       meeting_key = paste0("crm_", cm$crm_task_id), source = "crm_task",
       event_date = cm$event_date, contact_id = as.character(cm$contact_id), lead_id = cm_lead,
       is_no_show = fl$is_no_show, no_show_source = "crm_only",
-      meeting_status = cm$meeting_status, meeting_tool = cm$meeting_tool,
+      meeting_status = cm$meeting_status, meeting_tool = cm$meeting_tool, meeting_type = cm$meeting_type,
       is_external_tool = cm$is_external_tool, excluded = fl$excluded,
       is_short_lived_event = FALSE, is_responsible = TRUE,
       original_created_at = cm$original_created_at, event_id = NA_character_,
@@ -75,10 +87,37 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
     if (isTRUE(cm$is_external_tool)) { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
     if (is.na(cm$lead_id))          { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
 
-    # Kandidaten gleicher (lead_id, event_date). Platzhalter (lead_id NA) matchen nie.
+    # Kandidaten gleicher (lead_id, event_date).
     cand <- which(!is.na(base$lead_id) & base$lead_id == cm_lead &
                     base$event_date == cm$event_date)
-    if (length(cand) == 0) { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
+    if (length(cand) == 0) {
+      # Platzhalter-Fallback. Ein MSGraph-Meeting, dessen externer Teilnehmer
+      # keinem Lead zugeordnet ist, traegt lead_id = NA und kann per (Lead x Tag)
+      # nie gefunden werden. Der CRM-Task desselben Reps am selben Tag ist dann
+      # mit hoher Wahrscheinlichkeit derselbe Termin, und ohne diesen Zweig
+      # zaehlt er ein zweites Mal. Gemessen im Juni 2026: 76 von 178 netto-neuen
+      # CRM-Terminen, rund 5 Prozent zu hohe VC-Zahl.
+      # Bewusst NICHT "gleicher Rep, gleicher Tag" ohne die Platzhalter-Bedingung:
+      # das wuerde zwei erkennbar verschiedene Meetings verschmelzen, sobald ein
+      # Rep an einem Tag mehrere Termine hat.
+      # `ph_used` schliesst bereits verbrauchte Platzhalter aus. Ohne das wuerden
+      # zwei CRM-Termine desselben Reps am selben Tag denselben Platzhalter
+      # matchen, einander ueberschreiben und beide nicht netto-neu geschrieben:
+      # aus zwei Meetings wuerde eines. Die lead-basierte Zuordnung oben ist
+      # ueber lead_id verschluesselt und deshalb strukturell kollisionsfrei;
+      # dieser Zweig gibt den Schluessel auf und braucht die Buchfuehrung.
+      ph <- which(is.na(base$lead_id) & base$event_date == cm$event_date &
+                    base_rep == as.character(cm$contact_id) & !ph_used)
+      if (length(ph) == 1) {
+        cand <- ph
+      } else if (length(ph) > 1 && !is.na(cm$precise_time)) {
+        d <- abs(as.numeric(base_start[ph]) - as.numeric(cm$precise_time))
+        if (sum(d == min(d, na.rm = TRUE), na.rm = TRUE) == 1) {
+          cand <- ph[which.min(d)]
+        } else { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
+      } else { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
+      ph_used[cand] <- TRUE
+    }
     if (length(cand) > 1) {
       # Tiebreak 1: gleicher Rep-Kontakt.
       same_rep <- cand[base_rep[cand] == as.character(cm$contact_id)]
@@ -100,6 +139,7 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
     if (cm$meeting_status == "storniert") base$excluded[j] <- TRUE
     base$no_show_source[j] <- "crm_override"
     base$meeting_tool[j]   <- cm$meeting_tool
+    base$meeting_type[j]   <- cm$meeting_type
     base$meeting_status[j] <- cm$meeting_status
   }
 
@@ -191,6 +231,7 @@ update_sales_meetings_unified <- function(con) {
   vc <- tasks[is_vc_task(tasks$task_name), , drop = FALSE]
   vc$meeting_tool     <- extract_meeting_tool(vc$task_name)
   vc$is_external_tool <- is_external_tool(vc$meeting_tool)
+  vc$meeting_type     <- extract_meeting_type(vc$task_name)
   # staerkster Status je Task (Surrogat-id-Join, wie in Phase 2)
   rank <- c(storniert = 3L, no_show = 2L, show_up = 1L, unbekannt = 0L)
   comments$status <- classify_meeting_status(comments$comment_name)
@@ -210,6 +251,7 @@ update_sales_meetings_unified <- function(con) {
   crm_meetings <- data.frame(
     crm_task_id = vc$crm_task_id, lead_id = vc$lead_id, event_date = vc$event_date,
     precise_time = vc$precise_time, contact_id = vc$contact_id, meeting_tool = vc$meeting_tool,
+    meeting_type = vc$meeting_type,
     meeting_status = vc$meeting_status, is_external_tool = vc$is_external_tool,
     original_created_at = vc$task_created_at, stringsAsFactors = FALSE)
 

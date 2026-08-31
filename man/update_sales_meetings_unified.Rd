@@ -13,7 +13,8 @@ update_sales_meetings_unified(con)
 invisible(Anzahl geschriebener Zeilen).
 }
 \description{
-Laeuft nach update_crm_task_meeting_classification. MSGraph-Meetings +
-frisch aus Rohdaten abgeleitete CRM-VC-Termine (ohne Anti-Join) werden via
-assemble_unified_meetings() vereinheitlicht und komplett neu geschrieben.
+Laeuft nach update_crm_task_meeting_classification. MSGraph-Meetings (extern-only
+Lead-Ableitung, per (Meeting x Lead) expandiert) + frisch aus Rohdaten
+abgeleitete CRM-VC-Termine werden via assemble_unified_meetings() vereinheitlicht
+und komplett neu geschrieben.
 }

@@ -81,3 +81,47 @@ test_that("filter_new_crm_meetings behaelt externe Tools immer und Teams nur ohn
   # keine Hilfsspalte durchgereicht
   expect_false(".in_msgraph" %in% names(res))
 })
+
+test_that("extract_meeting_type kanonisiert die im Bestand haeufigen Termin-Typen", {
+  expect_equal(extract_meeting_type("VC NV"), "nv")
+  expect_equal(extract_meeting_type("NV VC "), "nv")
+  expect_equal(extract_meeting_type("VC UC"), "uc")
+  expect_equal(extract_meeting_type("VC: Updatecall "), "uc")
+  expect_equal(extract_meeting_type("VC Update-Call"), "uc")
+  expect_equal(extract_meeting_type("VC Updates "), "uc")
+  expect_equal(extract_meeting_type("VC FU"), "fu")
+  expect_equal(extract_meeting_type("VC: FUP"), "fu")
+  expect_equal(extract_meeting_type("VC Follow Up "), "fu")
+  expect_equal(extract_meeting_type("VC: Reporting"), "rep")
+  expect_equal(extract_meeting_type("VC REP "), "rep")
+  expect_equal(extract_meeting_type("VC ZR"), "zr")
+  expect_equal(extract_meeting_type("VC Planungstermin"), "planung")
+  expect_equal(extract_meeting_type("VC Kampagnenplanung "), "planung")
+})
+
+test_that("extract_meeting_type: nv gewinnt bei doppelt genanntem Typ", {
+  expect_equal(extract_meeting_type("VC NV/UC"), "nv")
+})
+
+test_that("extract_meeting_type matcht ER case-sensitiv, damit das Pronomen 'er' nicht trifft", {
+  expect_equal(extract_meeting_type("VC ER"), "er")
+  expect_equal(extract_meeting_type("er machen"), "unbekannt")
+  expect_equal(extract_meeting_type("Kunde will, dass er sich meldet"), "unbekannt")
+})
+
+test_that("extract_meeting_type liefert unbekannt statt einer Fehlklassifikation", {
+  expect_equal(extract_meeting_type("VC: Albatros "), "unbekannt")
+  expect_equal(extract_meeting_type("VC"), "unbekannt")
+  expect_equal(extract_meeting_type(NA_character_), "unbekannt")
+})
+
+test_that("extract_meeting_type matcht Abkuerzungen nur in Grossbuchstaben", {
+  # Task-Namen tragen Lead-Namen in Titlecase - die duerfen nicht als Typ gelten.
+  expect_equal(extract_meeting_type("VC mit Frau Fu"), "unbekannt")
+  expect_equal(extract_meeting_type("VC Heineken Nv"), "unbekannt")
+  # Der bewusste Preis: klein geschriebene Abkuerzung wird nicht erkannt.
+  expect_equal(extract_meeting_type("vc fu"), "unbekannt")
+  # Ausgeschriebene Formen bleiben case-insensitiv.
+  expect_equal(extract_meeting_type("vc follow up"), "fu")
+  expect_equal(extract_meeting_type("vc updatecall"), "uc")
+})

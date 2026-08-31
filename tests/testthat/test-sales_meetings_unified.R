@@ -11,10 +11,11 @@ mk_msgraph <- function() data.frame(
   stringsAsFactors = FALSE
 )
 mk_crm <- function(rows) do.call(rbind, rows)
-crm_row <- function(id, lead, date, tool, status, ext, rep = 500L, ptime = NA_character_) data.frame(
+crm_row <- function(id, lead, date, tool, status, ext, rep = 500L, ptime = NA_character_,
+                    type = "unbekannt") data.frame(
   crm_task_id=id, lead_id=lead, event_date=as.Date(date),
   precise_time=as.POSIXct(ptime, tz="UTC"), contact_id=rep,
-  meeting_tool=tool, meeting_status=status, is_external_tool=ext,
+  meeting_tool=tool, meeting_type=type, meeting_status=status, is_external_tool=ext,
   original_created_at=as.POSIXct("2026-06-15", tz="UTC"), stringsAsFactors=FALSE)
 
 test_that("nicht-extern eindeutiger Match: CRM-No-Show ueberschreibt MSGraph", {
@@ -128,4 +129,82 @@ test_that("Platzhalter-Guard: CRM-Zeile mit lead_id=NA matcht keine NA-lead-MSGr
 
   ms_r <- res[res$meeting_key == "msgraph_13_NA", ]
   expect_equal(ms_r$no_show_source, "msgraph")  # Platzhalter nicht ueberschrieben
+})
+
+test_that("meeting_type wandert auf die netto-neue CRM-Zeile", {
+  res <- assemble_unified_meetings(mk_msgraph(),
+           mk_crm(list(crm_row(40, 99L, "2026-07-09", "webex", "show_up", TRUE, type = "nv"))))
+  expect_equal(res[res$meeting_key == "crm_40", ]$meeting_type, "nv")
+})
+
+test_that("meeting_type wird beim Override auf die MSGraph-Zeile geschrieben", {
+  res <- assemble_unified_meetings(mk_msgraph(),
+           mk_crm(list(crm_row(41, 10L, "2026-07-01", "teams", "no_show", FALSE, type = "uc"))))
+  r <- res[res$meeting_key == "msgraph_10_10", ]
+  expect_equal(r$meeting_type, "uc")
+  expect_equal(r$no_show_source, "crm_override")
+})
+
+test_that("MSGraph-Zeilen ohne CRM-Pendant behalten meeting_type NA", {
+  leer <- crm_row(0, 1L, "2026-07-01", "teams", "unbekannt", FALSE)[0, ]
+  res  <- assemble_unified_meetings(mk_msgraph(), leer)
+  expect_true(all(is.na(res$meeting_type)))
+})
+
+# --- Platzhalter-Fallback: MSGraph-Meeting ohne gemappten Lead ------------------
+ms_platzhalter <- function(rep = 500L, start = "2026-08-10 09:00") {
+  ms <- mk_msgraph()
+  rbind(ms, transform(ms[1, ], call_event_mapping_id = 50L, event_id = "e50",
+                      lead_id = NA_integer_, contact_id = rep,
+                      event_date = as.Date("2026-08-10"),
+                      event_start = as.POSIXct(start, tz = "UTC")))
+}
+
+test_that("eindeutige Platzhalter-Zeile desselben Reps wird gematcht statt verdoppelt", {
+  res <- assemble_unified_meetings(ms_platzhalter(),
+           mk_crm(list(crm_row(60, 42L, "2026-08-10", "teams", "no_show", FALSE, rep = 500L))))
+  expect_false(any(res$meeting_key == "crm_60"))                       # keine zweite Zeile
+  r <- res[res$meeting_key == "msgraph_50_NA", ]
+  expect_true(r$is_no_show)
+  expect_equal(r$no_show_source, "crm_override")
+})
+
+test_that("Platzhalter eines anderen Reps wird nicht gematcht", {
+  res <- assemble_unified_meetings(ms_platzhalter(rep = 600L),
+           mk_crm(list(crm_row(61, 42L, "2026-08-10", "teams", "no_show", FALSE, rep = 500L))))
+  expect_equal(res[res$meeting_key == "crm_61", ]$source, "crm_task")   # netto-neu
+  expect_equal(res[res$meeting_key == "msgraph_50_NA", ]$no_show_source, "msgraph")
+})
+
+test_that("mehrere Platzhalter: naechste event_start zur precise_time gewinnt", {
+  ms <- ms_platzhalter(start = "2026-08-10 09:00")
+  ms <- rbind(ms, transform(ms[nrow(ms), ], call_event_mapping_id = 51L, event_id = "e51",
+                            event_start = as.POSIXct("2026-08-10 15:00", tz = "UTC")))
+  res <- assemble_unified_meetings(ms,
+           mk_crm(list(crm_row(62, 42L, "2026-08-10", "teams", "no_show", FALSE,
+                               rep = 500L, ptime = "2026-08-10 14:30"))))
+  expect_equal(res[res$meeting_key == "msgraph_51_NA", ]$no_show_source, "crm_override")
+  expect_equal(res[res$meeting_key == "msgraph_50_NA", ]$no_show_source, "msgraph")
+  expect_false(any(res$meeting_key == "crm_62"))
+})
+
+test_that("mehrere Platzhalter ohne precise_time: CRM-Zeile bleibt netto-neu statt zu verschwinden", {
+  ms <- ms_platzhalter()
+  ms <- rbind(ms, transform(ms[nrow(ms), ], call_event_mapping_id = 51L, event_id = "e51"))
+  res <- assemble_unified_meetings(ms,
+           mk_crm(list(crm_row(63, 42L, "2026-08-10", "teams", "no_show", FALSE, rep = 500L))))
+  expect_equal(res[res$meeting_key == "crm_63", ]$source, "crm_task")
+})
+
+test_that("ein Platzhalter nimmt hoechstens einen CRM-Termin auf", {
+  # Zwei CRM-Termine desselben Reps am selben Tag, verschiedene Leads, aber nur
+  # eine Platzhalter-Zeile. Ohne Buchfuehrung ueberschreiben sie einander und
+  # keiner wird netto-neu -> aus zwei Meetings wird eines.
+  res <- assemble_unified_meetings(ms_platzhalter(),
+           mk_crm(list(
+             crm_row(70, 42L, "2026-08-10", "teams", "no_show", FALSE, rep = 500L),
+             crm_row(71, 43L, "2026-08-10", "teams", "no_show", FALSE, rep = 500L))))
+  expect_equal(res[res$meeting_key == "msgraph_50_NA", ]$no_show_source, "crm_override")
+  expect_equal(res[res$meeting_key == "crm_71", ]$source, "crm_task")   # zweiter bleibt erhalten
+  expect_equal(sum(res$event_date == as.Date("2026-08-10")), 2L)        # zwei Meetings, zwei Zeilen
 })
