@@ -7,7 +7,8 @@
 compute_observability_exclusions(
   events,
   tenant_id = NULL,
-  now_utc = Sys.time()
+  now_utc = Sys.time(),
+  event_ids_mit_call = NULL
 )
 }
 \arguments{
@@ -19,6 +20,10 @@ against \code{join_url} -- the same rule \code{discover_meetings_from_events} ap
 NULL skips the tenant check entirely.}
 
 \item{now_utc}{POSIXct. Reference point for the future check.}
+
+\item{event_ids_mit_call}{Vector of event ids for which a call was found
+(\code{event_class} without \code{no_call}). These are observable by definition and
+are never returned as excluded. Defaults to none.}
 }
 \value{
 Data frame with one row per excluded event: \code{event_id} and \code{reason}
@@ -54,8 +59,16 @@ Events with a missing \code{join_url} are never excluded here. They are not onli
 meetings and were not counted differently before this fix; changing that is a
 separate decision.
 
+\strong{An event with call evidence is never excluded}, whatever its \code{join_url}
+says. The tenant rule describes what \emph{cannot be fetched now}; it must not be
+applied retroactively to the pre-migration history, where the tenant-wide
+base-35 ingest did deliver calls. Without this carve-out the whole historical
+no-show series -- the very baseline the fix is validated against -- would be
+excluded.
+
 \code{event_start} is a \verb{timestamp without time zone} holding UTC. Depending on the
 driver it may arrive tagged with the session timezone, which would shift the
 comparison by the local offset. \code{force_tz(..., "UTC")} fixes that case and is a
 no-op when the value is already tagged UTC.
 }
+\keyword{internal}

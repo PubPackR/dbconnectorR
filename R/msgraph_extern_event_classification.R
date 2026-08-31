@@ -465,10 +465,23 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
       "obwohl ihre Anwesenheitsdaten app-only unerreichbar sind."
     ))
   }
+  # Events, zu denen ein Call gefunden wurde, sind beobachtet worden - egal aus
+  # welchem Tenant sie stammen. Der gesamte Bestand vor der Migration faellt
+  # darunter: base-35 hat tenantweit Calls geholt, diese Events sind korrekt
+  # klassifiziert. Sie hier auszuschliessen wuerde die Historie loeschen, gegen
+  # die validiert wird.
+  ids_mit_call <- events_classified$event_id[
+    !grepl("no_call", events_classified$event_class, ignore.case = TRUE)]
+
   observability <- compute_observability_exclusions(events_all, tenant_id = tenant_id,
-                                                    now_utc = now_utc)
-  future_ids     <- observability$event_id[observability$reason == "termin_in_zukunft"]
-  alt_tenant_ids <- observability$event_id[observability$reason == "alt_tenant_join_url"]
+                                                    now_utc = now_utc,
+                                                    event_ids_mit_call = ids_mit_call)
+  # Echte No-Shows bleiben gezaehlt, gleiche Regel wie bei verschobene_final und
+  # rescheduled_final oben.
+  future_ids     <- setdiff(observability$event_id[observability$reason == "termin_in_zukunft"],
+                            real_no_show_ids)
+  alt_tenant_ids <- setdiff(observability$event_id[observability$reason == "alt_tenant_join_url"],
+                            real_no_show_ids)
 
   message(paste0("  ", length(future_ids), " Events in der Zukunft, ",
                  length(alt_tenant_ids), " Events aus dem Alt-Tenant -> excluded"))
@@ -622,12 +635,23 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
 #' meetings and were not counted differently before this fix; changing that is a
 #' separate decision.
 #'
+#' **An event with call evidence is never excluded**, whatever its `join_url`
+#' says. The tenant rule describes what *cannot be fetched now*; it must not be
+#' applied retroactively to the pre-migration history, where the tenant-wide
+#' base-35 ingest did deliver calls. Without this carve-out the whole historical
+#' no-show series -- the very baseline the fix is validated against -- would be
+#' excluded.
+#'
 #' @param events Data frame of events with columns `id`, `event_start` and
 #'   `join_url`.
 #' @param tenant_id Character or NULL. GUID of the own tenant, matched literally
 #'   against `join_url` -- the same rule `discover_meetings_from_events` applies.
 #'   NULL skips the tenant check entirely.
 #' @param now_utc POSIXct. Reference point for the future check.
+#' @param event_ids_mit_call Vector of event ids for which a call was found
+#'   (`event_class` without `no_call`). These are observable by definition and
+#'   are never returned as excluded. Defaults to none.
+#' @keywords internal
 #'
 #' @return Data frame with one row per excluded event: `event_id` and `reason`
 #'   (`"termin_in_zukunft"` or `"alt_tenant_join_url"`). Zero rows when nothing
@@ -639,7 +663,8 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
 #' comparison by the local offset. `force_tz(..., "UTC")` fixes that case and is a
 #' no-op when the value is already tagged UTC.
 # ---- start ---- #
-compute_observability_exclusions <- function(events, tenant_id = NULL, now_utc = Sys.time()) {
+compute_observability_exclusions <- function(events, tenant_id = NULL, now_utc = Sys.time(),
+                                             event_ids_mit_call = NULL) {
 
   empty <- data.frame(event_id = events$id[0], reason = character(0),
                       stringsAsFactors = FALSE)
@@ -657,6 +682,12 @@ compute_observability_exclusions <- function(events, tenant_id = NULL, now_utc =
     is_alt_tenant <- !is.na(events$join_url) &
       !grepl(tenant_id, events$join_url, fixed = TRUE)
   }
+
+  # Ein gefundener Call ist der Beweis, dass das Meeting beobachtbar war. Er
+  # sticht beide Regeln, sonst faellt der komplette Vor-Migrations-Bestand raus.
+  hat_call <- events$id %in% (event_ids_mit_call %||% events$id[0])
+  is_future     <- is_future     & !hat_call
+  is_alt_tenant <- is_alt_tenant & !hat_call
 
   reason <- ifelse(is_future, "termin_in_zukunft",
                    ifelse(is_alt_tenant, "alt_tenant_join_url", NA_character_))
