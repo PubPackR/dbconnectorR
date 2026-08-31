@@ -195,3 +195,16 @@ test_that("mehrere Platzhalter ohne precise_time: CRM-Zeile bleibt netto-neu sta
            mk_crm(list(crm_row(63, 42L, "2026-08-10", "teams", "no_show", FALSE, rep = 500L))))
   expect_equal(res[res$meeting_key == "crm_63", ]$source, "crm_task")
 })
+
+test_that("ein Platzhalter nimmt hoechstens einen CRM-Termin auf", {
+  # Zwei CRM-Termine desselben Reps am selben Tag, verschiedene Leads, aber nur
+  # eine Platzhalter-Zeile. Ohne Buchfuehrung ueberschreiben sie einander und
+  # keiner wird netto-neu -> aus zwei Meetings wird eines.
+  res <- assemble_unified_meetings(ms_platzhalter(),
+           mk_crm(list(
+             crm_row(70, 42L, "2026-08-10", "teams", "no_show", FALSE, rep = 500L),
+             crm_row(71, 43L, "2026-08-10", "teams", "no_show", FALSE, rep = 500L))))
+  expect_equal(res[res$meeting_key == "msgraph_50_NA", ]$no_show_source, "crm_override")
+  expect_equal(res[res$meeting_key == "crm_71", ]$source, "crm_task")   # zweiter bleibt erhalten
+  expect_equal(sum(res$event_date == as.Date("2026-08-10")), 2L)        # zwei Meetings, zwei Zeilen
+})

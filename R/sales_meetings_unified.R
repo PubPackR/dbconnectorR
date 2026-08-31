@@ -64,6 +64,9 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
   # Nur fuer den Tiebreak (nicht im DB-Schema): Rep-Kontakt + event_start je Zeile.
   base_rep   <- as.character(msgraph_meetings$contact_id)
   base_start <- msgraph_meetings$event_start
+  # Buchfuehrung fuer den Platzhalter-Fallback: jede Platzhalter-Zeile darf
+  # hoechstens einen CRM-Termin aufnehmen.
+  ph_used    <- rep(FALSE, nrow(base))
 
   new_rows <- list()
   for (i in seq_len(nrow(crm_meetings))) {
@@ -97,8 +100,14 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
       # Bewusst NICHT "gleicher Rep, gleicher Tag" ohne die Platzhalter-Bedingung:
       # das wuerde zwei erkennbar verschiedene Meetings verschmelzen, sobald ein
       # Rep an einem Tag mehrere Termine hat.
+      # `ph_used` schliesst bereits verbrauchte Platzhalter aus. Ohne das wuerden
+      # zwei CRM-Termine desselben Reps am selben Tag denselben Platzhalter
+      # matchen, einander ueberschreiben und beide nicht netto-neu geschrieben:
+      # aus zwei Meetings wuerde eines. Die lead-basierte Zuordnung oben ist
+      # ueber lead_id verschluesselt und deshalb strukturell kollisionsfrei;
+      # dieser Zweig gibt den Schluessel auf und braucht die Buchfuehrung.
       ph <- which(is.na(base$lead_id) & base$event_date == cm$event_date &
-                    base_rep == as.character(cm$contact_id))
+                    base_rep == as.character(cm$contact_id) & !ph_used)
       if (length(ph) == 1) {
         cand <- ph
       } else if (length(ph) > 1 && !is.na(cm$precise_time)) {
@@ -107,6 +116,7 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
           cand <- ph[which.min(d)]
         } else { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
       } else { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
+      ph_used[cand] <- TRUE
     }
     if (length(cand) > 1) {
       # Tiebreak 1: gleicher Rep-Kontakt.
