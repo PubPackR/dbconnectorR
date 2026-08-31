@@ -64,6 +64,28 @@ test_that("ohne tenant_id greift nur der Zukunfts-Ausschluss", {
   expect_true(all(res$reason == "termin_in_zukunft"))
 })
 
+test_that("ein gefundener Call schuetzt das Event vor dem Alt-Tenant-Ausschluss", {
+  # Der gesamte Bestand vor der Migration traegt die alte Tenant-GUID, hat aber
+  # gueltige Calls aus dem tenantweiten base-35-Ingest. Wuerde die Regel auch
+  # dort greifen, verschwaende die historische No-Show-Reihe.
+  res <- compute_observability_exclusions(make_events(), TENANT, JETZT,
+                                          event_ids_mit_call = 2L)
+  expect_false(2L %in% res$event_id)
+})
+
+test_that("ein gefundener Call schuetzt auch vor dem Zukunfts-Ausschluss", {
+  # 3 und 4 sind Zukunftstermine, tragen hier aber Call-Nachweis. Uebrig bleibt
+  # nur 2 (vergangen, Alt-Tenant, ohne Call).
+  res <- compute_observability_exclusions(make_events(), TENANT, JETZT,
+                                          event_ids_mit_call = c(3L, 4L))
+  expect_equal(res$event_id, 2L)
+})
+
+test_that("ohne event_ids_mit_call bleibt das Verhalten unveraendert", {
+  res <- compute_observability_exclusions(make_events(), TENANT, JETZT)
+  expect_setequal(res$event_id, c(2L, 3L, 4L))
+})
+
 test_that("leere Eingabe liefert null Zeilen statt eines Fehlers", {
   leer <- make_events()[0, , drop = FALSE]
   res <- compute_observability_exclusions(leer, TENANT, JETZT)
