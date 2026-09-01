@@ -234,3 +234,63 @@ test_that("fehlender Ingest-Stempel laesst das Graph-Datum stehen", {
 
   expect_equal(result$original_created_at, utc("2026-06-10 08:00:00"))
 })
+
+test_that("das tz-Attribut der Graph-Spalte bleibt erhalten", {
+  # Die Aufrufer rechnen mit rohen Treiber-Werten weiter: is_short_lived_event
+  # bildet die Differenz zu event_updated_at, der Upsert schreibt in eine
+  # Spalte ohne Zeitzone. Ein hier veraendertes tz-Attribut verschoebe beides
+  # um den lokalen Offset.
+  events <- data.frame(
+    msgraph_ical_uid = "uid-tz",
+    event_created_at = as.POSIXct("2026-06-10 08:00:00", tz = "Europe/Berlin"),
+    created_at       = as.POSIXct("2026-06-11 02:00:00", tz = "UTC"),
+    stringsAsFactors = FALSE
+  )
+
+  result <- compute_original_created_at(events)
+
+  expect_equal(attr(result$original_created_at, "tzone"),
+               attr(events$event_created_at, "tzone"))
+})
+
+test_that("verglichen werden die Ziffern, nicht die absoluten Zeitpunkte", {
+  # Treiber-Fall: die naive UTC-Spalte kommt mit der Session-Zeitzone getaggt
+  # zurueck, ihre Ziffern sind trotzdem UTC. Der Ingest-Stempel ist echtes
+  # timestamptz und muss auf dieselben Ziffern gebracht werden.
+  #
+  # Haelt die Semantik fest, faengt aber die Regression aus dem Review nicht:
+  # auch die Vorfassung lieferte hier dieselben Ziffern, sie taggte sie nur
+  # anders. Dafuer sind die beiden Tests darueber und darunter da.
+  events <- data.frame(
+    msgraph_ical_uid = "uid-treiber",
+    event_created_at = as.POSIXct("2026-08-19 09:00:21", tz = "Europe/Berlin"),
+    created_at       = as.POSIXct("2026-07-31 02:00:31", tz = "UTC"),
+    stringsAsFactors = FALSE
+  )
+
+  result <- compute_original_created_at(events)
+
+  expect_equal(format(result$original_created_at, "%Y-%m-%d %H:%M:%S"),
+               "2026-07-31 02:00:31")
+})
+
+test_that("Abstand zur Absage bleibt nach der Korrektur berechenbar", {
+  # Regression zum Review-Befund: is_short_lived_event rechnet
+  # difftime(event_updated_at, original_created_at). Beide muessen dieselbe
+  # Darstellung tragen, sonst kippt das 24h-Kriterium um den lokalen Offset
+  # und wirft regulaere Termine aus dem Pool.
+  events <- data.frame(
+    msgraph_ical_uid = "uid-cancel",
+    event_created_at = as.POSIXct("2026-06-10 10:00:00", tz = "Europe/Berlin"),
+    created_at       = as.POSIXct("2026-06-09 02:00:00", tz = "UTC"),
+    stringsAsFactors = FALSE
+  )
+  event_updated_at <- as.POSIXct("2026-06-11 11:30:00", tz = "Europe/Berlin")
+
+  result <- compute_original_created_at(events)
+  stunden <- as.numeric(difftime(event_updated_at, result$original_created_at,
+                                 units = "hours"))
+
+  # 09.06. 02:00 (Ingest gewinnt) bis 11.06. 11:30 = 57,5 h, deutlich ueber 24.
+  expect_equal(stunden, 57.5)
+})
