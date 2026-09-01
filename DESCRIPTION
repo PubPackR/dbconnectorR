@@ -1,6 +1,6 @@
 Package: dbconnectorR
 Title: Connect and Export Data from External Systems to Your Database
-Version: 0.0.0.9027
+Version: 0.0.0.9028
 Authors@R: 
     person("Moritz", "Hemmann", email = "moritz.hemmann@studyflix.de", 
            role = c("aut", "cre"))
