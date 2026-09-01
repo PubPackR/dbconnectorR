@@ -636,10 +636,18 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
 #' more than 90 days, 416 are single instances with exactly one occurrence per
 #' uid.
 #'
-#' Both columns are normalised to UTC before comparison. `event_created_at` is a
-#' `timestamp without time zone` holding UTC that some drivers hand back tagged
-#' with the session timezone, while `created_at` is a genuine `timestamptz`.
-#' Comparing them unnormalised would shift the result by the local offset.
+#' `event_created_at` is the reference representation, not UTC: the column is a
+#' `timestamp without time zone` holding UTC digits, which some drivers hand back
+#' tagged with the session timezone. `created_at` is a genuine `timestamptz` and
+#' is converted to those same digits before the comparison, so `pmin` compares
+#' digits with digits.
+#'
+#' The result deliberately keeps `event_created_at`'s timezone attribute rather
+#' than being tagged UTC. Callers keep working on raw driver values:
+#' `is_short_lived_event` takes the difference to `event_updated_at`, and the
+#' upsert writes into a column without a timezone. Tagging the result would shift
+#' both by the local offset -- a meeting created 30 June 22:30 UTC would land as
+#' 1 July 00:30 in the table and count in the wrong month.
 #'
 #' @param events Data frame with columns `msgraph_ical_uid`, `event_created_at`
 #'   (Graph's `createdDateTime`) and `created_at` (our first insert).
@@ -648,11 +656,27 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
 #' @keywords internal
 # ---- start ---- #
 compute_original_created_at <- function(events) {
+  # `event_created_at` ist die Referenz-Darstellung, nicht UTC: die Spalte ist
+  # `timestamp without time zone` und traegt UTC-Ziffern, je nach Treiber aber
+  # mit oder ohne tz-Attribut. Der Ingest-Stempel ist ein echtes `timestamptz`
+  # und wird auf genau diese Darstellung gebracht, damit pmin Ziffern mit
+  # Ziffern vergleicht.
+  #
+  # Bewusst NICHT das Ergebnis auf UTC umtaggen: die Aufrufer rechnen mit rohen
+  # Treiber-Werten weiter. `is_short_lived_event` bildet die Differenz zu
+  # `event_updated_at`, und der Upsert schreibt in eine Spalte ohne Zeitzone.
+  # Ein hier gesetztes tz-Attribut verschoebe beides um den lokalen Offset:
+  # ein am 30.06. 22:30 UTC angelegter Termin landete als 01.07. 00:30 in der
+  # Tabelle und zaehlte im falschen Monat.
+  graph_tz <- attr(events$event_created_at, "tzone")
+  if (is.null(graph_tz)) graph_tz <- ""
+
   events %>%
     dplyr::mutate(
-      .graph_utc  = lubridate::force_tz(event_created_at, "UTC"),
-      .ingest_utc = lubridate::with_tz(created_at, "UTC"),
-      .effektiv   = pmin(.graph_utc, .ingest_utc, na.rm = TRUE)
+      .ingest_wie_graph = lubridate::force_tz(
+        lubridate::with_tz(created_at, "UTC"), tzone = graph_tz
+      ),
+      .effektiv = pmin(event_created_at, .ingest_wie_graph, na.rm = TRUE)
     ) %>%
     dplyr::group_by(msgraph_ical_uid) %>%
     dplyr::summarise(

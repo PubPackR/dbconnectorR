@@ -44,9 +44,17 @@ occurrences were checked and are unaffected -- of the 484 meetings shifted by
 more than 90 days, 416 are single instances with exactly one occurrence per
 uid.
 
-Both columns are normalised to UTC before comparison. \code{event_created_at} is a
-\verb{timestamp without time zone} holding UTC that some drivers hand back tagged
-with the session timezone, while \code{created_at} is a genuine \code{timestamptz}.
-Comparing them unnormalised would shift the result by the local offset.
+\code{event_created_at} is the reference representation, not UTC: the column is a
+\verb{timestamp without time zone} holding UTC digits, which some drivers hand back
+tagged with the session timezone. \code{created_at} is a genuine \code{timestamptz} and
+is converted to those same digits before the comparison, so \code{pmin} compares
+digits with digits.
+
+The result deliberately keeps \code{event_created_at}'s timezone attribute rather
+than being tagged UTC. Callers keep working on raw driver values:
+\code{is_short_lived_event} takes the difference to \code{event_updated_at}, and the
+upsert writes into a column without a timezone. Tagging the result would shift
+both by the local offset -- a meeting created 30 June 22:30 UTC would land as
+1 July 00:30 in the table and count in the wrong month.
 }
 \keyword{internal}
