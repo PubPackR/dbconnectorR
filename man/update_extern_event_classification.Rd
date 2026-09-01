@@ -38,14 +38,19 @@ No return value. Updates database table \code{processed.msgraph_extern_event_cla
 Classifies external events from \code{mapping.msgraph_call_event} as no-show or attended,
 determines responsible contacts (one row per event-contact combination),
 filters shifted/large/duplicate events, and correctly calculates original_created_at
-by taking the minimum event_created_at across all events with the same msgraph_ical_uid.
+across all events with the same msgraph_ical_uid.
 }
 \details{
 Key features:
 \itemize{
-\item Correct original_created_at: min(event_created_at) grouped by msgraph_ical_uid
+\item Correct original_created_at: earliest of Graph's \code{event_created_at} and our
+own ingest stamp \code{created_at}, grouped by msgraph_ical_uid. Graph reports a
+\emph{new} creation date for pre-existing meetings after a tenant migration, so
+it is only believed up to the point we first saw the row. See
+\code{\link[=compute_original_created_at]{compute_original_created_at()}}.
 \item Multiple rows per event: one row per (event, contact) combination
-\item is_short_lived_event flag: events canceled < 24h after creation
+\item is_short_lived_event flag: events canceled < 24h after original_created_at,
+and therefore subject to the same ingest bound
 \item Rescheduled meeting detection: same lead, < 2 days apart, no meeting_id
 }
 
