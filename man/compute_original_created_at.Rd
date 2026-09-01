@@ -50,6 +50,22 @@ tagged with the session timezone. \code{created_at} is a genuine \code{timestamp
 is converted to those same digits before the comparison, so \code{pmin} compares
 digits with digits.
 
+\strong{\code{original_created_at} feeds more than one figure.} Moving it earlier also
+moves these, all in shiny-99-modules:
+\itemize{
+\item \code{is_short_lived_event} (cancelled less than 24 h after creation) loses
+events, because the distance to the cancellation grows. Both
+\code{module_kpi_no_show} queries filter on that flag, so cancelled meetings
+return to the no-show denominator; without a call they count as no-shows
+and the rate rises.
+\item The lead-time analysis in \code{module_kpi_no_show} (\code{get_lead_time_data}) is
+defined as the distance between \code{original_created_at} and the meeting date.
+It gets longer by construction, median and bucket distribution shift.
+}
+
+Both are consequences of the correction, not defects, but they change figures
+that were signed off separately.
+
 The result deliberately keeps \code{event_created_at}'s timezone attribute rather
 than being tagged UTC. Callers keep working on raw driver values:
 \code{is_short_lived_event} takes the difference to \code{event_updated_at}, and the
