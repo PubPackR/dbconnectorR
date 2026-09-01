@@ -61,10 +61,16 @@ and the rate rises.
 \item The lead-time analysis in \code{module_kpi_no_show} (\code{get_lead_time_data}) is
 defined as the distance between \code{original_created_at} and the meeting date.
 It gets longer by construction, median and bucket distribution shift.
+\item \verb{Vereinbarte Termine} in \code{module_sales_pipeline} groups by
+\code{created_date = as_date(original_created_at)} and moves the same way the
+scheduling tab does.
 }
 
-Both are consequences of the correction, not defects, but they change figures
-that were signed off separately.
+All are consequences of the correction, not defects, but they change figures
+that were signed off separately. Note for the rollout: the sales-pipeline
+figure moves twice in the same window, once from the pool fix in
+shiny-99-modules and once from this shift. Communicating that as one change
+avoids it looking like a correction of a correction.
 
 The result deliberately keeps \code{event_created_at}'s timezone attribute rather
 than being tagged UTC. Callers keep working on raw driver values:

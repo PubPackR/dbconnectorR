@@ -674,9 +674,15 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
 #' - The lead-time analysis in `module_kpi_no_show` (`get_lead_time_data`) is
 #'   defined as the distance between `original_created_at` and the meeting date.
 #'   It gets longer by construction, median and bucket distribution shift.
+#' - `Vereinbarte Termine` in `module_sales_pipeline` groups by
+#'   `created_date = as_date(original_created_at)` and moves the same way the
+#'   scheduling tab does.
 #'
-#' Both are consequences of the correction, not defects, but they change figures
-#' that were signed off separately.
+#' All are consequences of the correction, not defects, but they change figures
+#' that were signed off separately. Note for the rollout: the sales-pipeline
+#' figure moves twice in the same window, once from the pool fix in
+#' shiny-99-modules and once from this shift. Communicating that as one change
+#' avoids it looking like a correction of a correction.
 #'
 #' The result deliberately keeps `event_created_at`'s timezone attribute rather
 #' than being tagged UTC. Callers keep working on raw driver values:
