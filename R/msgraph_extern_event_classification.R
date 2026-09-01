@@ -83,21 +83,20 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
 
   message("2. Original_created_at berechnen...")
 
-  # Alle Events aus DB laden mit event_created_at und msgraph_ical_uid
+  # Alle Events aus DB laden mit event_created_at und msgraph_ical_uid.
+  # created_at ist unser eigener Ingest-Stempel und wird als untere Schranke
+  # fuer das Anlagedatum gebraucht, siehe compute_original_created_at().
   all_events <- dplyr::tbl(con, I("raw.msgraph_events")) %>%
     dplyr::select(id, msgraph_ical_uid, event_created_at, event_updated_at,
                   event_start, event_end, is_canceled, is_online_meeting, subject,
-                  join_url) %>%
+                  join_url, created_at) %>%
     dplyr::collect()
 
-  # Pro msgraph_ical_uid: Minimum event_created_at berechnen
-  # Dies ist das ECHTE Erstelldatum, auch wenn Events mehrfach verschoben wurden
-  original_created_lookup <- all_events %>%
-    dplyr::group_by(msgraph_ical_uid) %>%
-    dplyr::summarise(
-      original_created_at = min(event_created_at, na.rm = TRUE),
-      .groups = "drop"
-    )
+  # Pro msgraph_ical_uid: fruehestes Anlagedatum, wobei Graph nur bis zu unserem
+  # ersten Ingest geglaubt wird. Seit dem Tenant-Wechsel meldet Graph fuer
+  # bestehende Termine spaetere createdDateTime-Werte; ohne diese Schranke
+  # wandert ihre Terminierung rueckwirkend in den Migrationsmonat.
+  original_created_lookup <- compute_original_created_at(all_events)
 
   # Events mit original_created_at anreichern
   events_all <- all_events %>%
@@ -605,6 +604,61 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
 
   message(paste0("  ", nrow(to_upsert), " Zeilen aktiv nach Upsert"))
   message("Fertig!")
+}
+
+#' Determine the Original Creation Date per iCal UID
+#'
+#' `original_created_at` is the anchor of every "Termine gelegt" figure: it says
+#' in which month a meeting was scheduled. It used to be `min(event_created_at)`
+#' per `msgraph_ical_uid`, taking Graph's `createdDateTime` at face value.
+#'
+#' That broke in the August 2026 tenant migration. Graph started reporting a
+#' **new** `createdDateTime` for meetings that already existed. No second event
+#' appeared -- the same row, same id, same uid, simply got a later stamp.
+#' Measured on 2026-09-01, 1975 of 2768 post-cutover meetings carried a Graph
+#' date that fell on average 68 days *after* our own first ingest of that row.
+#' Their scheduling work moved retroactively into August: the week of the 17th
+#' showed 1713 meetings instead of 377, while June and July lost the same
+#' amount.
+#'
+#' The fix needs no pairing and no heuristic, because the correct answer is
+#' already in our own data. `raw.msgraph_events.created_at` is the moment we
+#' first inserted the row, and `Billomatics::postgres_upsert_data` excludes
+#' `created_at` from its update columns, so it never moves. A meeting we already
+#' held on 31 July cannot have been created on 19 August. The ingest stamp is
+#' therefore a hard upper bound, at most one nightly run away from the truth,
+#' and the earlier of the two dates wins.
+#'
+#' Deliberately applied to all rows, not just the migration window: the same
+#' pattern recurs with every further calendar share (see the note in base-62's
+#' `config.yaml`), and a rule bound to fixed dates would not survive it. Series
+#' occurrences were checked and are unaffected -- of the 484 meetings shifted by
+#' more than 90 days, 416 are single instances with exactly one occurrence per
+#' uid.
+#'
+#' Both columns are normalised to UTC before comparison. `event_created_at` is a
+#' `timestamp without time zone` holding UTC that some drivers hand back tagged
+#' with the session timezone, while `created_at` is a genuine `timestamptz`.
+#' Comparing them unnormalised would shift the result by the local offset.
+#'
+#' @param events Data frame with columns `msgraph_ical_uid`, `event_created_at`
+#'   (Graph's `createdDateTime`) and `created_at` (our first insert).
+#' @return Data frame with one row per `msgraph_ical_uid` and the column
+#'   `original_created_at`.
+#' @keywords internal
+# ---- start ---- #
+compute_original_created_at <- function(events) {
+  events %>%
+    dplyr::mutate(
+      .graph_utc  = lubridate::force_tz(event_created_at, "UTC"),
+      .ingest_utc = lubridate::with_tz(created_at, "UTC"),
+      .effektiv   = pmin(.graph_utc, .ingest_utc, na.rm = TRUE)
+    ) %>%
+    dplyr::group_by(msgraph_ical_uid) %>%
+    dplyr::summarise(
+      original_created_at = min(.effektiv, na.rm = TRUE),
+      .groups = "drop"
+    )
 }
 
 #' Determine Which Events Are Not Observable At All

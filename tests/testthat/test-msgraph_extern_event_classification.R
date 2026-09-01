@@ -144,3 +144,93 @@ test_that("event_start wird als UTC gelesen, nicht in der Session-Zeitzone", {
                                           as.POSIXct("2026-08-29 00:00:00", tz = "UTC"))
   expect_equal(res$reason, "termin_in_zukunft")
 })
+
+# Tests fuer compute_original_created_at().
+#
+# Hintergrund: Beim Tenant-Wechsel im August 2026 hat Graph fuer bestehende
+# Termine ein NEUES createdDateTime geliefert. Es entstand kein zweites Event,
+# dieselbe Zeile bekam nur einen spaeteren Stempel. Gemessen am 01.09.2026
+# trugen 1975 von 2768 Cutover-Terminen ein Graph-Anlagedatum, das im Schnitt
+# 68 Tage NACH unserem ersten Ingest lag. Ihre Terminierung wanderte dadurch
+# rueckwirkend in den August: die Woche vom 17.08. zeigte 1713 statt 377
+# gelegte Termine.
+#
+# raw.msgraph_events.created_at ist der Zeitpunkt unseres ersten Inserts.
+# Billomatics::postgres_upsert_data nimmt created_at aus update_cols heraus,
+# der Wert bleibt also stabil. Er ist damit eine harte obere Schranke fuer das
+# echte Anlagedatum.
+
+utc <- function(x) as.POSIXct(x, tz = "UTC")
+
+test_that("ohne Widerspruch bleibt das Graph-Datum unveraendert", {
+  events <- data.frame(
+    msgraph_ical_uid  = c("uid-a", "uid-b"),
+    event_created_at  = utc(c("2026-06-10 08:00:00", "2026-07-02 09:30:00")),
+    created_at        = utc(c("2026-06-11 02:00:00", "2026-07-03 02:00:00")),
+    stringsAsFactors  = FALSE
+  )
+
+  result <- compute_original_created_at(events)
+
+  expect_equal(result$original_created_at[result$msgraph_ical_uid == "uid-a"],
+               utc("2026-06-10 08:00:00"))
+  expect_equal(result$original_created_at[result$msgraph_ical_uid == "uid-b"],
+               utc("2026-07-02 09:30:00"))
+})
+
+test_that("liegt das Graph-Datum nach dem ersten Ingest, gewinnt der Ingest", {
+  # Realfall aus der Diagnose: Termin am 31.07. eingelesen, Graph meldet nach
+  # der Migration den 19.08. als Anlagedatum.
+  events <- data.frame(
+    msgraph_ical_uid  = "uid-migriert",
+    event_created_at  = utc("2026-08-19 09:00:21"),
+    created_at        = utc("2026-07-31 02:00:31"),
+    stringsAsFactors  = FALSE
+  )
+
+  result <- compute_original_created_at(events)
+
+  expect_equal(result$original_created_at, utc("2026-07-31 02:00:31"))
+})
+
+test_that("mehrere Instanzen einer uid liefern das frueheste Datum", {
+  # Verschobener Termin: zwei Events unter derselben ical_uid. Die Klammer
+  # bleibt das Minimum ueber die ganze uid, wie bisher.
+  events <- data.frame(
+    msgraph_ical_uid  = c("uid-serie", "uid-serie"),
+    event_created_at  = utc(c("2026-06-01 10:00:00", "2026-08-19 08:00:00")),
+    created_at        = utc(c("2026-06-02 02:00:00", "2026-06-02 02:00:00")),
+    stringsAsFactors  = FALSE
+  )
+
+  result <- compute_original_created_at(events)
+
+  expect_equal(nrow(result), 1)
+  expect_equal(result$original_created_at, utc("2026-06-01 10:00:00"))
+})
+
+test_that("fehlendes Graph-Datum faellt auf den Ingest zurueck", {
+  events <- data.frame(
+    msgraph_ical_uid  = "uid-ohne",
+    event_created_at  = as.POSIXct(NA, tz = "UTC"),
+    created_at        = utc("2026-07-15 02:00:00"),
+    stringsAsFactors  = FALSE
+  )
+
+  result <- compute_original_created_at(events)
+
+  expect_equal(result$original_created_at, utc("2026-07-15 02:00:00"))
+})
+
+test_that("fehlender Ingest-Stempel laesst das Graph-Datum stehen", {
+  events <- data.frame(
+    msgraph_ical_uid  = "uid-alt",
+    event_created_at  = utc("2026-06-10 08:00:00"),
+    created_at        = as.POSIXct(NA, tz = "UTC"),
+    stringsAsFactors  = FALSE
+  )
+
+  result <- compute_original_created_at(events)
+
+  expect_equal(result$original_created_at, utc("2026-06-10 08:00:00"))
+})
