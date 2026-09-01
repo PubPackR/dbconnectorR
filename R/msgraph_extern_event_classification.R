@@ -3,12 +3,17 @@
 #' Classifies external events from `mapping.msgraph_call_event` as no-show or attended,
 #' determines responsible contacts (one row per event-contact combination),
 #' filters shifted/large/duplicate events, and correctly calculates original_created_at
-#' by taking the minimum event_created_at across all events with the same msgraph_ical_uid.
+#' across all events with the same msgraph_ical_uid.
 #'
 #' Key features:
-#' - Correct original_created_at: min(event_created_at) grouped by msgraph_ical_uid
+#' - Correct original_created_at: earliest of Graph's `event_created_at` and our
+#'   own ingest stamp `created_at`, grouped by msgraph_ical_uid. Graph reports a
+#'   *new* creation date for pre-existing meetings after a tenant migration, so
+#'   it is only believed up to the point we first saw the row. See
+#'   [compute_original_created_at()].
 #' - Multiple rows per event: one row per (event, contact) combination
-#' - is_short_lived_event flag: events canceled < 24h after creation
+#' - is_short_lived_event flag: events canceled < 24h after original_created_at,
+#'   and therefore subject to the same ingest bound
 #' - Rescheduled meeting detection: same lead, < 2 days apart, no meeting_id
 #'
 #' @param con A PostgreSQL database connection object.
@@ -110,6 +115,15 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
   message("3. Short-lived Events erkennen...")
 
   # Short-lived = gecancelt UND < 24h zwischen original_created_at und event_updated_at
+  #
+  # Haengt mit an der Ingest-Schranke aus compute_original_created_at(): zieht
+  # sie original_created_at nach vorn, waechst dieser Abstand und Events
+  # verlieren das Flag. Beabsichtigt, aber es ist eine zweite Mengenaenderung.
+  # Beispiel aus dem August-Cutover: Graph-Anlagedatum 19.08. 09:00, Absage
+  # 19.08. 15:00, bisher 6 h und damit short-lived und ueberall ausgefiltert.
+  # Mit dem Ingest-Stempel vom 31.07. sind es 19 Tage, das Flag faellt weg und
+  # der Termin zaehlt wieder mit. Fachlich richtig, denn er wurde im Juli
+  # gelegt und im August abgesagt, war also kein kurzlebiger Fehleintrag.
   events_all <- events_all %>%
     dplyr::mutate(
       time_to_cancellation_hours = as.numeric(
