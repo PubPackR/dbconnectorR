@@ -95,6 +95,11 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
   } else {
     as.character(msgraph_meetings$organizer_contact_id)
   }
+  ms_reason <- if (is.null(msgraph_meetings$exclusion_reason)) {
+    rep(NA_character_, nrow(msgraph_meetings))
+  } else {
+    as.character(msgraph_meetings$exclusion_reason)
+  }
   base <- data.frame(
     meeting_key          = paste0("msgraph_", msgraph_meetings$call_event_mapping_id,
                                   "_", ms_lead),
@@ -109,6 +114,7 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
     meeting_type         = NA_character_,
     is_external_tool     = NA,
     excluded             = msgraph_meetings$excluded,
+    exclusion_reason     = ms_reason,
     is_short_lived_event = msgraph_meetings$is_short_lived_event,
     is_responsible       = msgraph_meetings$is_responsible,
     original_created_at  = msgraph_meetings$original_created_at,
@@ -135,6 +141,7 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
       is_no_show = fl$is_no_show, no_show_source = "crm_only",
       meeting_status = cm$meeting_status, meeting_tool = cm$meeting_tool, meeting_type = cm$meeting_type,
       is_external_tool = cm$is_external_tool, excluded = fl$excluded,
+      exclusion_reason = if (fl$excluded) paste0("crm_", cm$meeting_status) else NA_character_,
       is_short_lived_event = FALSE, is_responsible = TRUE,
       original_created_at = cm$original_created_at, event_id = NA_character_,
       # Ein CRM-Task kennt keinen Organisator. Das ist etwas anderes als ein
@@ -196,7 +203,12 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
     # setzt is_no_show; storniert -> excluded; "unbekannt" laesst MSGraph unangetastet.
     j <- cand[1]
     if (cm$meeting_status %in% c("no_show", "show_up")) base$is_no_show[j] <- fl$is_no_show
-    if (cm$meeting_status == "storniert") base$excluded[j] <- TRUE
+    if (cm$meeting_status == "storniert") {
+      base$excluded[j] <- TRUE
+      # Ohne den Grund waere nach dem Override nicht mehr erkennbar, ob der
+      # Ausschluss fachlich ist (Storno) oder nur die Beobachtbarkeit betrifft.
+      base$exclusion_reason[j] <- "crm_storniert"
+    }
     base$no_show_source[j] <- "crm_override"
     base$meeting_tool[j]   <- cm$meeting_tool
     base$meeting_type[j]   <- cm$meeting_type
@@ -221,7 +233,7 @@ update_sales_meetings_unified <- function(con) {
   msgraph_meetings <- dplyr::tbl(con, I("processed.msgraph_extern_event_classification")) %>%
     dplyr::filter(source == "msgraph", is_responsible == TRUE) %>%
     dplyr::select(call_event_mapping_id, contact_id, is_no_show, original_created_at,
-                  excluded, is_short_lived_event, is_responsible) %>%
+                  excluded, exclusion_reason, is_short_lived_event, is_responsible) %>%
     dplyr::inner_join(
       dplyr::tbl(con, I("mapping.msgraph_call_event")) %>%
         dplyr::select(id, event_id, event_date),

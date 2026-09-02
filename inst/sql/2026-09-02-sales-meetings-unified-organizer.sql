@@ -18,11 +18,22 @@ ALTER TABLE processed.sales_meetings_unified
 ALTER TABLE processed.sales_meetings_unified
   ADD COLUMN IF NOT EXISTS organizer_source text;
 
+-- Der Grund des Ausschlusses, bisher nur in der Klassifikationstabelle. Ohne
+-- ihn ist `excluded` nicht lesbar: "crm_storniert" ist eine fachliche Aussage,
+-- "termin_in_zukunft" und "alt_tenant_join_url" betreffen allein die
+-- Beobachtbarkeit. Genau diese Verwechslung hat im August 2026 die
+-- Terminierung um bis zu 69 Prozent zu niedrig ausgewiesen.
+ALTER TABLE processed.sales_meetings_unified
+  ADD COLUMN IF NOT EXISTS exclusion_reason text;
+
 COMMENT ON COLUMN processed.sales_meetings_unified.organizer_contact_id IS
   'Kontakt (raw.msgraph_contacts), der den Termin angelegt hat, aus processed.msgraph_extern_event_classification (is_organizer). NULL, wo kein Organisator bekannt ist; organizer_source sagt warum. Rohes Merkmal ohne Kennzahlenlogik: ob daraus ein SDR wird, entscheidet package-02-kpiR.';
 
 COMMENT ON COLUMN processed.sales_meetings_unified.organizer_source IS
   'Herkunft der Organisator-Angabe, drei Faelle, die als blosses NULL ununterscheidbar waeren. msgraph = Organisator bekannt. unbekannt = Kalendertermin ohne klassifizierte Organisator-Zeile (der Paarungs-Vorbehalt aus T1/C4: "nur Organizer" und "nur Verantwortlicher" sind in keinem Monat gleich). crm_task = netto-neuer CRM-Termin, der grundsaetzlich keinen Organisator tragen kann.';
+
+COMMENT ON COLUMN processed.sales_meetings_unified.exclusion_reason IS
+  'Warum excluded gesetzt ist. Aus processed.msgraph_extern_event_classification durchgereicht (rescheduled_without_meeting_id, verschoben, zu_viele_interne, duplikat_event, termin_in_zukunft, alt_tenant_join_url); bei CRM-Zeilen crm_storniert beziehungsweise crm_unbekannt. Die letzten beiden MSGraph-Gruende betreffen nur die Messbarkeit der Anwesenheit, nicht die Existenz des Termins: fuer eine No-Show-Quote gehoeren sie heraus, fuer gelegte Termine und als Anker einer SDR-Zurechnung nicht.';
 
 CREATE INDEX IF NOT EXISTS idx_sales_meetings_unified_organizer_contact_id
   ON processed.sales_meetings_unified (organizer_contact_id);

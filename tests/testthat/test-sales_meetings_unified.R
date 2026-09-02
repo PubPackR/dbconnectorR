@@ -233,3 +233,27 @@ test_that("fehlende Organisator-Spalte bricht den Aufbau nicht", {
   expect_true(all(res$organizer_source == "unbekannt"))
   expect_true(all(is.na(res$organizer_contact_id)))
 })
+
+test_that("Ausschlussgrund wird durchgereicht und beim CRM-Storno gesetzt", {
+  ms <- mk_msgraph()
+  ms$exclusion_reason <- c("alt_tenant_join_url", NA_character_, NA_character_)
+  res <- assemble_unified_meetings(ms, mk_crm(list(
+    crm_row(90, 20L, "2026-07-02", "teams", "storniert", FALSE))))
+
+  # Beobachtbarkeitsgrund bleibt lesbar, statt hinter excluded zu verschwinden.
+  expect_equal(res[res$meeting_key == "msgraph_10_10", ]$exclusion_reason,
+               "alt_tenant_join_url")
+  # Storno-Override setzt Grund und Flag gemeinsam.
+  ueberschrieben <- res[res$meeting_key == "msgraph_11_20", ]
+  expect_true(ueberschrieben$excluded)
+  expect_equal(ueberschrieben$exclusion_reason, "crm_storniert")
+})
+
+test_that("Netto-neue CRM-Zeile traegt den Grund nur wenn sie ausgeschlossen ist", {
+  res <- assemble_unified_meetings(mk_msgraph(), mk_crm(list(
+    crm_row(91, 99L, "2026-07-05", "zoom", "storniert", TRUE),
+    crm_row(92, 98L, "2026-07-05", "zoom", "show_up", TRUE))))
+
+  expect_equal(res[res$meeting_key == "crm_91", ]$exclusion_reason, "crm_storniert")
+  expect_true(is.na(res[res$meeting_key == "crm_92", ]$exclusion_reason))
+})
