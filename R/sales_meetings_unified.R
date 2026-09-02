@@ -1,3 +1,39 @@
+#' Organisator je MSGraph-Meeting laden
+#'
+#' Genau eine Zeile je `call_event_mapping_id`. Die Klassifikationstabelle
+#' fuehrt Organisator und Verantwortliche:n als getrennte Zeilen desselben
+#' Meetings; hier interessiert allein die Organisator-Zeile.
+#'
+#' Traegt ein Meeting mehrere verschiedene Organisatoren, ist das ein
+#' Datenfehler und kein fachlicher Fall. Statt still einen davon zu nehmen,
+#' wird gewarnt und der kleinste Kontakt deterministisch gewaehlt, damit zwei
+#' Laeufe nicht unterschiedliche Ergebnisse schreiben.
+#'
+#' @param con Pool/DBI-Connection.
+#' @return data.frame mit `call_event_mapping_id` und `organizer_contact_id`
+#'   (character, integer64-sicher).
+#' @keywords internal
+load_meeting_organizers <- function(con) {
+  org <- dplyr::tbl(con, I("processed.msgraph_extern_event_classification")) %>%
+    dplyr::filter(source == "msgraph", is_organizer == TRUE) %>%
+    dplyr::select(call_event_mapping_id, contact_id) %>%
+    dplyr::collect()
+
+  org <- org[!is.na(org$call_event_mapping_id), , drop = FALSE]
+  org$organizer_contact_id <- as.character(org$contact_id)
+  org <- unique(org[, c("call_event_mapping_id", "organizer_contact_id")])
+
+  mehrfach <- unique(org$call_event_mapping_id[duplicated(org$call_event_mapping_id)])
+  if (length(mehrfach) > 0) {
+    warning(length(mehrfach), " Meetings tragen mehrere Organisatoren; ",
+            "je Meeting wird der kleinste Kontakt verwendet.", call. = FALSE)
+    org <- org[order(org$call_event_mapping_id, as.numeric(org$organizer_contact_id)), ]
+    org <- org[!duplicated(org$call_event_mapping_id), , drop = FALSE]
+  }
+
+  org
+}
+
 #' CRM-Status -> (is_no_show, excluded)
 #' @param status character vector mit CRM-Meeting-Status (z.B. "no_show",
 #'   "show_up", "storniert", "unbekannt").
@@ -30,9 +66,20 @@ crm_status_flags <- function(status) {
 #' `lead_id` und `contact_id` werden im CHARACTER-Raum gehalten (rbind-sicher
 #' gegen die integer64-Falle); der Caller castet vor dem Upsert auf bigint.
 #'
+#' **Organisator.** `organizer_contact_id` haelt fest, wer den Termin angelegt
+#' hat, `organizer_source` woher diese Angabe stammt. Beides ist ein rohes
+#' Merkmal des Termins ohne jede Kennzahlenlogik: ob daraus ein SDR wird,
+#' entscheidet `package-02-kpiR` (Organizer ungleich Verantwortliche:r, siehe
+#' dessen `CONTEXT.md`). `organizer_source` unterscheidet die drei Faelle, die
+#' sonst zu einem `NA` verschmelzen wuerden: `"msgraph"` = Organisator bekannt,
+#' `"unbekannt"` = MSGraph-Termin ohne klassifizierte Organisator-Zeile,
+#' `"crm_task"` = netto-neuer CRM-Termin, der grundsaetzlich keinen tragen kann.
+#'
 #' @param msgraph_meetings data.frame mit call_event_mapping_id, lead_id,
 #'   event_date, event_start, contact_id (Rep), is_no_show, excluded,
-#'   is_short_lived_event, is_responsible, original_created_at, event_id.
+#'   is_short_lived_event, is_responsible, original_created_at, event_id und
+#'   optional organizer_contact_id (fehlt sie, gilt der Organisator als
+#'   unbekannt).
 #' @param crm_meetings data.frame mit crm_task_id, lead_id, event_date,
 #'   precise_time, contact_id (Rep), meeting_tool, meeting_type, meeting_status,
 #'   is_external_tool, original_created_at.
@@ -41,6 +88,13 @@ crm_status_flags <- function(status) {
 #' @export
 assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
   ms_lead <- as.character(msgraph_meetings$lead_id)  # NA fuer Platzhalter
+  # Optional, damit ein Caller ohne Organisator-Spalte nicht bricht: dann ist
+  # der Organisator schlicht unbekannt, nicht "es gibt keinen".
+  ms_org <- if (is.null(msgraph_meetings$organizer_contact_id)) {
+    rep(NA_character_, nrow(msgraph_meetings))
+  } else {
+    as.character(msgraph_meetings$organizer_contact_id)
+  }
   base <- data.frame(
     meeting_key          = paste0("msgraph_", msgraph_meetings$call_event_mapping_id,
                                   "_", ms_lead),
@@ -59,6 +113,8 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
     is_responsible       = msgraph_meetings$is_responsible,
     original_created_at  = msgraph_meetings$original_created_at,
     event_id             = msgraph_meetings$event_id,
+    organizer_contact_id = ms_org,
+    organizer_source     = ifelse(is.na(ms_org), "unbekannt", "msgraph"),
     stringsAsFactors     = FALSE
   )
   # Nur fuer den Tiebreak (nicht im DB-Schema): Rep-Kontakt + event_start je Zeile.
@@ -81,6 +137,10 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
       is_external_tool = cm$is_external_tool, excluded = fl$excluded,
       is_short_lived_event = FALSE, is_responsible = TRUE,
       original_created_at = cm$original_created_at, event_id = NA_character_,
+      # Ein CRM-Task kennt keinen Organisator. Das ist etwas anderes als ein
+      # Kalendertermin, dessen Organisator-Zeile fehlt, und bleibt deshalb
+      # unterscheidbar.
+      organizer_contact_id = NA_character_, organizer_source = "crm_task",
       stringsAsFactors = FALSE)
 
     # Externes Tool (kein MSGraph-Pendant) und Task ohne Lead -> immer netto-neu.
@@ -177,6 +237,11 @@ update_sales_meetings_unified <- function(con) {
   # Eine Zeile je Meeting (mehrere verantwortliche Kontakte -> ersten waehlen).
   msgraph_meetings <- dplyr::distinct(msgraph_meetings, call_event_mapping_id, .keep_all = TRUE)
 
+  message("  lade Organisator je Meeting ...")
+  msgraph_meetings <- merge(
+    msgraph_meetings, load_meeting_organizers(con),
+    by = "call_event_mapping_id", all.x = TRUE)
+
   message("  leite externe Leads je Meeting ab (extern-only, is_primary_crm) ...")
   # Nicht-Organisator-Teilnehmer mit Email -> extern/intern klassifizieren.
   participants <- dplyr::tbl(con, I("mapping.msgraph_call_event")) %>%
@@ -258,8 +323,9 @@ update_sales_meetings_unified <- function(con) {
   rows <- assemble_unified_meetings(msgraph_meetings, crm_meetings)
 
   # ID-Spalten (im Assemble character) auf integer64 (=bigint) casten; NA -> NULL.
-  rows$contact_id <- bit64::as.integer64(rows$contact_id)
-  rows$lead_id    <- bit64::as.integer64(rows$lead_id)
+  rows$contact_id           <- bit64::as.integer64(rows$contact_id)
+  rows$lead_id              <- bit64::as.integer64(rows$lead_id)
+  rows$organizer_contact_id <- bit64::as.integer64(rows$organizer_contact_id)
 
   message(paste0("  ", nrow(rows), " Zeilen -> processed.sales_meetings_unified"))
 
