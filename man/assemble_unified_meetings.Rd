@@ -9,7 +9,9 @@ assemble_unified_meetings(msgraph_meetings, crm_meetings)
 \arguments{
 \item{msgraph_meetings}{data.frame mit call_event_mapping_id, lead_id,
 event_date, event_start, contact_id (Rep), is_no_show, excluded,
-is_short_lived_event, is_responsible, original_created_at, event_id.}
+is_short_lived_event, is_responsible, original_created_at, event_id und
+optional organizer_contact_id (fehlt sie, gilt der Organisator als
+unbekannt).}
 
 \item{crm_meetings}{data.frame mit crm_task_id, lead_id, event_date,
 precise_time, contact_id (Rep), meeting_tool, meeting_type, meeting_status,
@@ -38,4 +40,13 @@ nicht verworfen.
 
 \code{lead_id} und \code{contact_id} werden im CHARACTER-Raum gehalten (rbind-sicher
 gegen die integer64-Falle); der Caller castet vor dem Upsert auf bigint.
+
+\strong{Organisator.} \code{organizer_contact_id} haelt fest, wer den Termin angelegt
+hat, \code{organizer_source} woher diese Angabe stammt. Beides ist ein rohes
+Merkmal des Termins ohne jede Kennzahlenlogik: ob daraus ein SDR wird,
+entscheidet \code{package-02-kpiR} (Organizer ungleich Verantwortliche:r, siehe
+dessen \code{CONTEXT.md}). \code{organizer_source} unterscheidet die drei Faelle, die
+sonst zu einem \code{NA} verschmelzen wuerden: \code{"msgraph"} = Organisator bekannt,
+\code{"unbekannt"} = MSGraph-Termin ohne klassifizierte Organisator-Zeile,
+\code{"crm_task"} = netto-neuer CRM-Termin, der grundsaetzlich keinen tragen kann.
 }
