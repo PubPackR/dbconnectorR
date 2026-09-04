@@ -43,7 +43,41 @@ is_vc_task <- function(task_name) {
 #' @return Logical(-Vektor).
 #' @export
 is_crm_vc_meeting <- function(task_name, task_badge) {
+  # Ohne die Spalte waere task_badge NULL, das Ergebnis logical(0) und die
+  # Trefferliste lautlos leer — siehe stop_if_badge_unbrauchbar().
+  if (is.null(task_badge)) {
+    stop("is_crm_vc_meeting(): task_badge fehlt. Ohne die Spalte gilt kein Task ",
+         "als Termin und die CRM-Zeilen wuerden beim naechsten Lauf geloescht.",
+         call. = FALSE)
+  }
   is_vc_task(task_name) & !is.na(task_badge) & task_badge == "visit"
+}
+
+#' Bricht ab, wenn die Badge-Spalte unbrauchbar ist (interne Helferfunktion)
+#'
+#' Beide Schreib-Jobs ersetzen ihre CRM-Zeilen vollstaendig
+#' (`delete_missing = TRUE` bzw. scoped delete). Eine leere Trefferliste ist
+#' deshalb nicht "keine Termine", sondern "alle bestehenden CRM-Termine
+#' loeschen". `raw.crm_lead_tasks.task_badge` ist nullable: faellt die Befuellung
+#' aus, waere jeder Badge NA, jeder Task kein Termin und der naechste
+#' FlowForce-Lauf wuerde beide Zieltabellen still leerraeumen. Lieber laut
+#' scheitern (Hausregel fuer `do/main*.R`).
+#'
+#' @param task_badge Character(-Vektor) aus `raw.crm_lead_tasks.task_badge`.
+#' @return `invisible(NULL)`, oder ein Fehler.
+#' @keywords internal
+# ---- start ---- #
+stop_if_badge_unbrauchbar <- function(task_badge) {
+  if (is.null(task_badge)) {
+    stop("raw.crm_lead_tasks.task_badge fehlt in der geladenen Task-Menge.",
+         call. = FALSE)
+  }
+  if (length(task_badge) > 0 && all(is.na(task_badge))) {
+    stop("raw.crm_lead_tasks.task_badge ist durchgehend NA (", length(task_badge),
+         " Tasks). Das wuerde jeden Task als Nicht-Termin einstufen und die ",
+         "bestehenden CRM-Termine beim Schreiben loeschen.", call. = FALSE)
+  }
+  invisible(NULL)
 }
 
 #' Extrahiert das VC-Tool aus dem CRM-Task-Namen

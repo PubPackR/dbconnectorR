@@ -42,6 +42,22 @@ test_that("is_crm_vc_meeting verlangt VC-Kanal UND visit-Badge", {
   )
 })
 
+test_that("fehlende Badge-Spalte scheitert laut statt still leer zu liefern", {
+  # Ohne Guard gaebe die Funktion logical(0) zurueck; die Aufrufer schreiben mit
+  # delete_missing = TRUE und wuerden alle bestehenden CRM-Termine loeschen.
+  tasks <- data.frame(task_name = c("VC NV", "VC Webex ZR"), stringsAsFactors = FALSE)
+  expect_error(is_crm_vc_meeting(tasks$task_name, tasks$task_badge), "task_badge fehlt")
+
+  expect_error(stop_if_badge_unbrauchbar(NULL), "fehlt")
+  expect_error(stop_if_badge_unbrauchbar(c(NA_character_, NA_character_)),
+               "durchgehend NA")
+
+  # Ein einzelner NA-Badge unter gueltigen ist normal und darf nicht abbrechen.
+  expect_silent(stop_if_badge_unbrauchbar(c("visit", NA_character_, "call")))
+  # Keine Tasks im Fenster ist kein Datenfehler.
+  expect_silent(stop_if_badge_unbrauchbar(character(0)))
+})
+
 test_that("extract_meeting_tool priorisiert korrekt und ist case-insensitiv", {
   expect_equal(extract_meeting_tool("VC Webex ZR"), "webex")
   expect_equal(extract_meeting_tool("VC UC (WEBEX)"), "webex")

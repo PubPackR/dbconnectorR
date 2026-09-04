@@ -127,6 +127,8 @@ update_crm_task_meeting_classification <- function(con) {
   # effort, kein Personio-Zwischenschritt). Liefert den Sales-Rep-Kontakt.
   # ACHTUNG: assemble_crm_classification_rows verwirft Zeilen ohne aufloesbaren
   # Rep -> die Auflösung ist de facto Pflicht (leeres Ergebnis => keine CRM-Zeilen).
+  stop_if_badge_unbrauchbar(crm_tasks$task_badge)
+
   crm_user_contact <- resolve_crm_user_contact(con)
 
   # MSGraph-Meetings fuer Anti-Join: lead_id + event_date aus bestehender

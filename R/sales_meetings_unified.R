@@ -305,6 +305,7 @@ update_sales_meetings_unified <- function(con) {
     dplyr::collect()
   ruc <- resolve_crm_user_contact(con)
 
+  stop_if_badge_unbrauchbar(tasks$task_badge)
   vc <- tasks[is_crm_vc_meeting(tasks$task_name, tasks$task_badge), , drop = FALSE]
   vc$meeting_tool     <- extract_meeting_tool(vc$task_name)
   vc$is_external_tool <- is_external_tool(vc$meeting_tool)
