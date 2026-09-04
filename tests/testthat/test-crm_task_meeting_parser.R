@@ -12,6 +12,36 @@ test_that("is_vc_task erkennt VC-Marker und externe Tools, aber nicht blosses 'T
   expect_false(is_vc_task(NA_character_))
 })
 
+test_that("is_crm_vc_meeting verlangt VC-Kanal UND visit-Badge", {
+  # Kanal ja, Art ja
+  expect_true(is_crm_vc_meeting("NV VC Fr. Aust", "visit"))
+  expect_true(is_crm_vc_meeting("VC Webex ZR", "visit"))
+
+  # Kanal ja, Art nein -> Terminierungs-Aufgabe. Belegter Produktionsfall
+  # (crm_task_id 23628741) und die uebrigen Nicht-Termin-Badges.
+  expect_false(is_crm_vc_meeting("Terminierung VC NV Frau Benchenna", "important"))
+  expect_false(is_crm_vc_meeting("anrufen und VC Update vereinbaren", "call"))
+  expect_false(is_crm_vc_meeting("VC UC", "task"))
+  expect_false(is_crm_vc_meeting("VC UC", "email"))
+  expect_false(is_crm_vc_meeting("VC UC", "preparation"))
+
+  # Positivliste: ein fehlender Badge darf nicht durchrutschen.
+  expect_false(is_crm_vc_meeting("VC Webex ZR", NA_character_))
+
+  # Art ja, Kanal nein -> Vor-Ort-Besuch, gehoert nicht in die VC-Zaehlung.
+  expect_false(is_crm_vc_meeting("Besuch vor Ort bei Fr. Aust", "visit"))
+
+  # Kein Titel-Ausschluss innerhalb von visit: 28 von 41 solcher Tasks haben
+  # einen belegten Kalendertermin, der Badge gewinnt.
+  expect_true(is_crm_vc_meeting("Terminierung VC Update Call Anna", "visit"))
+
+  # vektorwertig, inkl. NA in beiden Argumenten
+  expect_equal(
+    is_crm_vc_meeting(c("VC NV", "VC NV", NA_character_), c("visit", "call", "visit")),
+    c(TRUE, FALSE, FALSE)
+  )
+})
+
 test_that("extract_meeting_tool priorisiert korrekt und ist case-insensitiv", {
   expect_equal(extract_meeting_tool("VC Webex ZR"), "webex")
   expect_equal(extract_meeting_tool("VC UC (WEBEX)"), "webex")

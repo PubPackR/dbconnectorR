@@ -13,6 +13,39 @@ is_vc_task <- function(task_name) {
     stringr::str_detect(x, "web ?ex|zoom|skype|google ?meet|g ?meet")
 }
 
+#' Erkennt, ob ein CRM-Task ein Videocall-TERMIN ist
+#'
+#' Zwei unabhaengige Fragen an denselben Task, beide muessen mit ja beantwortet
+#' sein: [is_vc_task()] klaert den **Kanal** (Videocall, nicht Telefon, nicht vor
+#' Ort), `task_badge == "visit"` klaert die **Art** (Termin, nicht Aufgabe).
+#'
+#' Ohne die zweite Bedingung zaehlen Terminierungs-Aufgaben als Termine: ein Task
+#' "Terminierung VC NV Frau Benchenna" nennt einen Videocall, ist aber die
+#' Aufgabe, ihn erst zu vereinbaren.
+#'
+#' `visit` ist als Termin-Marker belegt, nicht angenommen. Ueber alle CRM-Tasks
+#' (09/2025-09/2026) tragen 67,7 Prozent der `visit`-Tasks einen MSGraph-
+#' Kalendertermin am selben Tag beim selben Lead, gegen 12,2 (`important`), 5,5
+#' (`preparation`), 4,3 (`email`), 1,1 (`task`) und 0,5 Prozent (`call`).
+#'
+#' BEWUSST KEIN Titel-Muster fuer Terminierungs-Aufgaben. Von 41 `visit`-Tasks
+#' mit "Terminierung" im Namen haben 28 einen belegten Kalendertermin — es sind
+#' echte Termine, deren Task beim Zustandekommen nicht umbenannt wurde. Ein
+#' Titel-Ausschluss zerstoert dort 28 belegte Termine, um 13 unsichere zu
+#' entfernen. Der Badge erledigt die Terminierungs-Aufgaben ohnehin: von 519
+#' Tasks mit diesem Titelmuster tragen nur 41 den `visit`-Badge.
+#'
+#' Positivliste, nicht Verbotsliste: `task_badge` ist nullable, ein NA-Badge
+#' darf nicht durchrutschen.
+#'
+#' @param task_name Character(-Vektor) mit dem CRM-Task-Namen.
+#' @param task_badge Character(-Vektor) aus `raw.crm_lead_tasks.task_badge`.
+#' @return Logical(-Vektor).
+#' @export
+is_crm_vc_meeting <- function(task_name, task_badge) {
+  is_vc_task(task_name) & !is.na(task_badge) & task_badge == "visit"
+}
+
 #' Extrahiert das VC-Tool aus dem CRM-Task-Namen
 #'
 #' Priorisierter, case-insensitiver Keyword-Match. Gibt einen kanonischen
