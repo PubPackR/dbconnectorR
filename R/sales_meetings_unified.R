@@ -35,14 +35,39 @@ load_meeting_organizers <- function(con) {
 }
 
 #' CRM-Status -> (is_no_show, excluded)
+#'
+#' @description
+#' **`unbekannt` gilt als stattgefunden, nicht als No-Show** (entschieden am
+#' 05.09.2026, Asana `1218192760112154`). Ein CRM-Termin ohne dokumentierten
+#' Ausgang ist ein stattgefundener Termin ohne weitere Doku; fehlende
+#' Dokumentation ist kein Beleg fuer einen geplatzten Termin und geht nicht zu
+#' Lasten des Vertrieblers. Gemessen an MSGraph-verifizierbaren Terminen sind
+#' undokumentierte Termine sogar etwas seltener No-Shows (25,3 %) als der
+#' Durchschnittstermin (29,0 %): ein geplatzter Termin erzeugt Nacharbeit und
+#' damit Doku.
+#'
+#' Das bringt diese Funktion mit `assemble_crm_classification_rows()` in
+#' Deckung, die dieselbe Zeile fuer `processed.msgraph_extern_event_classification`
+#' schon immer als `is_no_show = FALSE, excluded = FALSE` gefuehrt hat. Vorher
+#' trug dieselbe CRM-Zeile in den beiden Tabellen zwei verschiedene Lesarten.
+#'
+#' **Die Beobachtung geht dabei nicht verloren.** Dass der Ausgang nicht
+#' dokumentiert ist, steht weiterhin in `meeting_status` und
+#' `no_show_source = "crm_only"` auf der Zeile. Was wegfaellt, ist allein der
+#' Ausschlussgrund `crm_unbekannt`, und der ist nach dieser Lesart keiner mehr.
+#'
+#' `storniert` bleibt ausgeschlossen: eine rechtzeitige Absage ist kein
+#' No-Show, sondern ein nicht stattgefundener Termin (T1, Punkt C3).
+#'
 #' @param status character vector mit CRM-Meeting-Status (z.B. "no_show",
 #'   "show_up", "storniert", "unbekannt").
-#' @return list mit `is_no_show` (logical, NA falls nicht definitiv) und
-#'   `excluded` (logical).
+#' @return list mit `is_no_show` (logical, `NA` nur bei unbekanntem Statuswert)
+#'   und `excluded` (logical).
 #' @keywords internal
 crm_status_flags <- function(status) {
-  is_no_show <- ifelse(status == "no_show", TRUE, ifelse(status == "show_up", FALSE, NA))
-  excluded   <- status %in% c("storniert", "unbekannt")
+  is_no_show <- ifelse(status == "no_show", TRUE,
+                       ifelse(status %in% c("show_up", "unbekannt"), FALSE, NA))
+  excluded   <- status %in% "storniert"
   list(is_no_show = is_no_show, excluded = excluded)
 }
 
@@ -199,8 +224,16 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
       } else next    # kein eindeutiger Rep -> verwerfen
     }
 
-    # eindeutiger (bzw. aufgeloester) Match -> Override. Nur definitiver Status
-    # setzt is_no_show; storniert -> excluded; "unbekannt" laesst MSGraph unangetastet.
+    # eindeutiger (bzw. aufgeloester) Match -> Override. Nur ein am CRM-Task
+    # dokumentierter Ausgang setzt is_no_show; storniert -> excluded.
+    #
+    # **"unbekannt" laesst MSGraph unangetastet**, obwohl crm_status_flags()
+    # dafuer seit 05.09.2026 `is_no_show = FALSE` liefert. Die Absicht ist eine
+    # andere: dort heisst FALSE "wir legen eine CRM-only-Zeile ohne Doku als
+    # stattgefunden aus", hier laege eine echte Anwesenheitsmessung aus dem
+    # Kalender vor, und die faende ein fehlender CRM-Kommentar nicht besser.
+    # Wer die Bedingung hier auf "unbekannt" erweitert, ueberschreibt eine
+    # Messung mit einer Auslegung.
     j <- cand[1]
     if (cm$meeting_status %in% c("no_show", "show_up")) base$is_no_show[j] <- fl$is_no_show
     if (cm$meeting_status == "storniert") {

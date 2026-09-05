@@ -81,11 +81,33 @@ test_that("externes Tool mit gleicher-Tag-MSGraph-Zeile: immer Netto-neu, MSGrap
   expect_equal(res[res$meeting_key == "crm_5", ]$source, "crm_task")                 # eigener Termin
 })
 
-test_that("CRM unbekannt/storniert (extern): excluded=TRUE, kein Override", {
+test_that("CRM unbekannt (extern): zaehlt als stattgefunden, kein Ausschluss", {
+  # Entscheidung vom 05.09.2026: ein CRM-Termin ohne dokumentierten Ausgang ist
+  # ein stattgefundener Termin ohne Doku, kein No-Show. Vorher trug die Zeile
+  # excluded=TRUE / is_no_show=NA und wirkte damit rechnerisch wie ein No-Show:
+  # im Nenner der Show-Up-Quote, nie im Zaehler.
   res <- assemble_unified_meetings(mk_msgraph(),
            mk_crm(list(crm_row(6, 77L, "2026-08-02", "webex", "unbekannt", TRUE))))
   r <- res[res$meeting_key == "crm_6", ]
+  expect_false(r$excluded)
+  expect_false(r$is_no_show)
+  expect_true(is.na(r$exclusion_reason))
+  # Die Beobachtung bleibt lesbar: dass nichts dokumentiert ist, steht weiter
+  # auf der Zeile. Nur ihre Auslegung hat sich geaendert.
+  expect_equal(r$meeting_status, "unbekannt")
+  expect_equal(r$no_show_source, "crm_only")
+})
+
+test_that("CRM storniert (extern): bleibt ausgeschlossen", {
+  # Gegenprobe zur Zeile darueber: die Lockerung gilt nur fuer "unbekannt".
+  # Eine rechtzeitige Absage ist kein No-Show, aber auch kein stattgefundener
+  # Termin, und faellt deshalb weiter aus Zaehler UND Nenner.
+  res <- assemble_unified_meetings(mk_msgraph(),
+           mk_crm(list(crm_row(6, 77L, "2026-08-02", "webex", "storniert", TRUE))))
+  r <- res[res$meeting_key == "crm_6", ]
   expect_true(r$excluded)
+  expect_equal(r$exclusion_reason, "crm_storniert")
+  # Kein Ausgang gemessen: eine Absage sagt nichts ueber Anwesenheit.
   expect_true(is.na(r$is_no_show))
 })
 

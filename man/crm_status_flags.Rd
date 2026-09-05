@@ -11,10 +11,30 @@ crm_status_flags(status)
 "show_up", "storniert", "unbekannt").}
 }
 \value{
-list mit \code{is_no_show} (logical, NA falls nicht definitiv) und
-\code{excluded} (logical).
+list mit \code{is_no_show} (logical, \code{NA} nur bei unbekanntem Statuswert)
+und \code{excluded} (logical).
 }
 \description{
-CRM-Status -> (is_no_show, excluded)
+\strong{\code{unbekannt} gilt als stattgefunden, nicht als No-Show} (entschieden am
+05.09.2026, Asana \code{1218192760112154}). Ein CRM-Termin ohne dokumentierten
+Ausgang ist ein stattgefundener Termin ohne weitere Doku; fehlende
+Dokumentation ist kein Beleg fuer einen geplatzten Termin und geht nicht zu
+Lasten des Vertrieblers. Gemessen an MSGraph-verifizierbaren Terminen sind
+undokumentierte Termine sogar etwas seltener No-Shows (25,3 \%) als der
+Durchschnittstermin (29,0 \%): ein geplatzter Termin erzeugt Nacharbeit und
+damit Doku.
+
+Das bringt diese Funktion mit \code{assemble_crm_classification_rows()} in
+Deckung, die dieselbe Zeile fuer \code{processed.msgraph_extern_event_classification}
+schon immer als \verb{is_no_show = FALSE, excluded = FALSE} gefuehrt hat. Vorher
+trug dieselbe CRM-Zeile in den beiden Tabellen zwei verschiedene Lesarten.
+
+\strong{Die Beobachtung geht dabei nicht verloren.} Dass der Ausgang nicht
+dokumentiert ist, steht weiterhin in \code{meeting_status} und
+\code{no_show_source = "crm_only"} auf der Zeile. Was wegfaellt, ist allein der
+Ausschlussgrund \code{crm_unbekannt}, und der ist nach dieser Lesart keiner mehr.
+
+\code{storniert} bleibt ausgeschlossen: eine rechtzeitige Absage ist kein
+No-Show, sondern ein nicht stattgefundener Termin (T1, Punkt C3).
 }
 \keyword{internal}
