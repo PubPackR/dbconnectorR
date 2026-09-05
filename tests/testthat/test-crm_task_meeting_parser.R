@@ -12,6 +12,52 @@ test_that("is_vc_task erkennt VC-Marker und externe Tools, aber nicht blosses 'T
   expect_false(is_vc_task(NA_character_))
 })
 
+test_that("is_crm_vc_meeting verlangt VC-Kanal UND visit-Badge", {
+  # Kanal ja, Art ja
+  expect_true(is_crm_vc_meeting("NV VC Fr. Aust", "visit"))
+  expect_true(is_crm_vc_meeting("VC Webex ZR", "visit"))
+
+  # Kanal ja, Art nein -> Terminierungs-Aufgabe. Belegter Produktionsfall
+  # (crm_task_id 23628741) und die uebrigen Nicht-Termin-Badges.
+  expect_false(is_crm_vc_meeting("Terminierung VC NV Frau Benchenna", "important"))
+  expect_false(is_crm_vc_meeting("anrufen und VC Update vereinbaren", "call"))
+  expect_false(is_crm_vc_meeting("VC UC", "task"))
+  expect_false(is_crm_vc_meeting("VC UC", "email"))
+  expect_false(is_crm_vc_meeting("VC UC", "preparation"))
+
+  # Positivliste: ein fehlender Badge darf nicht durchrutschen.
+  expect_false(is_crm_vc_meeting("VC Webex ZR", NA_character_))
+
+  # Art ja, Kanal nein -> Vor-Ort-Besuch, gehoert nicht in die VC-Zaehlung.
+  expect_false(is_crm_vc_meeting("Besuch vor Ort bei Fr. Aust", "visit"))
+
+  # Kein Titel-Ausschluss innerhalb von visit: 28 von 41 solcher Tasks haben
+  # einen belegten Kalendertermin, der Badge gewinnt.
+  expect_true(is_crm_vc_meeting("Terminierung VC Update Call Anna", "visit"))
+
+  # vektorwertig, inkl. NA in beiden Argumenten
+  expect_equal(
+    is_crm_vc_meeting(c("VC NV", "VC NV", NA_character_), c("visit", "call", "visit")),
+    c(TRUE, FALSE, FALSE)
+  )
+})
+
+test_that("fehlende Badge-Spalte scheitert laut statt still leer zu liefern", {
+  # Ohne Guard gaebe die Funktion logical(0) zurueck; die Aufrufer schreiben mit
+  # delete_missing = TRUE und wuerden alle bestehenden CRM-Termine loeschen.
+  tasks <- data.frame(task_name = c("VC NV", "VC Webex ZR"), stringsAsFactors = FALSE)
+  expect_error(is_crm_vc_meeting(tasks$task_name, tasks$task_badge), "task_badge fehlt")
+
+  expect_error(stop_if_badge_unbrauchbar(NULL), "fehlt")
+  expect_error(stop_if_badge_unbrauchbar(c(NA_character_, NA_character_)),
+               "durchgehend NA")
+
+  # Ein einzelner NA-Badge unter gueltigen ist normal und darf nicht abbrechen.
+  expect_silent(stop_if_badge_unbrauchbar(c("visit", NA_character_, "call")))
+  # Keine Tasks im Fenster ist kein Datenfehler.
+  expect_silent(stop_if_badge_unbrauchbar(character(0)))
+})
+
 test_that("extract_meeting_tool priorisiert korrekt und ist case-insensitiv", {
   expect_equal(extract_meeting_tool("VC Webex ZR"), "webex")
   expect_equal(extract_meeting_tool("VC UC (WEBEX)"), "webex")

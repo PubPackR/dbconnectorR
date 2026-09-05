@@ -5,7 +5,7 @@
 #' Schema von processed.msgraph_extern_event_classification (+ CRM-Zusatzspalten).
 #'
 #' @param crm_tasks data.frame: id (Surrogat-PK, fuer Kommentar-Join), crm_task_id,
-#'   lead_id, user_id, precise_time, task_name.
+#'   lead_id, user_id, precise_time, task_name, task_badge.
 #' @param crm_comments data.frame: task_id, comment_name.
 #' @param crm_user_contact data.frame: user_id, contact_id (Sales-Rep-Kontakt).
 #' @param msgraph_meetings data.frame: lead_id, event_date.
@@ -14,8 +14,9 @@
 assemble_crm_classification_rows <- function(crm_tasks, crm_comments,
                                              crm_user_contact,
                                              msgraph_meetings) {
-  # 1. nur VC-Termine
-  vc <- crm_tasks[is_vc_task(crm_tasks$task_name), , drop = FALSE]
+  # 1. nur VC-Termine (Kanal per Titel, Art per Badge — siehe is_crm_vc_meeting)
+  vc <- crm_tasks[is_crm_vc_meeting(crm_tasks$task_name, crm_tasks$task_badge),
+                  , drop = FALSE]
   if (nrow(vc) == 0) return(assemble_crm_empty_result())
 
   # 2. Tool
@@ -114,13 +115,15 @@ update_crm_task_meeting_classification <- function(con) {
   crm_tasks <- dplyr::tbl(con, I("raw.crm_lead_tasks")) %>%
     dplyr::filter(is_deleted == FALSE) %>%
     dplyr::select(id, crm_task_id, lead_id, user_id, assigned_to_user_id,
-                  precise_time, task_name) %>%
+                  precise_time, task_name, task_badge) %>%
     dplyr::collect()
 
   crm_comments <- dplyr::tbl(con, I("raw.crm_lead_task_comments")) %>%
     dplyr::filter(is_deleted == FALSE) %>%
     dplyr::select(task_id, comment_name) %>%
     dplyr::collect()
+
+  stop_if_badge_unbrauchbar(crm_tasks$task_badge)
 
   # Rep-Aufloesung: crm_users.user_login -> raw.msgraph_contacts.email (best
   # effort, kein Personio-Zwischenschritt). Liefert den Sales-Rep-Kontakt.

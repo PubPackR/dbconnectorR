@@ -297,7 +297,7 @@ update_sales_meetings_unified <- function(con) {
   tasks <- dplyr::tbl(con, I("raw.crm_lead_tasks")) %>%
     dplyr::filter(is_deleted == FALSE) %>%
     dplyr::select(id, crm_task_id, lead_id, user_id, assigned_to_user_id,
-                  precise_time, task_created_at, task_name) %>%
+                  precise_time, task_created_at, task_name, task_badge) %>%
     dplyr::collect()
   comments <- dplyr::tbl(con, I("raw.crm_lead_task_comments")) %>%
     dplyr::filter(is_deleted == FALSE) %>%
@@ -305,7 +305,8 @@ update_sales_meetings_unified <- function(con) {
     dplyr::collect()
   ruc <- resolve_crm_user_contact(con)
 
-  vc <- tasks[is_vc_task(tasks$task_name), , drop = FALSE]
+  stop_if_badge_unbrauchbar(tasks$task_badge)
+  vc <- tasks[is_crm_vc_meeting(tasks$task_name, tasks$task_badge), , drop = FALSE]
   vc$meeting_tool     <- extract_meeting_tool(vc$task_name)
   vc$is_external_tool <- is_external_tool(vc$meeting_tool)
   vc$meeting_type     <- extract_meeting_type(vc$task_name)

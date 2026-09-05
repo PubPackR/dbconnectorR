@@ -2,17 +2,21 @@
 
 make_tasks <- function() {
   data.frame(
-    id          = c(1001L, 1002L, 1003L, 1004L),  # Surrogat-PK; Kommentare referenzieren DIESE Spalte
-    crm_task_id = c(1L, 2L, 3L, 4L),              # CRM-Business-ID (Output-Spalte)
-    lead_id     = c(10L, 20L, 30L, 40L),
-    user_id     = c(100L, 100L, 200L, 200L),
+    id          = c(1001L, 1002L, 1003L, 1004L, 1005L, 1006L),  # Surrogat-PK; Kommentare referenzieren DIESE Spalte
+    crm_task_id = c(1L, 2L, 3L, 4L, 5L, 6L),                    # CRM-Business-ID (Output-Spalte)
+    lead_id     = c(10L, 20L, 30L, 40L, 50L, 60L),
+    user_id     = c(100L, 100L, 200L, 200L, 200L, 200L),
     precise_time = as.POSIXct(
       c("2026-07-20 10:00:00", "2026-07-20 09:00:00",
-        "2026-07-21 08:00:00", "2026-07-22 14:00:00"), tz = "UTC"),
-    task_name = c("VC Webex ZR mit Frings",   # extern webex
-                  "VC Teams Update",          # teams
-                  "VC Zoom NV",               # extern zoom
-                  "er machen"),               # KEIN VC-Termin
+        "2026-07-21 08:00:00", "2026-07-22 14:00:00",
+        "2026-07-23 09:00:00", "2026-07-24 09:00:00"), tz = "UTC"),
+    task_name = c("VC Webex ZR mit Frings",          # extern webex
+                  "VC Teams Update",                 # teams
+                  "VC Zoom NV",                      # extern zoom
+                  "er machen",                       # KEIN VC-Termin
+                  "Terminierung VC Zoom NV Frau B.", # VC + Tool, aber Aufgabe
+                  "VC Webex FU"),                    # VC + Tool, aber Badge fehlt
+    task_badge = c("visit", "visit", "visit", "call", "important", NA_character_),
     stringsAsFactors = FALSE
   )
 }
@@ -38,7 +42,10 @@ test_that("assemble bildet nur VC-Termine, wendet Anti-Join und Status korrekt a
     crm_user_contact = make_user_contact(),
     msgraph_meetings = make_msgraph()
   )
-  # task 4 (kein VC) raus; task 2 (teams + MSGraph-Match) raus -> bleiben 1 und 3
+  # task 4 (kein VC) raus; task 2 (teams + MSGraph-Match) raus;
+  # task 5 (Badge 'important') und task 6 (Badge NA) raus -> bleiben 1 und 3.
+  # 5 und 6 nennen ein externes Tool, der Informativ-Filter greift bei ihnen
+  # also NICHT — sie fallen ausschliesslich am Badge.
   expect_setequal(res$crm_task_id, c(1L, 3L))
 
   r1 <- res[res$crm_task_id == 1L, ]
@@ -84,6 +91,7 @@ test_that("Filter: nur Zeilen mit erkanntem Tool ODER erkanntem Status bleiben",
     task_name    = c("VC Webex ZR",   # Tool erkannt -> bleibt
                      "VC Rueckruf",   # kein Tool, kein Status -> raus (Rauschen)
                      "VC Rueckruf"),  # kein Tool, aber Status-Kommentar -> bleibt
+    task_badge   = c("visit", "visit", "visit"),
     stringsAsFactors = FALSE
   )
   comments <- data.frame(task_id = 106L, comment_name = "Kunde nicht erschienen",

@@ -13,6 +13,73 @@ is_vc_task <- function(task_name) {
     stringr::str_detect(x, "web ?ex|zoom|skype|google ?meet|g ?meet")
 }
 
+#' Erkennt, ob ein CRM-Task ein Videocall-TERMIN ist
+#'
+#' Zwei unabhaengige Fragen an denselben Task, beide muessen mit ja beantwortet
+#' sein: [is_vc_task()] klaert den **Kanal** (Videocall, nicht Telefon, nicht vor
+#' Ort), `task_badge == "visit"` klaert die **Art** (Termin, nicht Aufgabe).
+#'
+#' Ohne die zweite Bedingung zaehlen Terminierungs-Aufgaben als Termine: ein Task
+#' "Terminierung VC NV Frau Benchenna" nennt einen Videocall, ist aber die
+#' Aufgabe, ihn erst zu vereinbaren.
+#'
+#' `visit` ist als Termin-Marker belegt, nicht angenommen. Ueber alle CRM-Tasks
+#' (09/2025-09/2026) tragen 67,7 Prozent der `visit`-Tasks einen MSGraph-
+#' Kalendertermin am selben Tag beim selben Lead, gegen 12,2 (`important`), 5,5
+#' (`preparation`), 4,3 (`email`), 1,1 (`task`) und 0,5 Prozent (`call`).
+#'
+#' BEWUSST KEIN Titel-Muster fuer Terminierungs-Aufgaben. Von 41 `visit`-Tasks
+#' mit "Terminierung" im Namen haben 28 einen belegten Kalendertermin — es sind
+#' echte Termine, deren Task beim Zustandekommen nicht umbenannt wurde. Ein
+#' Titel-Ausschluss zerstoert dort 28 belegte Termine, um 13 unsichere zu
+#' entfernen. Der Badge erledigt die Terminierungs-Aufgaben ohnehin: von 519
+#' Tasks mit diesem Titelmuster tragen nur 41 den `visit`-Badge.
+#'
+#' Positivliste, nicht Verbotsliste: `task_badge` ist nullable, ein NA-Badge
+#' darf nicht durchrutschen.
+#'
+#' @param task_name Character(-Vektor) mit dem CRM-Task-Namen.
+#' @param task_badge Character(-Vektor) aus `raw.crm_lead_tasks.task_badge`.
+#' @return Logical(-Vektor).
+#' @export
+is_crm_vc_meeting <- function(task_name, task_badge) {
+  # Ohne die Spalte waere task_badge NULL, das Ergebnis logical(0) und die
+  # Trefferliste lautlos leer — siehe stop_if_badge_unbrauchbar().
+  if (is.null(task_badge)) {
+    stop("is_crm_vc_meeting(): task_badge fehlt. Ohne die Spalte gilt kein Task ",
+         "als Termin und die CRM-Zeilen wuerden beim naechsten Lauf geloescht.",
+         call. = FALSE)
+  }
+  is_vc_task(task_name) & !is.na(task_badge) & task_badge == "visit"
+}
+
+#' Bricht ab, wenn die Badge-Spalte unbrauchbar ist (interne Helferfunktion)
+#'
+#' Beide Schreib-Jobs ersetzen ihre CRM-Zeilen vollstaendig
+#' (`delete_missing = TRUE` bzw. scoped delete). Eine leere Trefferliste ist
+#' deshalb nicht "keine Termine", sondern "alle bestehenden CRM-Termine
+#' loeschen". `raw.crm_lead_tasks.task_badge` ist nullable: faellt die Befuellung
+#' aus, waere jeder Badge NA, jeder Task kein Termin und der naechste
+#' FlowForce-Lauf wuerde beide Zieltabellen still leerraeumen. Lieber laut
+#' scheitern (Hausregel fuer `do/main*.R`).
+#'
+#' @param task_badge Character(-Vektor) aus `raw.crm_lead_tasks.task_badge`.
+#' @return `invisible(NULL)`, oder ein Fehler.
+#' @keywords internal
+# ---- start ---- #
+stop_if_badge_unbrauchbar <- function(task_badge) {
+  if (is.null(task_badge)) {
+    stop("raw.crm_lead_tasks.task_badge fehlt in der geladenen Task-Menge.",
+         call. = FALSE)
+  }
+  if (length(task_badge) > 0 && all(is.na(task_badge))) {
+    stop("raw.crm_lead_tasks.task_badge ist durchgehend NA (", length(task_badge),
+         " Tasks). Das wuerde jeden Task als Nicht-Termin einstufen und die ",
+         "bestehenden CRM-Termine beim Schreiben loeschen.", call. = FALSE)
+  }
+  invisible(NULL)
+}
+
 #' Extrahiert das VC-Tool aus dem CRM-Task-Namen
 #'
 #' Priorisierter, case-insensitiver Keyword-Match. Gibt einen kanonischen
