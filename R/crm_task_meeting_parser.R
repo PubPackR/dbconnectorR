@@ -158,6 +158,15 @@ is_external_tool <- function(tool) {
 #' stehen irrefuehrende Notizen zu vergangenen Terminen). Priorisiert:
 #' storniert > no_show > show_up > unbekannt.
 #'
+#' KOMMENTARE SIND BEWUSST DIE EINZIGE QUELLE. Die Lead-Protokolle
+#' (`raw.crm_lead_protocols`) als zweite Textquelle wurden am 05.09.2026 geprueft
+#' und verworfen: sie loesen nur 9,2 Prozent der `unbekannt`-Faelle auf (zuletzt 3
+#' bis 6 im Monat), der Gewinn bewegt die Show-Up-Quote um null, und "hat
+#' stattgefunden" ist dort per Stichwort nicht erkennbar. Vollstaendige Messung mit
+#' Zahlen und Grenzen: `docs/specs/2026-09-05-protokolle-als-statusquelle-verworfen.md`.
+#' Wer die Idee erneut aufgreift, findet dort auch den billigeren Hebel (die
+#' Absage-Familie in den no_show-Zweig).
+#'
 #' @param comment_text Character(-Vektor) mit dem Kommentar-Text.
 #' @return Character(-Vektor): storniert/no_show/show_up/unbekannt.
 #' @export
