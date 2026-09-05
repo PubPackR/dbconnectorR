@@ -54,6 +54,8 @@ Die Beobachtung selbst geht nicht verloren: `meeting_status = 'unbekannt'` und
 
 - `R/sales_meetings_unified.R` — `crm_status_flags()`, Doku
 - `tests/testthat/test-sales_meetings_unified.R`
+- `inst/sql/2026-09-05-exclusion-reason-ohne-crm-unbekannt.sql` — Spaltenkommentar,
+  der `crm_unbekannt` noch als moeglichen Wert fuehrt
 - Tabelle `processed.sales_meetings_unified` (Rebuild noetig, voll rueckwirkend)
 - Nachgezogene Doku: `kpiR/R/support_termine_helpers.R`,
   `shiny-99-modules/func/module_sales_kpi/external_events_helpers.R`
