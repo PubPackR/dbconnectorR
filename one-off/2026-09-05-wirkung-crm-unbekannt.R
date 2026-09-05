@@ -114,9 +114,13 @@ ereignisse <- ereignisse[!ist_crm | ereignisse$task_badge %in% "visit", , drop =
 entfernt <- vorher_n - sum(ereignisse$source %in% "crm_task")
 message("Badge-Vorgriff: ", entfernt, " von ", vorher_n,
         " crm_task-Zeilen entfernt.")
-# Alles oder nichts entfernt heisst: der Join hat nicht gegriffen, nicht dass
-# der Badge so sauber trennt.
-stopifnot(entfernt > 0, entfernt < vorher_n)
+
+# Gemessen am 05.09.2026: 0 von 1873. PR 43 ist installiert und gelaufen, die
+# Tabelle enthaelt nur noch visit-Zeilen, der Vorgriff ist gegenstandslos. Er
+# bleibt als Guard stehen: haette der Join NICHT gegriffen, waere task_badge
+# durchgehend NA und ALLE 1873 Zeilen waeren entfernt worden. Genau das faengt
+# die Pruefung ab. Ein Ergebnis von 0 ist in Ordnung, eines von vorher_n nicht.
+stopifnot(entfernt < vorher_n)
 
 ## ----- Alte und neue Lesart ----- ##
 
@@ -124,49 +128,67 @@ ereignisse_neu <- ereignisse
 ereignisse_neu$stattgefunden <- ereignisse_neu$stattgefunden |
   (ereignisse_neu$exclusion_reason %in% "crm_unbekannt" & ereignisse_neu$bewertbar)
 
-zusammenziehen <- function(ereignisse, name) {
-  kpiR::kpi_sales_termine_showup(con, START_MONAT, END_MONAT,
-                                 ereignisse = ereignisse) %>%
-    # Dieselbe Menge wie shiny.sales_kpi_termine, siehe Kopf.
-    filter(is.na(restmenge)) %>%
+zusammenziehen <- function(ereignisse, name, nur_angezeigte) {
+  ergebnis <- kpiR::kpi_sales_termine_showup(con, START_MONAT, END_MONAT,
+                                             ereignisse = ereignisse)
+  # Dieselbe Menge wie shiny.sales_kpi_termine, siehe Kopf.
+  if (nur_angezeigte) ergebnis <- filter(ergebnis, is.na(restmenge))
+
+  ergebnis %>%
     group_by(monat) %>%
     summarise(nenner = sum(n_termine_gelegt_bewertbar),
               !!name := sum(n_termine_gelegt_stattgefunden),
               .groups = "drop")
 }
 
-alt <- zusammenziehen(ereignisse, "zaehler_alt")
-neu <- zusammenziehen(ereignisse_neu, "zaehler_neu")
+## ----- Ergebnis, in zwei Sichten ----- ##
+# Die beiden Sichten auseinanderzuhalten ist hier der ganze Punkt. Gemessen am
+# 05.09.2026: in der ANGEZEIGTEN Sicht ist die Differenz in allen zwoelf
+# Monaten exakt null. Grund ist keine kleine Wirkung, sondern gar keine: JEDE
+# crm_task-Zeile traegt restmenge = "organizer_crm_task", weil ein CRM-Task
+# keinen Organisator kennt. Die 1.826 crm_unbekannt-Termine standen also nie
+# im Nenner der Show-Up-Quote, weder vorher noch nachher.
+#
+# Die Gesamtsicht zeigt, was in der Fakttabelle passiert. Wo der Fix auf eine
+# Kennzahl durchschlaegt, ist damit NICHT hier zu sehen: Grundgroesse 8 loest
+# ueber contact_id auf statt ueber den Organisator, erster_vc_je_lead() braucht
+# gar keine Person. Beides misst dieses Skript nicht.
 
-# Der Nenner darf sich zwischen den beiden Laeufen NICHT unterscheiden. Tut er
-# es doch, wurde die Lesart nicht nur im Zaehler geaendert und keine Zeile der
-# Tabelle unten ist brauchbar. Deshalb VOR der Ausgabe.
-stopifnot(identical(alt$monat, neu$monat), identical(alt$nenner, neu$nenner))
+auswerten <- function(nur_angezeigte) {
+  alt <- zusammenziehen(ereignisse,     "zaehler_alt", nur_angezeigte)
+  neu <- zusammenziehen(ereignisse_neu, "zaehler_neu", nur_angezeigte)
 
-## ----- Ergebnis ----- ##
+  # Der Nenner darf sich zwischen den beiden Laeufen NICHT unterscheiden. Tut
+  # er es doch, wurde die Lesart nicht nur im Zaehler geaendert und keine Zeile
+  # der Tabelle ist brauchbar. Deshalb VOR der Ausgabe.
+  stopifnot(identical(alt$monat, neu$monat), identical(alt$nenner, neu$nenner))
 
-ergebnis <- alt %>%
-  inner_join(select(neu, monat, zaehler_neu), by = "monat") %>%
-  mutate(
-    quote_alt = zaehler_alt / nenner * 100,
-    quote_neu = zaehler_neu / nenner * 100,
-    # Erst die Differenz, dann runden. Aus gerundeten Quoten gerechnet weicht
-    # sie um bis zu 0,1 Prozentpunkte ab, und genau diese Spanne wird berichtet.
-    delta_pp  = round(quote_neu - quote_alt, 1),
-    quote_alt = round(quote_alt, 1),
-    quote_neu = round(quote_neu, 1),
-    Monat     = format(monat, "%m.%Y")
-  ) %>%
-  arrange(monat) %>%
-  select(Monat, nenner, zaehler_alt, zaehler_neu, quote_alt, quote_neu, delta_pp)
+  alt %>%
+    inner_join(select(neu, monat, zaehler_neu), by = "monat") %>%
+    mutate(
+      quote_alt = zaehler_alt / nenner * 100,
+      quote_neu = zaehler_neu / nenner * 100,
+      # Erst die Differenz, dann runden. Aus gerundeten Quoten gerechnet weicht
+      # sie um bis zu 0,1 Prozentpunkte ab, und genau die wird berichtet.
+      delta_pp  = round(quote_neu - quote_alt, 1),
+      quote_alt = round(quote_alt, 1),
+      quote_neu = round(quote_neu, 1),
+      Monat     = format(monat, "%m.%Y")
+    ) %>%
+    arrange(monat) %>%
+    select(Monat, nenner, zaehler_alt, zaehler_neu, quote_alt, quote_neu, delta_pp)
+}
 
-print(as.data.frame(ergebnis), row.names = FALSE)
+berichten <- function(ergebnis, titel) {
+  cat("\n==", titel, "==\n")
+  print(as.data.frame(ergebnis), row.names = FALSE)
+  cat("  Nenner ", sum(ergebnis$nenner),
+      sprintf(" | Quote alt %.1f %% | neu %.1f %%",
+              sum(ergebnis$zaehler_alt) / sum(ergebnis$nenner) * 100,
+              sum(ergebnis$zaehler_neu) / sum(ergebnis$nenner) * 100), "\n")
+  cat("  Spanne der Monatsdifferenz: ", min(ergebnis$delta_pp), " bis ",
+      max(ergebnis$delta_pp), " Prozentpunkte\n")
+}
 
-cat("\nGesamt ueber den Zeitraum:\n")
-cat("  Nenner      ", sum(ergebnis$nenner), "\n")
-cat("  Zaehler alt ", sum(ergebnis$zaehler_alt),
-    sprintf(" (%.1f %%)", sum(ergebnis$zaehler_alt) / sum(ergebnis$nenner) * 100), "\n")
-cat("  Zaehler neu ", sum(ergebnis$zaehler_neu),
-    sprintf(" (%.1f %%)", sum(ergebnis$zaehler_neu) / sum(ergebnis$nenner) * 100), "\n")
-cat("  Spanne der Monatsdifferenz: ",
-    min(ergebnis$delta_pp), " bis ", max(ergebnis$delta_pp), " Prozentpunkte\n")
+berichten(auswerten(TRUE),  "Angezeigte Quote (restmenge IS NULL, wie shiny.sales_kpi_termine)")
+berichten(auswerten(FALSE), "Alle Zeilen inklusive Restmengen (Sicht der Fakttabelle)")
