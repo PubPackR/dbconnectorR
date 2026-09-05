@@ -57,9 +57,29 @@ Der Produzent ist in keinem lokal ausgecheckten Repo auffindbar.
 
 Die Voraussetzung aus Ticket 1218179753663016 ist eingelöst: die Protokolle wurden
 ausgewertet und schließen die Lücke nicht. `crm_unbekannt` heißt damit belegbar
-„nirgends dokumentiert" statt „nicht nachgesehen". Wo überhaupt etwas dokumentiert ist,
-ist es weit überwiegend ein No-Show — die Lesart von `crm_unbekannt` als No-Show ist
-also gestützt, nicht nur gesetzt.
+„nirgends dokumentiert" statt „nicht nachgesehen".
+
+**Und der undokumentierte Fall hat überwiegend stattgefunden.** Punkt 4 wird oft falsch
+herum gelesen: dass Notizen bei No-Shows häufiger sind, heißt für die *undokumentierten*
+Termine das Gegenteil. Aus denselben Zahlen (Fenster 0 bis +3):
+
+| | Termine | mit Notiz | ohne Notiz |
+|---|---|---|---|
+| stattgefunden | 7.355 | 2.093 | 5.262 |
+| No-Show | 3.011 | 1.232 | 1.779 |
+
+Unter den Terminen **ohne** Dokumentation sind **25,3 % No-Shows**, gegen eine
+Basisquote von 29,0 % über alle Termine. Ein undokumentierter Termin hat also mit rund
+drei Vierteln Wahrscheinlichkeit stattgefunden und ist sogar etwas seltener ein No-Show
+als der Durchschnittstermin. Mit den Tag-0-Zahlen gerechnet: 27,7 %, dieselbe Aussage.
+
+Ticket 1218179753663016 hatte `crm_unbekannt` am 04.09.2026 als **No-Show** gelesen.
+Diese Messung stützt das **nicht**, sie spricht dagegen. Die Lesart wurde am 05.09.2026
+entsprechend gedreht: `crm_unbekannt` ist ein stattgefundener Termin ohne weitere
+Dokumentation.
+
+Einschränkung: gerechnet auf MSGraph-verifizierbaren Terminen. `crm_unbekannt`-Zeilen
+sind gerade die **ohne** MSGraph-Partner. Es ist eine Übertragung, kein Beweis.
 
 ## Grenzen dieser Aussage
 
