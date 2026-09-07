@@ -34,6 +34,29 @@ load_meeting_organizers <- function(con) {
   org
 }
 
+#' Ab wann ein leeres `join_url` etwas bedeutet
+#'
+#' `raw.msgraph_events.join_url` wird erst seit dem 26.08.2026 befuellt. Der
+#' Wert ist der Zeitpunkt der ersten Zeile, die ueberhaupt einen Link traegt
+#' (`min(updated_at) WHERE join_url IS NOT NULL`, gemessen am 07.09.2026).
+#'
+#' **Fuer aeltere Zeilen heisst ein leeres Feld nicht "kein Teams-Termin",
+#' sondern "damals nicht gespeichert".** Von Januar bis Juni 2026 traegt kein
+#' einziges Event einen Link, waehrend `is_online_meeting` durchgehend bei rund
+#' der Haelfte liegt. Ohne diese Schranke wuerden allein fuer Mai und Juni 117
+#' Termine auf `is_no_show = FALSE` gedreht, weil ein Feld fehlt, das es damals
+#' nicht gab.
+#'
+#' Der Stichtag traegt auf Tagesebene: ab dem 26.08.2026 tragen **100 %** der
+#' als `is_online_meeting` gefuehrten Events einen Link, an jedem einzelnen Tag.
+#'
+#' Vergangene Termine werden nicht neu geholt. Die Schranke wirkt deshalb
+#' vorerst nur auf kuenftig geschriebene Zeilen; auf dem Bestand vom 07.09.2026
+#' aendert sie nichts. Das ist bekannt und beabsichtigt, siehe kpiR ADR 0015.
+#'
+#' @keywords internal
+JOIN_URL_ROLLOUT <- as.POSIXct("2026-08-26 02:54:34", tz = "Europe/Berlin")
+
 #' CRM-Status -> (is_no_show, excluded)
 #'
 #' @description
@@ -104,8 +127,9 @@ crm_status_flags <- function(status) {
 #'   event_date, event_start, contact_id (Rep), is_no_show, excluded,
 #'   is_short_lived_event, is_responsible, original_created_at, event_id und
 #'   optional organizer_contact_id (fehlt sie, gilt der Organisator als
-#'   unbekannt) sowie optional join_url (fehlt sie, greift der `unbekannt`-
-#'   Override gar nicht und der Datenbestand bleibt wie ohne diese Regel).
+#'   unbekannt) sowie optional join_url und event_row_updated_at (fehlt eine
+#'   davon, greift der `unbekannt`-Override gar nicht und der Datenbestand
+#'   bleibt wie ohne diese Regel).
 #' @param crm_meetings data.frame mit crm_task_id, lead_id, event_date,
 #'   precise_time, contact_id (Rep), meeting_tool, meeting_type, meeting_status,
 #'   is_external_tool, original_created_at.
@@ -131,7 +155,7 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
   # Messung. Siehe den Override-Block weiter unten.
   #
   # `ms_ohne_link` sagt **nicht** "join_url ist NA", sondern "wir wissen, dass
-  # es keinen Link gab". Drei Faelle laufen sonst zusammen:
+  # es keinen Link gab". Vier Faelle laufen sonst zusammen:
   #   * kein Link              -> TRUE, hier gibt es nichts zu messen
   #   * leerer String als Link -> TRUE, ein "" ist kein Beitrittslink
   #   * keine Event-Zeile      -> FALSE, wir wissen es schlicht nicht, und aus
@@ -139,14 +163,20 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
   #                               werden. Erkennbar an `event_start`, das in
   #                               raw.msgraph_events NOT NULL ist: fehlt es,
   #                               hat der left_join nichts gefunden.
-  # Fehlt die Spalte ganz (Caller mit selbst gebautem data.frame), bleibt alles
-  # FALSE. Der Fallback ist damit der neutrale: kein Override, kein
+  #   * Zeile aelter als der   -> FALSE, siehe JOIN_URL_ROLLOUT.
+  #     Rollout
+  # Fehlt eine der beiden Spalten (Caller mit selbst gebautem data.frame),
+  # bleibt alles FALSE. Der Fallback ist damit der neutrale: kein Override, kein
   # veraenderter Datenbestand, so wie es ohne diese Regel war.
-  ms_ohne_link <- if (is.null(msgraph_meetings$join_url)) {
+  ms_ohne_link <- if (is.null(msgraph_meetings$join_url) ||
+                      is.null(msgraph_meetings$event_row_updated_at)) {
     rep(FALSE, nrow(msgraph_meetings))
   } else {
     url <- as.character(msgraph_meetings$join_url)
-    !is.na(msgraph_meetings$event_start) & (is.na(url) | !nzchar(trimws(url)))
+    upd <- msgraph_meetings$event_row_updated_at
+    link_bekannt <- !is.na(msgraph_meetings$event_start) &
+      !is.na(upd) & upd >= JOIN_URL_ROLLOUT
+    link_bekannt & (is.na(url) | !nzchar(trimws(url)))
   }
   base <- data.frame(
     meeting_key          = paste0("msgraph_", msgraph_meetings$call_event_mapping_id,
@@ -305,7 +335,7 @@ update_sales_meetings_unified <- function(con) {
       by = c("call_event_mapping_id" = "id")) %>%
     dplyr::left_join(
       dplyr::tbl(con, I("raw.msgraph_events")) %>%
-        dplyr::select(id, event_start, join_url),
+        dplyr::select(id, event_start, join_url, event_row_updated_at = updated_at),
       by = c("event_id" = "id")) %>%
     dplyr::collect()
   msgraph_meetings$event_id    <- as.character(msgraph_meetings$event_id)

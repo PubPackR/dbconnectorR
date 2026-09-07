@@ -126,14 +126,25 @@ test_that("Override + storniert: MSGraph-Termin wird excluded", {
   expect_equal(r$no_show_source, "crm_override")
 })
 
+# Fixture fuer die join_url-Regel: Zeile nach dem Rollout geschrieben, sonst
+# sagt ein leeres Feld ohnehin nichts.
+mk_msgraph_link <- function(url = NA_character_,
+                            upd = JOIN_URL_ROLLOUT + 86400) {
+  ms <- mk_msgraph()
+  ms$join_url <- url
+  ms$event_row_updated_at <- upd
+  ms
+}
+# Die eine CRM-Zeile, die alle Faelle hier ausloest: lead 30 / 2026-07-03 ->
+# genau ein MSGraph-Termin (msgraph_12_30), is_no_show=TRUE, excluded=FALSE.
+crm_unbekannt <- function() mk_crm(list(
+  crm_row(9, 30L, "2026-07-03", "teams", "unbekannt", FALSE)))
+
 test_that("Override + unbekannt MIT Teams-Link: MSGraph-Messung bleibt stehen", {
-  # lead 30 / 2026-07-03 -> genau ein MSGraph-Termin, is_no_show=TRUE, excluded=FALSE.
   # Mit Beitrittslink konnte ein Anwesenheitsbericht entstehen; ihn ein fehlender
   # CRM-Kommentar ueberschreiben zu lassen, hiesse Messung durch Auslegung ersetzen.
-  ms <- mk_msgraph()
-  ms$join_url <- "https://teams.microsoft.com/l/meetup-join/x"
-  res <- assemble_unified_meetings(ms,
-           mk_crm(list(crm_row(9, 30L, "2026-07-03", "teams", "unbekannt", FALSE))))
+  res <- assemble_unified_meetings(
+    mk_msgraph_link("https://teams.microsoft.com/l/meetup-join/x"), crm_unbekannt())
   r <- res[res$meeting_key == "msgraph_12_30", ]
   expect_true(r$is_no_show)
   expect_false(r$excluded)
@@ -144,10 +155,7 @@ test_that("Override + unbekannt OHNE Teams-Link: kein No-Show aus fehlendem Call
   # Ohne Beitrittslink konnte es keinen Anwesenheitsbericht geben. is_no_show
   # traegt dort nur "kein Call gefunden" — eine Beobachtungsgrenze, keine
   # Messung. Dann gilt der CRM-Termin ohne Doku als stattgefunden (ADR 0015).
-  ms <- mk_msgraph()
-  ms$join_url <- NA_character_
-  res <- assemble_unified_meetings(ms,
-           mk_crm(list(crm_row(9, 30L, "2026-07-03", "teams", "unbekannt", FALSE))))
+  res <- assemble_unified_meetings(mk_msgraph_link(NA_character_), crm_unbekannt())
   r <- res[res$meeting_key == "msgraph_12_30", ]
   expect_false(r$is_no_show)
   expect_false(r$excluded)
@@ -155,30 +163,33 @@ test_that("Override + unbekannt OHNE Teams-Link: kein No-Show aus fehlendem Call
   expect_equal(r$meeting_status, "unbekannt")
 })
 
-test_that("Caller ohne join_url-Spalte: Override greift nicht, Bestand unveraendert", {
-  # Neutraler Fallback. Ein Caller, der die neue Spalte nicht kennt, darf keine
+test_that("Zeile aelter als der join_url-Rollout: kein Override aus einem leeren Feld", {
+  # Vor dem 26.08.2026 wurde join_url gar nicht gespeichert. Ein leeres Feld
+  # heisst dort "damals nicht erfasst", nicht "kein Teams-Termin". Ohne diese
+  # Schranke wuerden allein Mai und Juni 2026 117 Termine faelschlich drehen.
+  res <- assemble_unified_meetings(
+    mk_msgraph_link(NA_character_, JOIN_URL_ROLLOUT - 86400), crm_unbekannt())
+  expect_true(res[res$meeting_key == "msgraph_12_30", ]$is_no_show)
+})
+
+test_that("Caller ohne die neuen Spalten: Override greift nicht, Bestand unveraendert", {
+  # Neutraler Fallback. Ein Caller, der die Spalten nicht kennt, darf keine
   # Anwesenheitsdaten drehen — auch nicht still.
-  res <- assemble_unified_meetings(mk_msgraph(),
-           mk_crm(list(crm_row(9, 30L, "2026-07-03", "teams", "unbekannt", FALSE))))
+  res <- assemble_unified_meetings(mk_msgraph(), crm_unbekannt())
   expect_true(res[res$meeting_key == "msgraph_12_30", ]$is_no_show)
 })
 
 test_that("Leerer String als join_url zaehlt als kein Link", {
-  ms <- mk_msgraph()
-  ms$join_url <- "  "
-  res <- assemble_unified_meetings(ms,
-           mk_crm(list(crm_row(9, 30L, "2026-07-03", "teams", "unbekannt", FALSE))))
+  res <- assemble_unified_meetings(mk_msgraph_link("  "), crm_unbekannt())
   expect_false(res[res$meeting_key == "msgraph_12_30", ]$is_no_show)
 })
 
 test_that("Keine Event-Zeile (event_start NA): kein Override aus Nichtwissen", {
   # join_url ist hier NA, weil der left_join auf raw.msgraph_events nichts fand,
   # nicht weil es keinen Link gab. Daraus darf keine Anwesenheitsaussage werden.
-  ms <- mk_msgraph()
-  ms$join_url <- NA_character_
+  ms <- mk_msgraph_link(NA_character_)
   ms$event_start[3] <- as.POSIXct(NA, tz = "UTC")
-  res <- assemble_unified_meetings(ms,
-           mk_crm(list(crm_row(9, 30L, "2026-07-03", "teams", "unbekannt", FALSE))))
+  res <- assemble_unified_meetings(ms, crm_unbekannt())
   expect_true(res[res$meeting_key == "msgraph_12_30", ]$is_no_show)
 })
 
