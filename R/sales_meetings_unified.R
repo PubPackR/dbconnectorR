@@ -104,7 +104,8 @@ crm_status_flags <- function(status) {
 #'   event_date, event_start, contact_id (Rep), is_no_show, excluded,
 #'   is_short_lived_event, is_responsible, original_created_at, event_id und
 #'   optional organizer_contact_id (fehlt sie, gilt der Organisator als
-#'   unbekannt).
+#'   unbekannt) sowie optional join_url (fehlt sie, gilt kein Meeting als
+#'   verlinkt und `unbekannt` setzt durchgehend `is_no_show = FALSE`).
 #' @param crm_meetings data.frame mit crm_task_id, lead_id, event_date,
 #'   precise_time, contact_id (Rep), meeting_tool, meeting_type, meeting_status,
 #'   is_external_tool, original_created_at.
@@ -124,6 +125,14 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
     rep(NA_character_, nrow(msgraph_meetings))
   } else {
     as.character(msgraph_meetings$exclusion_reason)
+  }
+  # Traegt das Meeting einen Teams-Beitrittslink, konnte ueberhaupt ein
+  # Anwesenheitsbericht entstehen. Fehlt er, ist "kein Call gefunden" keine
+  # Messung. Siehe den Override-Block weiter unten.
+  ms_join_url <- if (is.null(msgraph_meetings$join_url)) {
+    rep(NA_character_, nrow(msgraph_meetings))
+  } else {
+    as.character(msgraph_meetings$join_url)
   }
   base <- data.frame(
     meeting_key          = paste0("msgraph_", msgraph_meetings$call_event_mapping_id,
@@ -227,15 +236,24 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
     # eindeutiger (bzw. aufgeloester) Match -> Override. Nur ein am CRM-Task
     # dokumentierter Ausgang setzt is_no_show; storniert -> excluded.
     #
-    # **"unbekannt" laesst MSGraph unangetastet**, obwohl crm_status_flags()
-    # dafuer seit 05.09.2026 `is_no_show = FALSE` liefert. Die Absicht ist eine
-    # andere: dort heisst FALSE "wir legen eine CRM-only-Zeile ohne Doku als
-    # stattgefunden aus", hier laege eine echte Anwesenheitsmessung aus dem
-    # Kalender vor, und die faende ein fehlender CRM-Kommentar nicht besser.
-    # Wer die Bedingung hier auf "unbekannt" erweitert, ueberschreibt eine
-    # Messung mit einer Auslegung.
+    # **"unbekannt" haengt am Teams-Beitrittslink** (ADR 0015, 07.09.2026).
+    # Bis dahin liess es MSGraph immer unangetastet, mit der Begruendung, hier
+    # laege eine echte Anwesenheitsmessung aus dem Kalender vor, und die faende
+    # ein fehlender CRM-Kommentar nicht besser. Das Argument stimmt — aber nur,
+    # wo es einen Anwesenheitsbericht geben konnte. Der setzt einen
+    # Beitrittslink voraus (ADR 0004 in kpiR: 5.607 von 29.201 Terminen tragen
+    # einen). Ohne Link ist "kein Call gefunden" dieselbe Beobachtungsgrenze wie
+    # beim Alt-Tenant und keine Messung, und dann traegt der CRM-Termin ohne
+    # dokumentierten Ausgang: stattgefunden ohne Doku.
+    #
+    # Wer die Bedingung auf Meetings **mit** Link ausweitet, ueberschreibt eine
+    # Messung mit einer Auslegung. Genau davor stand hier die Warnung, und sie
+    # gilt weiter.
     j <- cand[1]
     if (cm$meeting_status %in% c("no_show", "show_up")) base$is_no_show[j] <- fl$is_no_show
+    if (cm$meeting_status == "unbekannt" && is.na(ms_join_url[j])) {
+      base$is_no_show[j] <- FALSE
+    }
     if (cm$meeting_status == "storniert") {
       base$excluded[j] <- TRUE
       # Ohne den Grund waere nach dem Override nicht mehr erkennbar, ob der
@@ -273,7 +291,7 @@ update_sales_meetings_unified <- function(con) {
       by = c("call_event_mapping_id" = "id")) %>%
     dplyr::left_join(
       dplyr::tbl(con, I("raw.msgraph_events")) %>%
-        dplyr::select(id, event_start),
+        dplyr::select(id, event_start, join_url),
       by = c("event_id" = "id")) %>%
     dplyr::collect()
   msgraph_meetings$event_id    <- as.character(msgraph_meetings$event_id)

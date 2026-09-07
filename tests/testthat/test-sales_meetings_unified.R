@@ -126,14 +126,39 @@ test_that("Override + storniert: MSGraph-Termin wird excluded", {
   expect_equal(r$no_show_source, "crm_override")
 })
 
-test_that("Override + unbekannt: MSGraph is_no_show/excluded bleiben unveraendert", {
-  # lead 30 / 2026-07-03 -> genau ein MSGraph-Termin, is_no_show=TRUE, excluded=FALSE
-  res <- assemble_unified_meetings(mk_msgraph(),
+test_that("Override + unbekannt MIT Teams-Link: MSGraph-Messung bleibt stehen", {
+  # lead 30 / 2026-07-03 -> genau ein MSGraph-Termin, is_no_show=TRUE, excluded=FALSE.
+  # Mit Beitrittslink konnte ein Anwesenheitsbericht entstehen; ihn ein fehlender
+  # CRM-Kommentar ueberschreiben zu lassen, hiesse Messung durch Auslegung ersetzen.
+  ms <- mk_msgraph()
+  ms$join_url <- "https://teams.microsoft.com/l/meetup-join/x"
+  res <- assemble_unified_meetings(ms,
            mk_crm(list(crm_row(9, 30L, "2026-07-03", "teams", "unbekannt", FALSE))))
   r <- res[res$meeting_key == "msgraph_12_30", ]
   expect_true(r$is_no_show)
   expect_false(r$excluded)
   expect_equal(r$meeting_tool, "teams")
+})
+
+test_that("Override + unbekannt OHNE Teams-Link: kein No-Show aus fehlendem Call", {
+  # Ohne Beitrittslink konnte es keinen Anwesenheitsbericht geben. is_no_show
+  # traegt dort nur "kein Call gefunden" — eine Beobachtungsgrenze, keine
+  # Messung. Dann gilt der CRM-Termin ohne Doku als stattgefunden (ADR 0015).
+  ms <- mk_msgraph()
+  ms$join_url <- NA_character_
+  res <- assemble_unified_meetings(ms,
+           mk_crm(list(crm_row(9, 30L, "2026-07-03", "teams", "unbekannt", FALSE))))
+  r <- res[res$meeting_key == "msgraph_12_30", ]
+  expect_false(r$is_no_show)
+  expect_false(r$excluded)
+  expect_equal(r$no_show_source, "crm_override")
+  expect_equal(r$meeting_status, "unbekannt")
+})
+
+test_that("Caller ohne join_url-Spalte bricht nicht und behandelt alles als unverlinkt", {
+  res <- assemble_unified_meetings(mk_msgraph(),
+           mk_crm(list(crm_row(9, 30L, "2026-07-03", "teams", "unbekannt", FALSE))))
+  expect_false(res[res$meeting_key == "msgraph_12_30", ]$is_no_show)
 })
 
 test_that("Platzhalter-Guard: CRM-Zeile mit lead_id=NA matcht keine NA-lead-MSGraph-Zeile", {
