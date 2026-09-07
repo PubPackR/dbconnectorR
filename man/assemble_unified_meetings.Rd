@@ -11,8 +11,8 @@ assemble_unified_meetings(msgraph_meetings, crm_meetings)
 event_date, event_start, contact_id (Rep), is_no_show, excluded,
 is_short_lived_event, is_responsible, original_created_at, event_id und
 optional organizer_contact_id (fehlt sie, gilt der Organisator als
-unbekannt) sowie optional join_url (fehlt sie, gilt kein Meeting als
-verlinkt und \code{unbekannt} setzt durchgehend \code{is_no_show = FALSE}).}
+unbekannt) sowie optional join_url (fehlt sie, greift der \code{unbekannt}-
+Override gar nicht und der Datenbestand bleibt wie ohne diese Regel).}
 
 \item{crm_meetings}{data.frame mit crm_task_id, lead_id, event_date,
 precise_time, contact_id (Rep), meeting_tool, meeting_type, meeting_status,

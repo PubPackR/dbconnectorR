@@ -104,8 +104,8 @@ crm_status_flags <- function(status) {
 #'   event_date, event_start, contact_id (Rep), is_no_show, excluded,
 #'   is_short_lived_event, is_responsible, original_created_at, event_id und
 #'   optional organizer_contact_id (fehlt sie, gilt der Organisator als
-#'   unbekannt) sowie optional join_url (fehlt sie, gilt kein Meeting als
-#'   verlinkt und `unbekannt` setzt durchgehend `is_no_show = FALSE`).
+#'   unbekannt) sowie optional join_url (fehlt sie, greift der `unbekannt`-
+#'   Override gar nicht und der Datenbestand bleibt wie ohne diese Regel).
 #' @param crm_meetings data.frame mit crm_task_id, lead_id, event_date,
 #'   precise_time, contact_id (Rep), meeting_tool, meeting_type, meeting_status,
 #'   is_external_tool, original_created_at.
@@ -129,10 +129,24 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
   # Traegt das Meeting einen Teams-Beitrittslink, konnte ueberhaupt ein
   # Anwesenheitsbericht entstehen. Fehlt er, ist "kein Call gefunden" keine
   # Messung. Siehe den Override-Block weiter unten.
-  ms_join_url <- if (is.null(msgraph_meetings$join_url)) {
-    rep(NA_character_, nrow(msgraph_meetings))
+  #
+  # `ms_ohne_link` sagt **nicht** "join_url ist NA", sondern "wir wissen, dass
+  # es keinen Link gab". Drei Faelle laufen sonst zusammen:
+  #   * kein Link              -> TRUE, hier gibt es nichts zu messen
+  #   * leerer String als Link -> TRUE, ein "" ist kein Beitrittslink
+  #   * keine Event-Zeile      -> FALSE, wir wissen es schlicht nicht, und aus
+  #                               Nichtwissen darf keine Anwesenheitsaussage
+  #                               werden. Erkennbar an `event_start`, das in
+  #                               raw.msgraph_events NOT NULL ist: fehlt es,
+  #                               hat der left_join nichts gefunden.
+  # Fehlt die Spalte ganz (Caller mit selbst gebautem data.frame), bleibt alles
+  # FALSE. Der Fallback ist damit der neutrale: kein Override, kein
+  # veraenderter Datenbestand, so wie es ohne diese Regel war.
+  ms_ohne_link <- if (is.null(msgraph_meetings$join_url)) {
+    rep(FALSE, nrow(msgraph_meetings))
   } else {
-    as.character(msgraph_meetings$join_url)
+    url <- as.character(msgraph_meetings$join_url)
+    !is.na(msgraph_meetings$event_start) & (is.na(url) | !nzchar(trimws(url)))
   }
   base <- data.frame(
     meeting_key          = paste0("msgraph_", msgraph_meetings$call_event_mapping_id,
@@ -251,7 +265,7 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
     # gilt weiter.
     j <- cand[1]
     if (cm$meeting_status %in% c("no_show", "show_up")) base$is_no_show[j] <- fl$is_no_show
-    if (cm$meeting_status == "unbekannt" && is.na(ms_join_url[j])) {
+    if (cm$meeting_status == "unbekannt" && ms_ohne_link[j]) {
       base$is_no_show[j] <- FALSE
     }
     if (cm$meeting_status == "storniert") {

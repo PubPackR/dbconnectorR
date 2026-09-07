@@ -155,10 +155,31 @@ test_that("Override + unbekannt OHNE Teams-Link: kein No-Show aus fehlendem Call
   expect_equal(r$meeting_status, "unbekannt")
 })
 
-test_that("Caller ohne join_url-Spalte bricht nicht und behandelt alles als unverlinkt", {
+test_that("Caller ohne join_url-Spalte: Override greift nicht, Bestand unveraendert", {
+  # Neutraler Fallback. Ein Caller, der die neue Spalte nicht kennt, darf keine
+  # Anwesenheitsdaten drehen — auch nicht still.
   res <- assemble_unified_meetings(mk_msgraph(),
            mk_crm(list(crm_row(9, 30L, "2026-07-03", "teams", "unbekannt", FALSE))))
+  expect_true(res[res$meeting_key == "msgraph_12_30", ]$is_no_show)
+})
+
+test_that("Leerer String als join_url zaehlt als kein Link", {
+  ms <- mk_msgraph()
+  ms$join_url <- "  "
+  res <- assemble_unified_meetings(ms,
+           mk_crm(list(crm_row(9, 30L, "2026-07-03", "teams", "unbekannt", FALSE))))
   expect_false(res[res$meeting_key == "msgraph_12_30", ]$is_no_show)
+})
+
+test_that("Keine Event-Zeile (event_start NA): kein Override aus Nichtwissen", {
+  # join_url ist hier NA, weil der left_join auf raw.msgraph_events nichts fand,
+  # nicht weil es keinen Link gab. Daraus darf keine Anwesenheitsaussage werden.
+  ms <- mk_msgraph()
+  ms$join_url <- NA_character_
+  ms$event_start[3] <- as.POSIXct(NA, tz = "UTC")
+  res <- assemble_unified_meetings(ms,
+           mk_crm(list(crm_row(9, 30L, "2026-07-03", "teams", "unbekannt", FALSE))))
+  expect_true(res[res$meeting_key == "msgraph_12_30", ]$is_no_show)
 })
 
 test_that("Platzhalter-Guard: CRM-Zeile mit lead_id=NA matcht keine NA-lead-MSGraph-Zeile", {
