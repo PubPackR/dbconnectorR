@@ -11,7 +11,7 @@ assemble_unified_meetings(msgraph_meetings, crm_meetings)
 event_date, event_start, contact_id (Rep), is_no_show, excluded,
 is_short_lived_event, is_responsible, original_created_at, event_id und
 optional organizer_contact_id (fehlt sie, gilt der Organisator als
-unbekannt) sowie optional join_url und event_row_updated_at (fehlt eine
+unbekannt) sowie optional join_url und join_url_checked_at (fehlt eine
 davon, greift der \code{unbekannt}-Override gar nicht und der Datenbestand
 bleibt wie ohne diese Regel).}
 

@@ -211,3 +211,27 @@ test_that("dsgvo_suppress_participants tombstonet gesperrte Mail, laesst andere 
   expect_equal(out$email[2], "keep@x.de")
   expect_equal(out$ms_name[2], "Keep")
 })
+
+test_that("mark_join_url_checked ruehrt die Verbindung bei leerem Ergebnis nicht an", {
+  # Liefert Graph nichts, darf der Helper keine Transaktion aufmachen. Der Beweis
+  # ist die Verbindung selbst: NULL wuerde bei jedem DBI-Aufruf sofort scheitern.
+  expect_equal(mark_join_url_checked(NULL, "raw", tibble::tibble()), 0L)
+})
+
+test_that("mark_join_url_checked formatiert event_start in UTC, nicht in Session-Zeit", {
+  # Der Vergleich in der Datenbank laeuft gegen ein timestamp-Feld mit
+  # UTC-Inhalt. Formatierte R in Session-Zeit, laege der Join um den Offset
+  # daneben - und zwar still.
+  alt <- Sys.getenv("TZ"); on.exit(Sys.setenv(TZ = alt), add = TRUE)
+  Sys.setenv(TZ = "Europe/Berlin")
+  ev <- tibble::tibble(
+    msgraph_ical_uid = "A",
+    event_start      = as.POSIXct("2026-01-15 09:00:00", tz = "UTC"))
+  gesehen <- NULL
+  fake_pool <- structure(list(), class = "Pool")
+  testthat::local_mocked_bindings(
+    poolWithTransaction = function(pool, func) { gesehen <<- environment(func)$keys; 0L },
+    .package = "pool")
+  mark_join_url_checked(fake_pool, "raw", ev)
+  expect_equal(gesehen$event_start, "2026-01-15 09:00:00")
+})

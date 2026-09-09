@@ -126,13 +126,13 @@ test_that("Override + storniert: MSGraph-Termin wird excluded", {
   expect_equal(r$no_show_source, "crm_override")
 })
 
-# Fixture fuer die join_url-Regel: Zeile nach dem Rollout geschrieben, sonst
-# sagt ein leeres Feld ohnehin nichts.
+# Fixture fuer die join_url-Regel: Zeile wurde gegen Graph geprueft, sonst sagt
+# ein leeres Feld ohnehin nichts.
 mk_msgraph_link <- function(url = NA_character_,
-                            upd = JOIN_URL_ROLLOUT + 86400) {
+                            checked = as.POSIXct("2026-09-09 12:00:00", tz = "UTC")) {
   ms <- mk_msgraph()
   ms$join_url <- url
-  ms$event_row_updated_at <- upd
+  ms$join_url_checked_at <- checked
   ms
 }
 # Die eine CRM-Zeile, die alle Faelle hier ausloest: lead 30 / 2026-07-03 ->
@@ -163,13 +163,23 @@ test_that("Override + unbekannt OHNE Teams-Link: kein No-Show aus fehlendem Call
   expect_equal(r$meeting_status, "unbekannt")
 })
 
-test_that("Zeile aelter als der join_url-Rollout: kein Override aus einem leeren Feld", {
-  # Vor dem 26.08.2026 wurde join_url gar nicht gespeichert. Ein leeres Feld
-  # heisst dort "damals nicht erfasst", nicht "kein Teams-Termin". Ohne diese
-  # Schranke wuerden allein Mai und Juni 2026 117 Termine faelschlich drehen.
+test_that("Nie gegen Graph geprueft: kein Override aus einem leeren Feld", {
+  # join_url_checked_at NULL heisst "nie danach gefragt". Ein leeres join_url
+  # ist dann keine Aussage, sondern eine Beobachtungsluecke. Ohne diese Schranke
+  # wuerde jede Zeile aus der Zeit vor dem Backfill faelschlich drehen.
   res <- assemble_unified_meetings(
-    mk_msgraph_link(NA_character_, JOIN_URL_ROLLOUT - 86400), crm_unbekannt())
+    mk_msgraph_link(NA_character_, as.POSIXct(NA, tz = "UTC")), crm_unbekannt())
   expect_true(res[res$meeting_key == "msgraph_12_30", ]$is_no_show)
+})
+
+test_that("Geprueft und trotzdem ohne Link: genau hier greift die Regel", {
+  # Die Gegenprobe zum Test darueber - identische Zeile, nur mit gesetzter
+  # Marke. Dass allein das Setzen von join_url_checked_at das Ergebnis dreht,
+  # ist der ganze Punkt der Umstellung.
+  res <- assemble_unified_meetings(
+    mk_msgraph_link(NA_character_, as.POSIXct("2026-09-09 12:00:00", tz = "UTC")),
+    crm_unbekannt())
+  expect_false(res[res$meeting_key == "msgraph_12_30", ]$is_no_show)
 })
 
 test_that("Caller ohne die neuen Spalten: Override greift nicht, Bestand unveraendert", {
