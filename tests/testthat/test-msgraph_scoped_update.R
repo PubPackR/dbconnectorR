@@ -213,9 +213,24 @@ test_that("dsgvo_suppress_participants tombstonet gesperrte Mail, laesst andere 
 })
 
 test_that("mark_join_url_checked ruehrt die Verbindung bei leerem Ergebnis nicht an", {
-  # Liefert Graph nichts, darf der Helper keine Transaktion aufmachen. Der Beweis
-  # ist die Verbindung selbst: NULL wuerde bei jedem DBI-Aufruf sofort scheitern.
+  # Liefert Graph nichts, darf der Helper weder pruefen noch schreiben. Der
+  # Beweis ist die Verbindung selbst: NULL wuerde bei jedem DBI-Aufruf scheitern.
   expect_equal(mark_join_url_checked(NULL, "raw", tibble::tibble()), 0L)
+})
+
+test_that("mark_join_url_checked bricht ab, wenn die Spalte fehlt", {
+  # Realer Fall: raw_scoped_test.msgraph_events wurde per LIKE ... INCLUDING ALL
+  # zum Cutover angelegt, also vor dieser Spalte. Ohne Guard staerbe der
+  # Events-Job an einem Postgres-Fehler, der die fehlende Migration nicht nennt.
+  testthat::local_mocked_bindings(
+    dbGetQuery = function(conn, statement, ...) data.frame(n = 0L),
+    .package = "DBI")
+  ev <- tibble::tibble(msgraph_ical_uid = "A",
+                       event_start = as.POSIXct("2026-01-15 09:00:00", tz = "UTC"))
+  expect_error(mark_join_url_checked(structure(list(), class = "Pool"), "raw_scoped_test", ev),
+               "join_url_checked_at fehlt")
+  expect_error(mark_join_url_checked(structure(list(), class = "Pool"), "raw_scoped_test", ev),
+               "2026-09-09_add_join_url_checked_at")
 })
 
 test_that("mark_join_url_checked formatiert event_start in UTC, nicht in Session-Zeit", {
@@ -224,14 +239,32 @@ test_that("mark_join_url_checked formatiert event_start in UTC, nicht in Session
   # daneben - und zwar still.
   alt <- Sys.getenv("TZ"); on.exit(Sys.setenv(TZ = alt), add = TRUE)
   Sys.setenv(TZ = "Europe/Berlin")
-  ev <- tibble::tibble(
-    msgraph_ical_uid = "A",
-    event_start      = as.POSIXct("2026-01-15 09:00:00", tz = "UTC"))
+  testthat::local_mocked_bindings(
+    dbGetQuery = function(conn, statement, ...) data.frame(n = 1L),
+    .package = "DBI")
+  ev <- tibble::tibble(msgraph_ical_uid = "A",
+                       event_start = as.POSIXct("2026-01-15 09:00:00", tz = "UTC"))
   gesehen <- NULL
-  fake_pool <- structure(list(), class = "Pool")
   testthat::local_mocked_bindings(
     poolWithTransaction = function(pool, func) { gesehen <<- environment(func)$keys; 0L },
     .package = "pool")
-  mark_join_url_checked(fake_pool, "raw", ev)
+  mark_join_url_checked(structure(list(), class = "Pool"), "raw", ev)
   expect_equal(gesehen$event_start, "2026-01-15 09:00:00")
+})
+
+test_that("Die Marke wird nur gesetzt, wo sie noch leer ist", {
+  # Diese Bedingung traegt das ganze Konstrukt. Faellt sie weg, setzt der Ingest
+  # die Marke jede Nacht neu, jede Zeile im 50-Tage-Fenster ist IS DISTINCT FROM
+  # OLD, der Trigger zieht updated_at mit - und updated_at verliert seine
+  # Bedeutung fuer den gesamten Bestand.
+  sql <- join_url_checked_sql("raw", "tmp_x")
+  expect_match(sql, "join_url_checked_at IS NULL", fixed = TRUE)
+  # Und der Join darf nicht ueber das Zeitfenster laufen, sondern ueber die
+  # tatsaechlich gesehenen Schluessel.
+  expect_match(sql, "FROM tmp_x t", fixed = TRUE)
+  expect_match(sql, "e.msgraph_ical_uid    = t.msgraph_ical_uid", fixed = TRUE)
+  expect_match(sql, "t.event_start::timestamp", fixed = TRUE)
+  # Ziel-Schema kommt aus der config, nicht hart verdrahtet.
+  expect_match(join_url_checked_sql("raw_scoped_test", "tmp_x"),
+               "UPDATE raw_scoped_test.msgraph_events", fixed = TRUE)
 })

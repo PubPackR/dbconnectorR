@@ -4,7 +4,7 @@
 \alias{mark_join_url_checked}
 \title{Geprueft-Marke \code{join_url_checked_at} nachtragen}
 \usage{
-mark_join_url_checked(con, rs, events)
+mark_join_url_checked(con, rs, events, use_transaction = TRUE)
 }
 \arguments{
 \item{con}{Pool oder DBI-Verbindung.}
@@ -12,6 +12,9 @@ mark_join_url_checked(con, rs, events)
 \item{rs}{Ziel-Schema (config-Schalter, i.d.R. "raw").}
 
 \item{events}{\code{parse_scoped_events()$events}, also die gerade geschriebenen Zeilen.}
+
+\item{use_transaction}{FALSE, wenn der Aufrufer die Transaktion schon geoeffnet hat. Verschachtelte
+Transaktionen unterstuetzt DBI nicht.}
 }
 \value{
 invisible(Anzahl markierter Zeilen).
