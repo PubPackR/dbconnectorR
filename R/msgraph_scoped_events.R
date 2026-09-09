@@ -113,10 +113,13 @@ mark_join_url_checked <- function(con, rs, events, use_transaction = TRUE) {
   # real: raw_scoped_test.msgraph_events wurde per LIKE ... INCLUDING ALL zum
   # Cutover angelegt, also vor dieser Spalte, und base-62/do/main.R nennt den
   # Rollback auf *_scoped_test ausdruecklich als Betriebsart.
-  hat_spalte <- DBI::dbGetQuery(con, sprintf("
+  # Gebundener Parameter statt dbQuoteString(): das Schema kommt zwar aus der
+  # eigenen config, aber ein Bind-Parameter braucht kein Quoting-Verhalten, das
+  # je nach Verbindungstyp - Pool oder nackte DBI-Verbindung - anders aussieht.
+  hat_spalte <- DBI::dbGetQuery(con, "
     SELECT count(*) AS n FROM information_schema.columns
-     WHERE table_schema = %s AND table_name = 'msgraph_events'
-       AND column_name = 'join_url_checked_at'", DBI::dbQuoteString(con, rs)))$n
+     WHERE table_schema = $1 AND table_name = 'msgraph_events'
+       AND column_name = 'join_url_checked_at'", params = list(rs))$n
   if (as.numeric(hat_spalte) == 0) {
     stop(sprintf(paste0(
       "Spalte %s.msgraph_events.join_url_checked_at fehlt. Erst die Migration ",

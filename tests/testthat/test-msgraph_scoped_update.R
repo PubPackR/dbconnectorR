@@ -222,8 +222,15 @@ test_that("mark_join_url_checked bricht ab, wenn die Spalte fehlt", {
   # Realer Fall: raw_scoped_test.msgraph_events wurde per LIKE ... INCLUDING ALL
   # zum Cutover angelegt, also vor dieser Spalte. Ohne Guard staerbe der
   # Events-Job an einem Postgres-Fehler, der die fehlende Migration nicht nennt.
+  # `gesehen` zwingt den Mock, statement und params tatsaechlich anzufassen.
+  # Ohne das bleiben beide unausgewertete Promises - R-Argumente sind lazy - und
+  # der Test bestaende, ohne die Abfrage je gebaut zu haben.
+  gesehen <- NULL
   testthat::local_mocked_bindings(
-    dbGetQuery = function(conn, statement, ...) data.frame(n = 0L),
+    dbGetQuery = function(conn, statement, ...) {
+      gesehen <<- list(sql = statement, args = list(...))
+      data.frame(n = 0L)
+    },
     .package = "DBI")
   ev <- tibble::tibble(msgraph_ical_uid = "A",
                        event_start = as.POSIXct("2026-01-15 09:00:00", tz = "UTC"))
@@ -231,6 +238,9 @@ test_that("mark_join_url_checked bricht ab, wenn die Spalte fehlt", {
                "join_url_checked_at fehlt")
   expect_error(mark_join_url_checked(structure(list(), class = "Pool"), "raw_scoped_test", ev),
                "2026-09-09_add_join_url_checked_at")
+  # Das Schema geht als gebundener Parameter mit, nicht per String-Verkettung.
+  expect_match(gesehen$sql, "table_schema = $1", fixed = TRUE)
+  expect_equal(gesehen$args$params, list("raw_scoped_test"))
 })
 
 test_that("mark_join_url_checked formatiert event_start in UTC, nicht in Session-Zeit", {
