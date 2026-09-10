@@ -1,3 +1,90 @@
+#' Build a (event_id, event_start, email) -> showAs Lookup
+#'
+#' Jede Kalender-Kopie eines internen Users traegt ihr eigenes `showAs`
+#' (oof/free/busy/...) - `msgraph_update_events()` laedt pro internem User
+#' eine eigene `calendarView()`-Kopie, eine Zeile pro (Event,
+#' Kalender-Kopie). Diese Funktion baut daraus die Zuordnung, die gebraucht
+#' wird, um `show_as` pro Teilnehmer in `msgraph_event_participants` zu
+#' annotieren.
+#'
+#' @param all_calendar_events_ Data frame mit mindestens `iCalUId`,
+#'   `start_dateTime`, `user_id`, `showAs` - eine Zeile pro (Event,
+#'   Kalender-Kopie), wie von `msgraph_update_events()` aus der Graph-API
+#'   gebaut.
+#' @param users Data frame mit mindestens `id` (interner User, matcht
+#'   `user_id` oben) und `email`.
+#' @return Data frame mit `event_id` (character), `event_start` (POSIXct),
+#'   `attendees_emailAddress_address` (lowercased email), `show_as`. Eine
+#'   Zeile pro (Event, Kalender-Kopie) mit auflösbarer E-Mail; Kopien ohne
+#'   internen User-Match werden verworfen (kein `show_as` zuweisbar - z.B.
+#'   fehlende Kalenderfreigabe oder ausgeschiedene Person, erwarteter
+#'   dauerhafter Zustand, kein Fehlerfall).
+#' @keywords internal
+build_show_as_lookup <- function(all_calendar_events_, users) {
+  # ---- start ---- #
+  all_calendar_events_ %>%
+    dplyr::mutate(event_start = lubridate::ymd_hms(start_dateTime)) %>%
+    dplyr::select(event_id = iCalUId, event_start, user_id, showAs) %>%
+    dplyr::mutate(
+      event_id = as.character(event_id),
+      # all_calendar_events_ entsteht via as.data.frame(t(sapply(...))) und
+      # liefert fuer JEDES Feld eine List-Column (siehe die Casts der
+      # anderen Felder in diesem File, z.B. isCancelled/isOrganizer/subject
+      # weiter unten) - showAs war der eine Fall, der das bisher nicht
+      # bekam. Ohne diesen Cast bleibt show_as eine List-Column, was
+      # bind_rows() gegen die aus der DB gelesenen character-Werte crashen
+      # laesst bzw. postgres_upsert_data() als Postgres-Array-Literal
+      # ({oof} statt oof) schreibt (Review-Fund).
+      showAs = as.character(showAs)
+    ) %>%
+    dplyr::left_join(
+      users %>% dplyr::select(user_id = id, attendees_emailAddress_address = email),
+      by = "user_id"
+    ) %>%
+    dplyr::filter(!is.na(attendees_emailAddress_address)) %>%
+    dplyr::mutate(attendees_emailAddress_address = tolower(attendees_emailAddress_address)) %>%
+    dplyr::distinct(event_id, event_start, attendees_emailAddress_address, .keep_all = TRUE) %>%
+    dplyr::select(event_id, event_start, attendees_emailAddress_address, show_as = showAs)
+}
+
+#' Coalesce a freshly-fetched show_as onto the previously stored value
+#'
+#' `show_as` ist eine normale Upsert-Spalte unter `match_cols`. Ohne diese
+#' Funktion wuerde ein frischer `show_as = NA` (der Lookup fand diesmal
+#' keinen Treffer - Kalenderfreigabe zwischenzeitlich entzogen, Person
+#' ausgeschieden, transienter Graph-Fehler) einen zuvor korrekt gesetzten
+#' Wert (z.B. `"oof"` aus dem D2-Backfill oder einem frueheren Lauf)
+#' unbemerkt ueberschreiben (Review-Fund W6). `coalesce()` behebt das: ein
+#' neuer `NA`-Wert behaelt den bestehenden Wert, nur ein neuer NICHT-`NA`-
+#' Wert darf ueberschreiben (auch ein anderer als vorher - z.B. bei einem
+#' echten Statuswechsel).
+#'
+#' @param new_participants Data frame mit den Join-Key-Spalten (siehe `by`)
+#'   plus `show_as` - die frisch aus Graph gefetchten Werte.
+#' @param existing_show_as Data frame mit den Join-Key-Spalten plus
+#'   `show_as` - die aktuell in der DB gespeicherten Werte (z.B. gefiltert
+#'   auf `source == "calendar"`, damit ein Booking-Lauf, der `show_as` nie
+#'   kennt, keinen echten Kalender-Wert scheinbar bestaetigt).
+#' @param by Character-Vektor der Join-Key-Spalten, z.B.
+#'   `c("contact_id", "event_id")`.
+#' @return `new_participants`, `show_as` ersetzt durch
+#'   `coalesce(show_as, bestehender show_as)` fuer Zeilen mit einem Match in
+#'   `existing_show_as`, unveraendert sonst.
+#' @keywords internal
+coalesce_show_as <- function(new_participants, existing_show_as, by) {
+  # ---- start ---- #
+  existing_show_as <- existing_show_as %>%
+    # Defensiv dedupliziert (Call-Sites tun das bereits selbst, aber die
+    # Funktion soll bei einem Verstoss keine Zeilen verdoppeln statt still
+    # zu faechern).
+    dplyr::distinct(dplyr::across(dplyr::all_of(by)), .keep_all = TRUE) %>%
+    dplyr::rename(show_as_existing_ = show_as)
+  new_participants %>%
+    dplyr::left_join(existing_show_as, by = by) %>%
+    dplyr::mutate(show_as = dplyr::coalesce(show_as, show_as_existing_)) %>%
+    dplyr::select(-show_as_existing_)
+}
+
 #' Retrieve and Update Calendar Events from MSGraph
 #'
 #' Retrieves calendar events for users from MSGraph since a given start date, processes them, and updates relevant database tables.
@@ -94,6 +181,29 @@ msgraph_update_events <- function(con, access_token, startDate, user_id = NULL, 
     dplyr::group_by(attendees_emailAddress_address, attendees_emailAddress_name, event_id, event_start) %>%
     dplyr::summarise(is_organizer = any(is_organizer)) %>%
     dplyr::ungroup()
+
+  # show_as pro Teilnehmer-Kopie annotieren, siehe build_show_as_lookup().
+  # Der Lookup ist auf den internen User (dessen eigene Kalender-Kopie) keyed
+  # - dieser User muss dafuer selbst als Teilnehmer im Event stehen, sonst
+  # matcht der left_join still nichts (Review-Fund, Issue 2, analog zum
+  # gescopten Pfad). Anti-Join macht diesen Miss sichtbar.
+  show_as_lookup <- build_show_as_lookup(all_calendar_events_, all_users)
+  unmatched_show_as <- dplyr::anti_join(
+    show_as_lookup, msgraph_event_participants,
+    by = c("event_id", "event_start", "attendees_emailAddress_address")
+  )
+  if (nrow(unmatched_show_as) > 0) {
+    message(sprintf(
+      "show_as: %d/%d Kalender-Kopien ohne passende Teilnehmer-Zeile (kein show_as zuweisbar).",
+      nrow(unmatched_show_as), nrow(show_as_lookup)
+    ))
+  }
+
+  msgraph_event_participants <- msgraph_event_participants %>%
+    dplyr::left_join(
+      show_as_lookup,
+      by = c("event_id", "event_start", "attendees_emailAddress_address")
+    )
 
   # DSGVO-Suppression VOR allen Writes: msgraph_event_participants traegt die Attendee-PII,
   # die in raw.msgraph_contacts + raw.msgraph_event_participants fliesst. (update_events schreibt
@@ -361,10 +471,17 @@ update_event_participants <- function(con, msgraph_event_participants,
   events <- dplyr::tbl(con, I("raw.msgraph_events")) %>% dplyr::collect()
   contacts <- dplyr::tbl(con, I("raw.msgraph_contacts")) %>% dplyr::collect()
 
+  # show_as kommt nur vom calendar-Pfad (msgraph_update_events()); Booking hat
+  # kein showAs-Aequivalent. Defensiv ergaenzen, damit der Rest der Funktion
+  # unabhaengig vom Aufrufer dieselbe Spalte erwarten kann.
+  if (!"show_as" %in% names(msgraph_event_participants)) {
+    msgraph_event_participants$show_as <- NA_character_
+  }
+
   # Process new event participants
   msgraph_event_participants_new <- msgraph_event_participants %>%
       dplyr::ungroup() %>%
-      dplyr::distinct(event_id, attendees_emailAddress_address, is_organizer, event_start) %>%
+      dplyr::distinct(event_id, attendees_emailAddress_address, is_organizer, event_start, .keep_all = TRUE) %>%
       dplyr::left_join(contacts %>% dplyr::select(email, id), by = c("attendees_emailAddress_address" = "email")) %>% dplyr::mutate(contact_id = id) %>% dplyr::select(-id, -attendees_emailAddress_address) %>%
       dplyr::left_join(events %>% dplyr::select(msgraph_ical_uid, event_start, id), by = c("event_id" = "msgraph_ical_uid", "event_start")) %>% dplyr::mutate(event_id = id) %>% dplyr::select(-id) %>%
       dplyr::filter(!is.na(contact_id)) %>%
@@ -376,6 +493,18 @@ update_event_participants <- function(con, msgraph_event_participants,
   # Load existing event participants from DB
   existing_participants <- dplyr::tbl(con, I("raw.msgraph_event_participants")) %>%
     dplyr::collect()
+
+  # W6-Fix (Review-Fund): siehe coalesce_show_as() - schuetzt einen zuvor
+  # korrekt gesetzten show_as-Wert davor, durch einen neuen NA ueberschrieben
+  # zu werden. Nur Zeilen DERSELBEN Quelle, "calendar" ist die einzige, die
+  # show_as ueberhaupt kennt (siehe Defensiv-Ergaenzung oben).
+  existing_show_as <- existing_participants %>%
+    dplyr::filter(source == source_tag) %>%
+    dplyr::distinct(contact_id, event_id, .keep_all = TRUE) %>%
+    dplyr::select(contact_id, event_id, show_as)
+
+  msgraph_event_participants_new <- msgraph_event_participants_new %>%
+    coalesce_show_as(existing_show_as, by = c("contact_id", "event_id"))
 
   new_event_ids <- msgraph_event_participants_new %>%
     dplyr::distinct(event_id) %>%
