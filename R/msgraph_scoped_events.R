@@ -127,6 +127,111 @@ extract_meeting_id_safe <- function(url) {
   tryCatch(extract_meeting_id(url), error = function(e) NA_character_)
 }
 
+#' Geprueft-Marke `join_url_checked_at` nachtragen
+#'
+#' Setzt die Marke auf genau den Zeilen, die Graph in diesem Lauf geliefert hat,
+#' und nur dort, wo sie noch leer ist.
+#'
+#' **Warum ueberhaupt eine Marke.** Ein leeres `join_url` hat zwei voellig
+#' verschiedene Bedeutungen: "kein Teams-Termin" und "nie danach gefragt". Nur
+#' die erste ist eine Aussage. `join_url_checked_at` trennt beide, und der
+#' Producer in `sales_meetings_unified.R` haengt seine Regel daran.
+#'
+#' **Warum nur wo NULL.** Die Marke ist die ERSTE Pruefung und wird nicht
+#' fortgeschrieben. Wuerde der Ingest sie jede Nacht neu setzen, waere jede Zeile
+#' im 50-Tage-Fenster `IS DISTINCT FROM OLD`, der Trigger
+#' `trigger_set_updated_at` zoege `updated_at` mit, und `updated_at` verloere
+#' seine Bedeutung fuer den gesamten Bestand.
+#'
+#' **Warum ueber die gesehenen Zeilen statt ueber das Zeitfenster.** Eine Zeile,
+#' die Graph nicht geliefert hat - etwa aus einem inzwischen nicht mehr
+#' freigegebenen Kalender -, waere sonst faelschlich als geprueft ausgewiesen.
+#' Genau diese stille Falschaussage soll die Marke ja verhindern.
+#'
+#' @param con Pool oder DBI-Verbindung.
+#' @param rs Ziel-Schema (config-Schalter, i.d.R. "raw").
+#' @param events `parse_scoped_events()$events`, also die gerade geschriebenen Zeilen.
+#' @param use_transaction
+#'   FALSE, wenn der Aufrufer die Transaktion schon geoeffnet hat. Verschachtelte
+#'   Transaktionen unterstuetzt DBI nicht.
+#'
+#' @return
+#'   invisible(Anzahl markierter Zeilen).
+#'
+#' @keywords internal
+mark_join_url_checked <- function(con, rs, events, use_transaction = TRUE) {
+  # ---- start ---- #
+  if (nrow(events) == 0) return(invisible(0L))
+  # Fail-loud statt kryptischem Postgres-Fehler mitten im Ingest. Der Fall ist
+  # real: raw_scoped_test.msgraph_events wurde per LIKE ... INCLUDING ALL zum
+  # Cutover angelegt, also vor dieser Spalte, und base-62/do/main.R nennt den
+  # Rollback auf *_scoped_test ausdruecklich als Betriebsart.
+  # Gebundener Parameter statt dbQuoteString(): das Schema kommt zwar aus der
+  # eigenen config, aber ein Bind-Parameter braucht kein Quoting-Verhalten, das
+  # je nach Verbindungstyp - Pool oder nackte DBI-Verbindung - anders aussieht.
+  hat_spalte <- DBI::dbGetQuery(con, "
+    SELECT count(*) AS n FROM information_schema.columns
+     WHERE table_schema = $1 AND table_name = 'msgraph_events'
+       AND column_name = 'join_url_checked_at'", params = list(rs))$n
+  if (as.numeric(hat_spalte) == 0) {
+    stop(sprintf(paste0(
+      "Spalte %s.msgraph_events.join_url_checked_at fehlt. Erst die Migration ",
+      "ausfuehren: base-62-msgraph-scoped/one-off/2026-09-09_add_join_url_checked_at.sql ",
+      "(fuer das Test-Schema zusaetzlich ..._test_schema.sql)."), rs))
+  }
+  # event_start als Text und ausdruecklich in UTC: dbWriteTable() machte aus
+  # einem POSIXct eine timestamptz-Spalte, und der Vergleich gegen das
+  # timestamp-Feld liefe still ueber die Session-Zeitzone.
+  keys <- data.frame(
+    msgraph_ical_uid = as.character(events$msgraph_ical_uid),
+    event_start      = format(events$event_start, "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+    stringsAsFactors = FALSE)
+  tmp <- "tmp_join_url_checked"
+  sql <- join_url_checked_sql(rs, tmp)
+  # Eine Transaktion auf EINER Verbindung: die Temp-Tabelle ueberlebt keinen
+  # Pool-Checkout, ein zweiter Checkout saehe sie nicht mehr.
+  markiere <- function(conn) {
+    DBI::dbWriteTable(conn, tmp, keys, temporary = TRUE, overwrite = TRUE)
+    DBI::dbExecute(conn, sql)
+  }
+  n <- if (inherits(con, "Pool")) {
+    pool::poolWithTransaction(con, markiere)
+  } else if (!use_transaction) {
+    markiere(con)
+  } else {
+    DBI::dbBegin(con)
+    res <- tryCatch(markiere(con), error = function(e) { DBI::dbRollback(con); stop(e) })
+    DBI::dbCommit(con)
+    res
+  }
+  invisible(n)
+}
+
+#' UPDATE-Statement der Geprueft-Marke
+#'
+#' Eigene Funktion, damit die Bedingung `join_url_checked_at IS NULL` ohne
+#' Datenbank pruefbar ist. Sie ist die Eigenschaft, die das ganze Konstrukt
+#' traegt: faellt sie weg, setzt der Ingest die Marke jede Nacht neu, jede Zeile
+#' im 50-Tage-Fenster ist IS DISTINCT FROM OLD, der Trigger zieht `updated_at`
+#' mit - und `updated_at` verliert seine Bedeutung fuer den gesamten Bestand.
+#'
+#' @param rs Ziel-Schema.
+#' @param tmp Name der Temp-Tabelle mit den gesehenen Schluesseln.
+#'
+#' @return SQL-Statement als character.
+#'
+#' @keywords internal
+join_url_checked_sql <- function(rs, tmp) {
+  # ---- start ---- #
+  sprintf("
+    UPDATE %s.msgraph_events e
+       SET join_url_checked_at = timezone('UTC', now())
+      FROM %s t
+     WHERE e.msgraph_ical_uid    = t.msgraph_ical_uid
+       AND e.event_start         = t.event_start::timestamp
+       AND e.join_url_checked_at IS NULL", rs, tmp)
+}
+
 #' Kalender-Events der freigegebenen Kalender gescoped aktualisieren (delegiert)
 #'
 #' @param con
@@ -228,6 +333,10 @@ msgraph_scoped_update_events <- function(con, del_token, cfg, suppression_pepper
   # 2) Events upserten
   Billomatics::postgres_upsert_data(con, rs, "msgraph_events", parsed$events,
                                     match_cols = c("msgraph_ical_uid", "event_start"))
+
+  # 2b) Geprueft-Marke nachtragen. Muss NACH dem Upsert laufen: Zeilen, die
+  # dieser Lauf erst angelegt hat, sollen die Marke ebenfalls bekommen.
+  mark_join_url_checked(con, rs, parsed$events)
 
   if (nrow(parsed$participants) == 0) return(invisible(nrow(parsed$events)))
 
