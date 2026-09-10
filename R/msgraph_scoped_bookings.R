@@ -1,3 +1,30 @@
+#' Synthetische Gast-Adresse fuer Bookings-Kunden ohne E-Mail
+#'
+#' Die Appointment-ID ist ein Exchange-EntryID in Base64 und damit
+#' case-signifikant ('C' und 'c' sind verschiedene Werte). Die Zielspalte
+#' `msgraph_contacts.email_normalized` ist dagegen `lower(email)` mit UNIQUE.
+#' Die rohe ID in die Adresse zu schreiben laesst deshalb zwei verschiedene
+#' Termine, die sich nur in der Schreibweise unterscheiden, auf denselben
+#' Schluessel fallen -> duplicate key im Upsert. Kleinschreiben ist keine
+#' Loesung, das wuerde die beiden Termine zu einem Kontakt verschmelzen.
+#' Die ID geht daher als Hex-Hash in die Adresse: Hex ist case-neutral, der
+#' Wert ueberlebt `lower()` unveraendert und bleibt pro Termin eindeutig.
+#'
+#' @param appointment_id
+#'   Rohe Bookings-Appointment-ID (case-signifikant, wird NICHT veraendert).
+#' @param idx
+#'   Laufender Index des Kunden innerhalb des Termins.
+#'
+#' @return
+#'   Adresse `booking-<32-hex>-<idx>@external.guest`, vollstaendig lowercase.
+#'
+#' @keywords internal
+synthetic_guest_email <- function(appointment_id, idx) {
+  # ---- start ---- #
+  hash <- digest::digest(appointment_id, algo = "sha256", serialize = FALSE)
+  paste0("booking-", substr(hash, 1, 32), "-", idx, "@external.guest")
+}
+
 #' Bookings-Appointments -> Event-Zielschema (rein)
 #'
 #' @param appointments_value
@@ -45,7 +72,7 @@ parse_scoped_bookings <- function(appointments_value, staff_map) {
     for (idx in seq_along(custs)) {
       cu <- custs[[idx]]
       addr <- cu$emailAddress %||% NA_character_
-      email <- if (is.na(addr) || !nzchar(addr)) paste0(aid, "-", idx, "@external.guest")
+      email <- if (is.na(addr) || !nzchar(addr)) synthetic_guest_email(aid, idx)
                else tolower(normalize_external_email(addr))
       pt_rows[[length(pt_rows) + 1]] <- tibble::tibble(
         msgraph_ical_uid = ical, event_start = astart,

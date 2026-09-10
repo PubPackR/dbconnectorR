@@ -45,7 +45,7 @@ discover_meetings_from_events <- function(con, cfg) {
   window_start <- format(Sys.Date() - cfg$events_days_back, "%Y-%m-%d")
   # rs kommt aus der Config (kein User-Input) -> sichere String-Interpolation;
   # event_start liegt als UTC-timestamp -> Vergleich gegen now() AT TIME ZONE 'UTC'.
-  DBI::dbGetQuery(con, sprintf("
+  kandidaten <- DBI::dbGetQuery(con, sprintf("
     SELECT DISTINCT e.join_url, u.msgraph_user_id AS organizer_oid
     FROM %1$s.msgraph_events e
     JOIN %1$s.msgraph_event_participants p ON p.event_id = e.id AND p.is_organizer
@@ -55,14 +55,23 @@ discover_meetings_from_events <- function(con, cfg) {
       AND e.join_url IS NOT NULL
       AND NOT e.is_canceled
       AND e.event_start >= %2$s
-      AND e.event_start <= (now() AT TIME ZONE 'UTC')
-      AND e.join_url LIKE %3$s",
-    rs, DBI::dbQuoteLiteral(con, window_start),
-    # Nur Meetings des EIGENEN Tenants: die joinUrl traegt die Tenant-GUID im
-    # context-Parameter. Meetings aus dem Alt-Tenant (vor der Migration) sind
-    # app-only prinzipiell unerreichbar und wuerden per 403 faelschlich den
-    # Organizer fuer seine gueltigen neuen Meetings blocken.
-    DBI::dbQuoteLiteral(con, paste0("%", cfg$tenant_id, "%"))))
+      AND e.event_start <= (now() AT TIME ZONE 'UTC')",
+    rs, DBI::dbQuoteLiteral(con, window_start)))
+
+  # Nur Meetings des EIGENEN Tenants: die joinUrl traegt die Tenant-GUID im
+  # context-Parameter. Meetings aus dem Alt-Tenant (vor der Migration) sind
+  # app-only prinzipiell unerreichbar und wuerden per 403 faelschlich den
+  # Organizer fuer seine gueltigen neuen Meetings blocken.
+  #
+  # Der Vergleich laeuft bewusst nicht mehr als WHERE-Klausel, sondern hier in R:
+  # nur so laesst sich zaehlen, wie viele Meetings der Filter kostet. Genau diese
+  # Zahl blieb beim Tenant-Wechsel unsichtbar, waehrend die No-Show-Rate davon
+  # auf 52,6 Prozent hochlief.
+  eigener_tenant <- grepl(cfg$tenant_id, kandidaten$join_url, fixed = TRUE)
+  out <- kandidaten[eigener_tenant, c("join_url", "organizer_oid"), drop = FALSE]
+  attr(out, "n_kandidaten") <- nrow(kandidaten)
+  attr(out, "n_alt_tenant") <- sum(!eigener_tenant)
+  out
 }
 
 # --- interne Fetch-Helfer (portiert aus scope_01) ---
@@ -126,32 +135,91 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
   rs <- cfg$raw_schema %||% "raw"
   ps <- cfg$processed_schema %||% "processed"
   disc <- discover_meetings_from_events(con, cfg)
+  message(sprintf("Discovery: %d Meetings im Fenster, %d davon aus dem Alt-Tenant verworfen (%d Kandidaten).",
+                  nrow(disc), attr(disc, "n_alt_tenant") %||% 0L,
+                  attr(disc, "n_kandidaten") %||% nrow(disc)))
   if (nrow(disc) == 0) { message("Keine Meetings im Fenster (Discovery aus Events)."); return(invisible(0L)) }
 
   calls <- list(); parts <- list()
   blocked_oids <- character(0)   # 403 = Policy deckt diesen Organizer nicht -> Rest sparen
+  # Fehlerbuchhaltung: bisher fiel jeder Fehlschlag stumm durch 'next'. Ein
+  # abgelaufener Token oder ein Graph-Ausfall sah dadurch aus wie "keine Calls" -
+  # und weiter unten wie eine Welle von No-Shows.
+  n_versucht <- 0L; n_resolve_fehler <- 0L; n_attendance_fehler <- 0L; n_policy_403 <- 0L
   for (i in seq_len(nrow(disc))) {
     ju <- disc$join_url[i]; oid <- disc$organizer_oid[i]
     if (oid %in% blocked_oids) next
+    n_versucht <- n_versucht + 1L
     mt <- tryCatch(resolve_meeting(oid, ju, app_token), error = function(e) list(status = NA, id = NA_character_))
-    if (isTRUE(mt$status == 403)) { blocked_oids <- c(blocked_oids, oid); next }
-    if (!isTRUE(mt$status == 200) || is.na(mt$id)) next
+    if (isTRUE(mt$status == 403)) {
+      # Policy-403 ist eine erwartete Abgrenzung, kein Fehlschlag - zaehlt
+      # deshalb nicht in die Fehlerquote unten.
+      blocked_oids <- c(blocked_oids, oid); n_policy_403 <- n_policy_403 + 1L; next
+    }
+    if (!isTRUE(mt$status == 200) || is.na(mt$id)) { n_resolve_fehler <- n_resolve_fehler + 1L; next }
     at <- tryCatch(attendance_records(oid, mt$id, app_token),
                    error = function(e) list(status = NA, meeting_start = NA, meeting_end = NA, reports = list()))
-    if (!isTRUE(at$status == 200) || length(at$reports) == 0) next
+    if (!isTRUE(at$status == 200)) { n_attendance_fehler <- n_attendance_fehler + 1L; next }
+    # Keine Reports ist KEIN Fehler: ein Meeting, an dem niemand teilgenommen
+    # hat, liefert legitim nichts - das ist der echte No-Show.
+    if (length(at$reports) == 0) next
     df <- parse_attendance_records(at$reports, mt$id)
     if (nrow(df) == 0) next
     cs <- lubridate::ymd_hms(at$meeting_start, quiet = TRUE)
     ce <- lubridate::ymd_hms(at$meeting_end, quiet = TRUE)
     if (is.na(ce)) ce <- cs   # Fallback: NOT NULL column, use start when end missing
+    # meeting_id = thread-id aus der joinUrl, identische Ableitung wie in
+    # parse_scoped_events und im alten base-35-Pfad (msgraph_calls.R:414). Nur so
+    # paart msgraph_map_calls_events den Call mit seinem Event; ohne das bleibt
+    # jedes Event ohne Call und wird als No-Show klassifiziert. Die
+    # onlineMeeting-id bleibt als Graph-Griff in msgraph_call_id erhalten.
+    mid_thread <- extract_meeting_id_safe(ju)
+    if (is.na(mid_thread))
+      message("meeting_id nicht aus joinUrl ableitbar, Call bleibt ohne Event-Zuordnung: ",
+              substr(ju, 1, 90))
     calls[[length(calls) + 1]] <- tibble::tibble(
       msgraph_call_id = mt$id, call_start = cs, call_end = ce,
-      meeting_id = mt$id)
+      meeting_id = mid_thread)
     parts[[length(parts) + 1]] <- df
   }
   if (length(blocked_oids) > 0)
     message("Policy-403 fuer ", length(blocked_oids), " Organizer-oid(s) — deren Meetings uebersprungen.")
-  if (length(calls) == 0) { message("Keine Calls/Attendance."); return(invisible(0L)) }
+
+  # Laut ausfallen statt still nichts zu schreiben. Beide Faelle bedeuten, dass
+  # der Job zwar Meetings gefunden, aber keine belastbaren Daten geholt hat -
+  # jedes betroffene Event wird downstream sonst zum No-Show.
+  n_fehler <- n_resolve_fehler + n_attendance_fehler
+  n_bewertbar <- n_versucht - n_policy_403   # 403 ist Abgrenzung, kein Fehlschlag
+
+  # Mindestmenge, bevor eine Quote ueberhaupt aussagekraeftig ist. Ohne sie
+  # kippt ein einzelner transienter 500 an einem ruhigen Tag - Feiertag, Ferien,
+  # Wochenende - den kompletten Lauf: run_data_job wirft den Fehler weiter und
+  # reisst die uebrigen Jobs in do/main.R mit.
+  MIN_BEWERTBAR_FUER_QUOTE <- 10L
+  if (n_bewertbar >= MIN_BEWERTBAR_FUER_QUOTE && n_fehler > 0.5 * n_bewertbar) {
+    stop(sprintf(paste0(
+      "msgraph_scoped_update_calls_attendance: %d von %d bewertbaren Meetings scheiterten ",
+      "an Graph (%d resolve, %d attendance). Ueber der Haelfte - vermutlich Token oder ",
+      "Graph-Ausfall. Abbruch, statt die fehlenden Calls als No-Shows wirken zu lassen."),
+      n_fehler, n_bewertbar, n_resolve_fehler, n_attendance_fehler))
+  }
+  if (length(calls) == 0) {
+    # Nur abbrechen, wenn tatsaechlich etwas fehlgeschlagen ist. Null Calls bei
+    # null Fehlern ist der Normalfall an einem Tag, an dem die gefundenen
+    # Meetings schlicht niemand besucht hat - das IST der echte No-Show und darf
+    # den Lauf nicht abbrechen.
+    if (n_fehler > 0) {
+      stop(sprintf(paste0(
+        "msgraph_scoped_update_calls_attendance: %d bewertbare Meetings versucht, kein ",
+        "einziger Attendance-Report verwertbar (%d resolve-, %d attendance-Fehler). Abbruch."),
+        n_bewertbar, n_resolve_fehler, n_attendance_fehler))
+    }
+    message(sprintf("Keine Calls/Attendance (%d bewertbare Meetings, keine Fehler).", n_bewertbar))
+    return(invisible(0L))
+  }
+  if (n_fehler > 0)
+    message(sprintf("  %d von %d bewertbaren Meetings ohne Attendance (%d resolve, %d attendance).",
+                    n_fehler, n_bewertbar, n_resolve_fehler, n_attendance_fehler))
   calls_df <- dplyr::distinct(dplyr::bind_rows(calls), msgraph_call_id, .keep_all = TRUE)
   parts_df <- dplyr::bind_rows(parts) %>% dplyr::filter(!is.na(email)) %>% dplyr::distinct()
 

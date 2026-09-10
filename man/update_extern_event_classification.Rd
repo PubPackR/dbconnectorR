@@ -7,7 +7,9 @@
 update_extern_event_classification(
   con,
   min_date = Sys.Date() - 90,
-  use_date_filter = FALSE
+  use_date_filter = FALSE,
+  tenant_id = NULL,
+  now_utc = Sys.time()
 )
 }
 \arguments{
@@ -18,6 +20,16 @@ Defaults to 90 days ago. Only used when \code{use_date_filter = TRUE}.}
 
 \item{use_date_filter}{Logical. If TRUE, restrict processing to events with
 \code{event_date >= min_date}. Default FALSE (full table).}
+
+\item{tenant_id}{Character or NULL. GUID of the own Microsoft tenant. Meetings
+whose \code{join_url} does not carry this GUID were created in the previous tenant;
+their attendance data is unreachable app-only, so they are excluded instead of
+counted as no-shows (see \code{compute_observability_exclusions}). Pass
+\code{cfg$tenant_id} from the calling base-app. Defaults to NULL, which skips that
+exclusion and emits a warning -- the pre-cutover behaviour.}
+
+\item{now_utc}{POSIXct. Reference point for "is this meeting still in the
+future". Defaults to the current time. Only injectable for tests.}
 }
 \value{
 No return value. Updates database table \code{processed.msgraph_extern_event_classification}.
@@ -26,14 +38,19 @@ No return value. Updates database table \code{processed.msgraph_extern_event_cla
 Classifies external events from \code{mapping.msgraph_call_event} as no-show or attended,
 determines responsible contacts (one row per event-contact combination),
 filters shifted/large/duplicate events, and correctly calculates original_created_at
-by taking the minimum event_created_at across all events with the same msgraph_ical_uid.
+across all events with the same msgraph_ical_uid.
 }
 \details{
 Key features:
 \itemize{
-\item Correct original_created_at: min(event_created_at) grouped by msgraph_ical_uid
+\item Correct original_created_at: earliest of Graph's \code{event_created_at} and our
+own ingest stamp \code{created_at}, grouped by msgraph_ical_uid. Graph reports a
+\emph{new} creation date for pre-existing meetings after a tenant migration, so
+it is only believed up to the point we first saw the row. See
+\code{\link[=compute_original_created_at]{compute_original_created_at()}}.
 \item Multiple rows per event: one row per (event, contact) combination
-\item is_short_lived_event flag: events canceled < 24h after creation
+\item is_short_lived_event flag: events canceled < 24h after original_created_at,
+and therefore subject to the same ingest bound
 \item Rescheduled meeting detection: same lead, < 2 days apart, no meeting_id
 }
 

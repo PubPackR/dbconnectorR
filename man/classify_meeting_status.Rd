@@ -17,3 +17,13 @@ Ausschliesslich auf Kommentar-Text anzuwenden (nicht auf Task-Namen, dort
 stehen irrefuehrende Notizen zu vergangenen Terminen). Priorisiert:
 storniert > no_show > show_up > unbekannt.
 }
+\details{
+KOMMENTARE SIND BEWUSST DIE EINZIGE QUELLE. Die Lead-Protokolle
+(\code{raw.crm_lead_protocols}) als zweite Textquelle wurden am 05.09.2026 geprueft
+und verworfen: sie loesen nur 9,2 Prozent der \code{unbekannt}-Faelle auf (zuletzt 3
+bis 6 im Monat), der Gewinn bewegt die Show-Up-Quote um null, und "hat
+stattgefunden" ist dort per Stichwort nicht erkennbar. Vollstaendige Messung mit
+Zahlen und Grenzen: \code{docs/specs/2026-09-05-protokolle-als-statusquelle-verworfen.md}.
+Wer die Idee erneut aufgreift, findet dort auch den billigeren Hebel (die
+Absage-Familie in den no_show-Zweig).
+}
