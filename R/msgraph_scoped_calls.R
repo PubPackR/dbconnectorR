@@ -1,17 +1,29 @@
 #' Attendance-Reports -> tidy Teilnehmer (rein)
+#'
+#' Externe Gaeste stehen im Bericht ohne `emailAddress` und ohne
+#' `identity.tenantId`. Sie werden - wie im alten callRecords-Pfad - als
+#' Synthetic guest `guest_<identity.id>@external.guest` behalten, sonst fallen
+#' sie im Ingest weg und der Call zaehlt als intern_call (No-Show).
+#'
 #' @param reports_value Liste von attendanceReport-Objekten (mit attendanceRecords).
 #' @param meeting_id onlineMeeting-id (wird als msgraph_call_id verwendet).
-#' @return tibble(meeting_id, email, ms_name, role, total_seconds)
+#' @param tenant_id Eigene Tenant-GUID. Ein Record ohne E-Mail mit dieser
+#'   `tenantId` ist ein interner Account und bleibt `NA`. Ohne `tenant_id`
+#'   wird nur ein Record ohne `tenantId` zum Gast.
+#' @return tibble(meeting_id, email, ms_name, role, total_seconds);
+#'   `email` ist `NA`, wenn weder Adresse noch Gast-Schluessel ableitbar ist.
 #' @export
-parse_attendance_records <- function(reports_value, meeting_id) {
+parse_attendance_records <- function(reports_value, meeting_id, tenant_id = NULL) {
   # ---- start ---- #
   rows <- list()
   for (rep in reports_value) {
     for (r in rep$attendanceRecords %||% list()) {
       addr <- r$emailAddress %||% NA_character_
+      email <- if (!is.na(addr) && nzchar(addr)) tolower(normalize_external_email(addr)) else
+        synthetic_attendance_guest_email(r$identity, tenant_id)
       rows[[length(rows) + 1]] <- tibble::tibble(
         meeting_id    = meeting_id,
-        email         = if (is.na(addr)) NA_character_ else tolower(normalize_external_email(addr)),
+        email         = email,
         ms_name       = r$identity$displayName %||% NA_character_,
         role          = r$role %||% NA_character_,
         total_seconds = r$totalAttendanceInSeconds %||% NA_integer_)
@@ -20,6 +32,25 @@ parse_attendance_records <- function(reports_value, meeting_id) {
   if (length(rows)) dplyr::bind_rows(rows) else
     tibble::tibble(meeting_id = character(), email = character(), ms_name = character(),
                    role = character(), total_seconds = numeric())
+}
+
+#' Gast-Adresse fuer einen Attendance-Record ohne E-Mail
+#'
+#' @param identity `identity`-Objekt des attendanceRecords (Liste).
+#' @param tenant_id Eigene Tenant-GUID oder NULL.
+#' @return `guest_<lower(identity.id)>@external.guest`, wenn die `tenantId`
+#'   fehlt oder fremd ist und eine `id` vorliegt; sonst `NA_character_`.
+#' @keywords internal
+synthetic_attendance_guest_email <- function(identity, tenant_id = NULL) {
+  # ---- start ---- #
+  iid <- identity$id %||% ""
+  tid <- identity$tenantId %||% ""
+  if (!nzchar(iid)) return(NA_character_)
+  ist_gast <- !nzchar(tid) || (!is.null(tenant_id) && !identical(tolower(tid), tolower(tenant_id)))
+  if (!ist_gast) return(NA_character_)
+  # identity.id ist eine GUID -> Kleinschreiben ist verlustfrei und passt zu
+  # msgraph_contacts.email_normalized = lower(email)
+  paste0("guest_", tolower(iid), "@external.guest")
 }
 
 #' Meeting-Discovery aus den delegiert ingestierten Kalender-Events (DB, kein Graph)
@@ -163,7 +194,7 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
     # Keine Reports ist KEIN Fehler: ein Meeting, an dem niemand teilgenommen
     # hat, liefert legitim nichts - das ist der echte No-Show.
     if (length(at$reports) == 0) next
-    df <- parse_attendance_records(at$reports, mt$id)
+    df <- parse_attendance_records(at$reports, mt$id, tenant_id = cfg$tenant_id)
     if (nrow(df) == 0) next
     cs <- lubridate::ymd_hms(at$meeting_start, quiet = TRUE)
     ce <- lubridate::ymd_hms(at$meeting_end, quiet = TRUE)

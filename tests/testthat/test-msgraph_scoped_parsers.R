@@ -103,6 +103,47 @@ test_that("parse_attendance_records extrahiert Teilnehmer mit lowercase email", 
   expect_equal(ext_email, tolower(ext_email))
 })
 
+test_that("parse_attendance_records behaelt Gaeste ohne E-Mail als Synthetic guest", {
+  # Record-Form wie im rohen Bericht (Probe 25.09.2026): Gast ohne emailAddress
+  # und ohne tenantId, identity.id = GUID
+  eigener <- "1ca8bd94-3c97-4fc6-8955-bad266b43f0b"
+  reports <- list(list(
+    id = "R1",
+    attendanceRecords = list(
+      list(identity = list(`@odata.type` = "#microsoft.graph.communicationsUserIdentity",
+                           id = "U1", displayName = "Rep A", tenantId = eigener),
+           emailAddress = "rep.a@studyflix.de", role = "Organizer", totalAttendanceInSeconds = 1605),
+      list(identity = list(`@odata.type` = "#microsoft.graph.communicationsUserIdentity",
+                           id = "942074A5-4F47-4CC7-84CC-0D4A31B0B453", displayName = "Kunde K"),
+           emailAddress = NULL, role = "Presenter", totalAttendanceInSeconds = 1533),
+      list(identity = list(id = "G2", displayName = "Kunde Fremd", tenantId = "fremder-tenant"),
+           emailAddress = "", role = "Attendee", totalAttendanceInSeconds = 600),
+      list(identity = list(id = "U9", displayName = "Intern ohne Mail", tenantId = eigener),
+           role = "Attendee", totalAttendanceInSeconds = 300))))
+  df <- parse_attendance_records(reports, meeting_id = "MID1", tenant_id = eigener)
+
+  gast <- df[df$ms_name == "Kunde K", ]
+  expect_equal(gast$email, "guest_942074a5-4f47-4cc7-84cc-0d4a31b0b453@external.guest")
+  expect_true(is_synthetic_email(gast$email))
+  expect_false(is_internal_email(gast$email))
+  # fremde tenantId ohne E-Mail -> ebenfalls Gast
+  expect_equal(df$email[df$ms_name == "Kunde Fremd"], "guest_g2@external.guest")
+  # eigener Tenant ohne E-Mail -> bleibt NA und faellt im Ingest weg
+  expect_true(is.na(df$email[df$ms_name == "Intern ohne Mail"]))
+  expect_equal(df$email[df$ms_name == "Rep A"], "rep.a@studyflix.de")
+})
+
+test_that("parse_attendance_records ohne tenant_id macht nur Records ohne tenantId zum Gast", {
+  reports <- list(list(attendanceRecords = list(
+    list(identity = list(id = "G1", displayName = "Gast")),
+    list(identity = list(id = "X1", displayName = "Unklar", tenantId = "irgendein-tenant")),
+    list(identity = list(displayName = "Ohne id")))))
+  df <- parse_attendance_records(reports, meeting_id = "MID1")
+  expect_equal(df$email[df$ms_name == "Gast"], "guest_g1@external.guest")
+  expect_true(is.na(df$email[df$ms_name == "Unklar"]))
+  expect_true(is.na(df$email[df$ms_name == "Ohne id"]))
+})
+
 test_that("vtt_to_plaintext entfernt Zeitstempel und WEBVTT-Header", {
   vtt <- "WEBVTT\n\n00:00:01.000 --> 00:00:03.000\n<v Rep A>Hallo Herr X</v>\n\n00:00:04.000 --> 00:00:05.000\n<v Kunde X>Guten Tag</v>\n"
   out <- vtt_to_plaintext(vtt)

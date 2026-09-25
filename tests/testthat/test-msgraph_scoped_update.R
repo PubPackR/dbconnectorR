@@ -66,6 +66,34 @@ test_that("calls_attendance: Discovery kommt aus den Events, dry_run schreibt NI
   mockery::expect_called(upsert, 0)
 })
 
+test_that("calls_attendance: Gaeste ohne E-Mail bleiben als Synthetic guest in den Teilnehmern", {
+  # Gast aus fremdem Tenant (nur mit durchgereichtem cfg$tenant_id erkennbar)
+  # plus interner Account ohne E-Mail, der weiter wegfallen muss
+  cfg <- c(fake_cfg, tenant_id = "EIGENER-TENANT")
+  seen <- NULL
+  mockery::stub(msgraph_scoped_update_calls_attendance, "discover_meetings_from_events",
+                function(con, cfg) data.frame(join_url = "https://teams/x", organizer_oid = "OID1"))
+  mockery::stub(msgraph_scoped_update_calls_attendance, "resolve_meeting",
+                function(oid, ju, tok) list(status = 200, id = "MID1"))
+  mockery::stub(msgraph_scoped_update_calls_attendance, "attendance_records",
+                function(oid, mid, tok) list(
+                  status = 200, meeting_start = "2026-08-10T10:00:00Z", meeting_end = "2026-08-10T10:30:00Z",
+                  reports = list(list(attendanceRecords = list(
+                    list(emailAddress = "rep.a@studyflix.de",
+                         identity = list(id = "U1", displayName = "Rep A", tenantId = "eigener-tenant"),
+                         role = "Organizer", totalAttendanceInSeconds = 1800),
+                    list(identity = list(id = "G1", displayName = "Kunde", tenantId = "fremder-tenant"),
+                         role = "Presenter", totalAttendanceInSeconds = 1500),
+                    list(identity = list(id = "U2", displayName = "Intern", tenantId = "eigener-tenant"),
+                         role = "Attendee", totalAttendanceInSeconds = 300))))))
+  mockery::stub(msgraph_scoped_update_calls_attendance, "dsgvo_suppress_participants",
+                function(parts, con, pepper) { seen <<- parts; parts })
+
+  msgraph_scoped_update_calls_attendance(con = NULL, app_token = "t", cfg = cfg, dry_run = TRUE)
+
+  expect_setequal(seen$email, c("rep.a@studyflix.de", "guest_g1@external.guest"))
+})
+
 test_that("calls_attendance: 403 blockt den Organizer, weitere Meetings derselben oid werden uebersprungen", {
   resolve <- mockery::mock(list(status = 403, id = NA_character_))
   mockery::stub(msgraph_scoped_update_calls_attendance, "discover_meetings_from_events",
