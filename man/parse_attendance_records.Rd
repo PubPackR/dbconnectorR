@@ -4,16 +4,24 @@
 \alias{parse_attendance_records}
 \title{Attendance-Reports -> tidy Teilnehmer (rein)}
 \usage{
-parse_attendance_records(reports_value, meeting_id)
+parse_attendance_records(reports_value, meeting_id, tenant_id = NULL)
 }
 \arguments{
 \item{reports_value}{Liste von attendanceReport-Objekten (mit attendanceRecords).}
 
 \item{meeting_id}{onlineMeeting-id (wird als msgraph_call_id verwendet).}
+
+\item{tenant_id}{Eigene Tenant-GUID. Ein Record ohne E-Mail mit dieser
+\code{tenantId} ist ein interner Account und bleibt \code{NA}. Ohne \code{tenant_id}
+wird nur ein Record ohne \code{tenantId} zum Gast.}
 }
 \value{
-tibble(meeting_id, email, ms_name, role, total_seconds)
+tibble(meeting_id, email, ms_name, role, total_seconds);
+\code{email} ist \code{NA}, wenn weder Adresse noch Gast-Schluessel ableitbar ist.
 }
 \description{
-Attendance-Reports -> tidy Teilnehmer (rein)
+Externe Gaeste stehen im Bericht ohne \code{emailAddress} und ohne
+\code{identity.tenantId}. Sie werden - wie im alten callRecords-Pfad - als
+Synthetic guest \verb{guest_<identity.id>@external.guest} behalten, sonst fallen
+sie im Ingest weg und der Call zaehlt als intern_call (No-Show).
 }
