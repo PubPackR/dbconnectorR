@@ -387,15 +387,19 @@ download_and_enrich_leads <- function(last_update_tasks, tags_old, crm_key, dail
 
 get_tasks_from_leads <- function(leads) {
 
-  persons_tasks_all <- leads %>%
+  # tasks und tasks_pending getrennt entpacken: gemeinsam entpackt entsteht ein
+  # Kreuzprodukt, und jede Task bekaeme die Person einer anderen Task des Leads.
+  persons_tasks <- leads %>%
     dplyr::mutate(tasks = purrr::map(tasks, ~ if (length(.x) == 0 || !is.data.frame(.x)) NULL else .x)) %>%
     tidyr::unnest(tasks, names_sep = "_", keep_empty = TRUE) %>%
+    dplyr::mutate(tasks_updated_at = lubridate::as_datetime(tasks_updated_at, tz = "CET"))
+
+  persons_tasks_pending <- leads %>%
     dplyr::mutate(tasks_pending = purrr::map(tasks_pending, ~ if (length(.x) == 0 || !is.data.frame(.x)) NULL else .x)) %>%
     tidyr::unnest(tasks_pending, names_sep = "_", keep_empty = TRUE) %>%
-    dplyr::mutate(tasks_updated_at = lubridate::as_datetime(tasks_updated_at, tz = "CET"),
-           tasks_pending_updated_at = lubridate::as_datetime(tasks_pending_updated_at, tz = "CET"))
+    dplyr::mutate(tasks_pending_updated_at = lubridate::as_datetime(tasks_pending_updated_at, tz = "CET"))
 
-  tasks <- persons_tasks_all %>%
+  tasks <- persons_tasks %>%
     dplyr::select(crm_task_id = tasks_id,
            user_id,
            lead_id = id,
@@ -406,11 +410,11 @@ get_tasks_from_leads <- function(leads) {
            precise_time = tasks_precise_time,
            created_by_user_id = tasks_created_by_user_id,
            updated_by_user_id = tasks_updated_by_user_id,
-           assigned_to_user_id = tasks_pending_user_id,
+           assigned_to_user_id = tasks_user_id,
            task_created_at = tasks_created_at,
            task_updated_at = tasks_updated_at)
 
-  tasks_pending <- persons_tasks_all %>%
+  tasks_pending <- persons_tasks_pending %>%
     dplyr::select(crm_task_id = tasks_pending_id,
            user_id,
            lead_id = id,
