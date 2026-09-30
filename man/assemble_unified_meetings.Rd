@@ -51,4 +51,11 @@ dessen \code{CONTEXT.md}). \code{organizer_source} unterscheidet die drei Faelle
 sonst zu einem \code{NA} verschmelzen wuerden: \code{"msgraph"} = Organisator bekannt,
 \code{"unbekannt"} = MSGraph-Termin ohne klassifizierte Organisator-Zeile,
 \code{"crm_task"} = netto-neuer CRM-Termin, der grundsaetzlich keinen tragen kann.
+
+\strong{Alt-Tenant.} Traegt die gematchte MSGraph-Zeile den Grund
+\code{alt_tenant_join_url}, ist ihre Anwesenheit nicht messbar, und der CRM-Status
+entscheidet: \code{show_up} und \code{unbekannt} gelten als stattgefunden, \code{no_show} als
+No-Show, der Ausschluss faellt (\code{excluded = FALSE}, \code{exclusion_reason = NA}).
+\code{storniert} bleibt als \code{crm_storniert} ausgeschlossen. Andere Lead-Zeilen
+desselben Meetings bleiben unberuehrt.
 }

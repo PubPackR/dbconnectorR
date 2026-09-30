@@ -338,6 +338,79 @@ test_that("Ausschlussgrund wird durchgereicht und beim CRM-Storno gesetzt", {
   expect_equal(ueberschrieben$exclusion_reason, "crm_storniert")
 })
 
+# Fixture fuer den Alt-Tenant-Fall: msgraph_12_30 stammt aus dem Alt-Tenant. Wie
+# in echt traegt es einen Teams-Link und is_no_show = TRUE, weil nie ein Call
+# ankommen konnte.
+mk_msgraph_alt_tenant <- function(reason = "alt_tenant_join_url") {
+  ms <- mk_msgraph_link("https://teams.microsoft.com/l/meetup-join/alt")
+  ms$excluded[3] <- TRUE
+  ms$exclusion_reason <- c(NA_character_, NA_character_, reason)
+  ms
+}
+alt_tenant_mit_crm <- function(status) {
+  res <- assemble_unified_meetings(mk_msgraph_alt_tenant(), mk_crm(list(
+    crm_row(95, 30L, "2026-07-03", "teams", status, FALSE, rep = 600L))))
+  res[res$meeting_key == "msgraph_12_30", ]
+}
+
+test_that("Alt-Tenant + CRM show_up: Termin ist nicht mehr ausgeschlossen", {
+  # Ohne den Kalender-Match waere derselbe Task eine crm_only-Zeile und zaehlte
+  # als VC. Der Match darf den Beleg nicht loeschen.
+  r <- alt_tenant_mit_crm("show_up")
+  expect_false(r$excluded)
+  expect_true(is.na(r$exclusion_reason))
+  expect_false(r$is_no_show)
+  expect_equal(r$no_show_source, "crm_override")
+})
+
+test_that("Alt-Tenant + CRM unbekannt: stattgefunden, obwohl ein Link existiert", {
+  # Der Link stammt aus dem Alt-Tenant, ein Anwesenheitsbericht ist app-only
+  # nicht abrufbar. Das ist dieselbe Beobachtungsgrenze wie ein fehlender Link
+  # (ADR 0015), und dann traegt der CRM-Termin ohne Doku.
+  r <- alt_tenant_mit_crm("unbekannt")
+  expect_false(r$excluded)
+  expect_true(is.na(r$exclusion_reason))
+  expect_false(r$is_no_show)
+  expect_equal(r$meeting_status, "unbekannt")
+})
+
+test_that("Alt-Tenant + CRM no_show: zaehlt als No-Show statt ausgeschlossen", {
+  r <- alt_tenant_mit_crm("no_show")
+  expect_false(r$excluded)
+  expect_true(is.na(r$exclusion_reason))
+  expect_true(r$is_no_show)
+})
+
+test_that("Alt-Tenant + CRM storniert: bleibt ausgeschlossen, Grund wird crm_storniert", {
+  r <- alt_tenant_mit_crm("storniert")
+  expect_true(r$excluded)
+  expect_equal(r$exclusion_reason, "crm_storniert")
+})
+
+test_that("Nur der Alt-Tenant-Grund wird aufgehoben, Identitaetsgruende bleiben", {
+  # Ein Duplikat oder die abgesagte Haelfte eines verlegten Termins ist kein
+  # eigener Termin. Ein CRM-Beleg aendert daran nichts.
+  for (grund in c("duplikat_event", "verschoben", "termin_in_zukunft")) {
+    res <- assemble_unified_meetings(mk_msgraph_alt_tenant(grund), mk_crm(list(
+      crm_row(96, 30L, "2026-07-03", "teams", "show_up", FALSE, rep = 600L))))
+    r <- res[res$meeting_key == "msgraph_12_30", ]
+    expect_true(r$excluded, info = grund)
+    expect_equal(r$exclusion_reason, grund, info = grund)
+  }
+})
+
+test_that("Alt-Tenant mit zwei Leads: nur die Zeile des gematchten Leads wird gerettet", {
+  ms <- mk_msgraph_alt_tenant()
+  ms <- rbind(ms, transform(ms[3, ], lead_id = 31L))  # zweiter Lead desselben Meetings
+  res <- assemble_unified_meetings(ms, mk_crm(list(
+    crm_row(97, 30L, "2026-07-03", "teams", "show_up", FALSE, rep = 600L))))
+  expect_false(res[res$meeting_key == "msgraph_12_30", ]$excluded)
+  andere <- res[res$meeting_key == "msgraph_12_31", ]
+  expect_true(andere$excluded)
+  expect_equal(andere$exclusion_reason, "alt_tenant_join_url")
+  expect_equal(andere$no_show_source, "msgraph")
+})
+
 test_that("Netto-neue CRM-Zeile traegt den Grund nur wenn sie ausgeschlossen ist", {
   res <- assemble_unified_meetings(mk_msgraph(), mk_crm(list(
     crm_row(91, 99L, "2026-07-05", "zoom", "storniert", TRUE),

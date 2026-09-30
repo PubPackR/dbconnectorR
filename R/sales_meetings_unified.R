@@ -100,6 +100,13 @@ crm_status_flags <- function(status) {
 #' `"unbekannt"` = MSGraph-Termin ohne klassifizierte Organisator-Zeile,
 #' `"crm_task"` = netto-neuer CRM-Termin, der grundsaetzlich keinen tragen kann.
 #'
+#' **Alt-Tenant.** Traegt die gematchte MSGraph-Zeile den Grund
+#' `alt_tenant_join_url`, ist ihre Anwesenheit nicht messbar, und der CRM-Status
+#' entscheidet: `show_up` und `unbekannt` gelten als stattgefunden, `no_show` als
+#' No-Show, der Ausschluss faellt (`excluded = FALSE`, `exclusion_reason = NA`).
+#' `storniert` bleibt als `crm_storniert` ausgeschlossen. Andere Lead-Zeilen
+#' desselben Meetings bleiben unberuehrt.
+#'
 #' @param msgraph_meetings data.frame mit call_event_mapping_id, lead_id,
 #'   event_date, event_start, contact_id (Rep), is_no_show, excluded,
 #'   is_short_lived_event, is_responsible, original_created_at, event_id und
@@ -172,6 +179,13 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
       !is.na(msgraph_meetings$join_url_checked_at)
     link_bekannt & (is.na(url) | !nzchar(trimws(url)))
   }
+  # Alt-Tenant-Meetings tragen einen Link, ihr Anwesenheitsbericht ist app-only
+  # aber unerreichbar (`compute_observability_exclusions()`). Gemessen wird dort
+  # also ebenso wenig wie ohne Link. Einmal vor der Schleife, weil der Override
+  # den Grund auf der Zeile loescht: ein zweiter CRM-Task auf dieselbe Zeile
+  # saehe sonst ein anderes Meeting als der erste.
+  ms_alt_tenant <- !is.na(ms_reason) & ms_reason == "alt_tenant_join_url"
+  ms_nicht_messbar <- ms_ohne_link | ms_alt_tenant
   base <- data.frame(
     meeting_key          = paste0("msgraph_", msgraph_meetings$call_event_mapping_id,
                                   "_", ms_lead),
@@ -287,10 +301,24 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
     # Wer die Bedingung auf Meetings **mit** Link ausweitet, ueberschreibt eine
     # Messung mit einer Auslegung. Genau davor stand hier die Warnung, und sie
     # gilt weiter.
+    #
+    # **Alt-Tenant ist der zweite Fall von "nicht messbar"** (30.09.2026, Asana
+    # 1218788153926894). Der Link existiert, der Bericht dazu ist seit dem
+    # 19.08.2026 app-only unerreichbar. Das Meeting steht deshalb als
+    # `alt_tenant_join_url` ausgeschlossen, und ohne diesen Zweig loeschte der
+    # Kalender-Match den CRM-Beleg: haette der Task kein Meeting gefunden, zaehlte
+    # er als netto-neue crm_only-Zeile ohnehin als VC. Mit CRM-Task entscheidet
+    # deshalb der CRM-Status, und der Ausschluss faellt. Nur dieser Grund:
+    # Identitaetsgruende (duplikat_event, verschoben, ...) und die Zukunft bleiben
+    # stehen, ein Beleg macht aus einem Duplikat keinen eigenen Termin.
     j <- cand[1]
     if (cm$meeting_status %in% c("no_show", "show_up")) base$is_no_show[j] <- fl$is_no_show
-    if (cm$meeting_status == "unbekannt" && ms_ohne_link[j]) {
+    if (cm$meeting_status == "unbekannt" && ms_nicht_messbar[j]) {
       base$is_no_show[j] <- FALSE
+    }
+    if (ms_alt_tenant[j] && cm$meeting_status %in% c("no_show", "show_up", "unbekannt")) {
+      base$excluded[j] <- FALSE
+      base$exclusion_reason[j] <- NA_character_
     }
     if (cm$meeting_status == "storniert") {
       base$excluded[j] <- TRUE
