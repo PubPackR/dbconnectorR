@@ -399,6 +399,19 @@ test_that("Nur der Alt-Tenant-Grund wird aufgehoben, Identitaetsgruende bleiben"
   }
 })
 
+test_that("Alt-Tenant + zwei CRM-Tasks: ein Storno bleibt in jeder Reihenfolge stehen", {
+  # Beide Tasks landen auf derselben Zeile (gleicher Lead, gleicher Tag, gleicher
+  # Rep). Ein spaeterer show_up darf die Absage nicht wieder aufheben.
+  storno  <- crm_row(98, 30L, "2026-07-03", "teams", "storniert", FALSE, rep = 600L)
+  show_up <- crm_row(99, 30L, "2026-07-03", "teams", "show_up",   FALSE, rep = 600L)
+  for (reihenfolge in list(list(storno, show_up), list(show_up, storno))) {
+    res <- assemble_unified_meetings(mk_msgraph_alt_tenant(), mk_crm(reihenfolge))
+    r <- res[res$meeting_key == "msgraph_12_30", ]
+    expect_true(r$excluded)
+    expect_equal(r$exclusion_reason, "crm_storniert")
+  }
+})
+
 test_that("Alt-Tenant mit zwei Leads: nur die Zeile des gematchten Leads wird gerettet", {
   ms <- mk_msgraph_alt_tenant()
   ms <- rbind(ms, transform(ms[3, ], lead_id = 31L))  # zweiter Lead desselben Meetings

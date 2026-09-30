@@ -184,7 +184,7 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
   # also ebenso wenig wie ohne Link. Einmal vor der Schleife, weil der Override
   # den Grund auf der Zeile loescht: ein zweiter CRM-Task auf dieselbe Zeile
   # saehe sonst ein anderes Meeting als der erste.
-  ms_alt_tenant <- !is.na(ms_reason) & ms_reason == "alt_tenant_join_url"
+  ms_alt_tenant <- ms_reason %in% "alt_tenant_join_url"
   ms_nicht_messbar <- ms_ohne_link | ms_alt_tenant
   base <- data.frame(
     meeting_key          = paste0("msgraph_", msgraph_meetings$call_event_mapping_id,
@@ -311,12 +311,18 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
     # deshalb der CRM-Status, und der Ausschluss faellt. Nur dieser Grund:
     # Identitaetsgruende (duplikat_event, verschoben, ...) und die Zukunft bleiben
     # stehen, ein Beleg macht aus einem Duplikat keinen eigenen Termin.
+    #
+    # Aufgehoben wird nur, solange die Zeile den Grund **noch** traegt. Treffen
+    # zwei CRM-Tasks dieselbe Zeile und der erste ist storniert, steht dort schon
+    # crm_storniert, und ein spaeterer show_up darf die Absage nicht wieder
+    # aufheben. Vor diesem Zweig blieb der Storno in jeder Reihenfolge stehen.
     j <- cand[1]
     if (cm$meeting_status %in% c("no_show", "show_up")) base$is_no_show[j] <- fl$is_no_show
     if (cm$meeting_status == "unbekannt" && ms_nicht_messbar[j]) {
       base$is_no_show[j] <- FALSE
     }
-    if (ms_alt_tenant[j] && cm$meeting_status %in% c("no_show", "show_up", "unbekannt")) {
+    if (base$exclusion_reason[j] %in% "alt_tenant_join_url" &&
+        cm$meeting_status %in% c("no_show", "show_up", "unbekannt")) {
       base$excluded[j] <- FALSE
       base$exclusion_reason[j] <- NA_character_
     }

@@ -47,6 +47,8 @@ Alt-Tenant-Meeting mit CRM-Task heißt das:
   Alt-Tenant, nicht ein zweiter Zweig daneben. Aufgehoben wird **nur** der Grund
   `alt_tenant_join_url`; ein gematchtes `duplikat_event`, `verschoben` oder
   `termin_in_zukunft` bleibt ausgeschlossen. Die Grenze 19.08.2026 steckt schon im Grund.
+  Treffen zwei CRM-Tasks dieselbe Zeile, bleibt ein Storno in jeder Reihenfolge stehen
+  (Befund aus dem Code-Review).
 - **Q4, ADR-Nachtrag**: ADR 0015 und `CONTEXT.md` in `package-02-kpiR`, eigener Doku-PR mit
   eigenem Subtask. Merge erst nach der Installation dieses Pakets.
 - **Q5, mehrere Leads**: der Override trifft wie bisher nur die Zeile des gematchten Leads. Die
@@ -103,7 +105,9 @@ SELECT date_trunc('month', u.event_date)::date AS monat,
        count(*)                                                  AS zeilen,
        count(DISTINCT u.event_id)                                AS meetings,
        count(*) FILTER (WHERE u.excluded)                        AS noch_ausgeschlossen,
-       count(*) FILTER (WHERE NOT u.excluded AND NOT u.is_no_show) AS zaehlt_als_vc,
+       -- je (Rep, Meeting) wie kpiR zaehlt, nicht je Lead-Zeile
+       count(DISTINCT (u.contact_id, u.event_id))
+         FILTER (WHERE NOT u.excluded AND NOT u.is_no_show)      AS zaehlt_als_vc,
        count(*) FILTER (WHERE NOT u.excluded AND u.is_no_show)   AS no_show
 FROM u JOIN alt ON alt.call_event_mapping_id = u.cem_id
 GROUP BY ROLLUP (date_trunc('month', u.event_date)::date, u.meeting_status)
