@@ -76,6 +76,14 @@ _Avoid_: Join key, meeting id.
 
 **CRM override**:
 On an unambiguous match, the rep's manual CRM outcome wins over Graph's
-auto-detected attendance — but only when the CRM status is definite
+auto-detected attendance when the CRM status is definite
 (no-show / show-up / cancelled). An unknown CRM status leaves the Graph outcome
-untouched.
+untouched — unless the meeting's attendance is unmeasurable; then the meeting
+counts as held. On an old-tenant meeting the override also lifts the
+old-tenant exclusion.
+
+**Unmeasurable attendance**:
+A meeting for which Graph could never have produced an attendance report: it
+provably has no Teams link, or its link belongs to the previous tenant. Its
+"no call found" is an observation limit, not a no-show.
+_Avoid_: Unknown outcome (that is the CRM status), unobservable meeting.
