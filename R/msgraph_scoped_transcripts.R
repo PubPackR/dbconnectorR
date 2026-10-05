@@ -43,6 +43,24 @@ resolve_transcript_source <- function(cands, mid, app_token) {
   NULL
 }
 
+#' Calls im Transkript-Fenster auswaehlen
+#'
+#' Ein Call gehoert ins Fenster, wenn sein Termin ODER sein Eingang in der DB
+#' (`created_at`) im Fenster liegt. Nur auf den Termin zu schauen, verliert jeden
+#' Call, der spaeter als die Fenstergroesse nach dem Termin ankommt: der Calls-Job
+#' findet Meetings ueber den Organisator, und den kennt er erst ab dessen
+#' Kalenderfreigabe (neue Vertriebler, spaete Freigaben, Nachzug nach Ausfaellen).
+#'
+#' @param calls Lazy oder lokale Tabelle mit `call_start` und `created_at`.
+#' @param window_start Date, erster Tag des Fensters.
+#' @return `calls`, gefiltert.
+#' @keywords internal
+filter_transcript_window_calls <- function(calls, window_start) {
+  # ---- start ---- #
+  ws <- format(window_start, "%Y-%m-%d")
+  dplyr::filter(calls, call_start >= !!ws | created_at >= !!ws)
+}
+
 #' Transkripte gescopet aktualisieren (Sliding Window, policy-gescopte Meeting-Kette)
 #'
 #' @param con
@@ -75,7 +93,7 @@ msgraph_scoped_update_transcripts <- function(con, app_token, cfg, dry_run = FAL
   # liegen und dort auch vor diesem Fix schon mitliefen.
   window_start <- Sys.Date() - cfg$transcripts_sliding_window_days
   calls <- dplyr::tbl(con, I(paste0(rs, ".msgraph_calls"))) %>%
-    dplyr::filter(call_start >= !!format(window_start, "%Y-%m-%d")) %>%
+    filter_transcript_window_calls(window_start) %>%
     dplyr::select(call_db_id = id, msgraph_call_id) %>% dplyr::collect()
   if (nrow(calls) == 0) { message("Keine Calls im Fenster."); return(invisible(0L)) }
   have <- dplyr::tbl(con, I(paste0(ps, ".msgraph_call_transcripts"))) %>%
