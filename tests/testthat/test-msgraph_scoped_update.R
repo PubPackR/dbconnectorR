@@ -46,7 +46,8 @@ test_that("msgraph_scoped_update_users: ohne dry_run upsertet und macht KEINEN M
 
 fake_attendance <- function(oid, mid, tok)
   list(status = 200, meeting_start = "2026-08-10T10:00:00Z", meeting_end = "2026-08-10T10:30:00Z",
-       reports = list(list(attendanceRecords = list(
+       reports = list(list(id = "REP1", meetingStartDateTime = "2026-08-10T10:00:00Z",
+                           meetingEndDateTime = "2026-08-10T10:30:00Z", attendanceRecords = list(
          list(emailAddress = "REP.A@studyflix.de", identity = list(displayName = "Rep A"),
               role = "Organizer", totalAttendanceInSeconds = 1800)))))
 
@@ -78,7 +79,8 @@ test_that("calls_attendance: Gaeste ohne E-Mail bleiben als Synthetic guest in d
   mockery::stub(msgraph_scoped_update_calls_attendance, "attendance_records",
                 function(oid, mid, tok) list(
                   status = 200, meeting_start = "2026-08-10T10:00:00Z", meeting_end = "2026-08-10T10:30:00Z",
-                  reports = list(list(attendanceRecords = list(
+                  reports = list(list(id = "REP1", meetingStartDateTime = "2026-08-10T10:00:00Z",
+                                      attendanceRecords = list(
                     list(emailAddress = "rep.a@studyflix.de",
                          identity = list(id = "U1", displayName = "Rep A", tenantId = "eigener-tenant"),
                          role = "Organizer", totalAttendanceInSeconds = 1800),

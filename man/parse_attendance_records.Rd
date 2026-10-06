@@ -9,7 +9,8 @@ parse_attendance_records(reports_value, meeting_id, tenant_id = NULL)
 \arguments{
 \item{reports_value}{Liste von attendanceReport-Objekten (mit attendanceRecords).}
 
-\item{meeting_id}{onlineMeeting-id (wird als msgraph_call_id verwendet).}
+\item{meeting_id}{Schluessel des Calls, zu dem die Records gehoeren; im
+Ingest die Bericht-ID der Session (= msgraph_call_id).}
 
 \item{tenant_id}{Eigene Tenant-GUID. Ein Record ohne E-Mail mit dieser
 \code{tenantId} ist ein interner Account und bleibt \code{NA}. Ohne \code{tenant_id}

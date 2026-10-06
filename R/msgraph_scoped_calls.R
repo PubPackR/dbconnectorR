@@ -6,7 +6,8 @@
 #' sie im Ingest weg und der Call zaehlt als intern_call (No-Show).
 #'
 #' @param reports_value Liste von attendanceReport-Objekten (mit attendanceRecords).
-#' @param meeting_id onlineMeeting-id (wird als msgraph_call_id verwendet).
+#' @param meeting_id Schluessel des Calls, zu dem die Records gehoeren; im
+#'   Ingest die Bericht-ID der Session (= msgraph_call_id).
 #' @param tenant_id Eigene Tenant-GUID. Ein Record ohne E-Mail mit dieser
 #'   `tenantId` ist ein interner Account und bleibt `NA`. Ohne `tenant_id`
 #'   wird nur ein Record ohne `tenantId` zum Gast.
@@ -143,10 +144,157 @@ attendance_records <- function(object_id, meeting_id, app_token) {
       if (rr$status == 200) res$value[[i]]$attendanceRecords <- rr$value
     }
   }
+  # meeting_start/_end: Start/Ende des NEUESTEN Berichts (Graph listet die
+  # hoechstens 50 juengsten Berichte, neueste zuerst). Der Ingest nimmt Start
+  # und Ende je Bericht; die Felder bleiben fuer die base-62-Probe-Skripte.
   list(status = 200,
        meeting_start = res$value[[1]]$meetingStartDateTime %||% NA_character_,
        meeting_end = res$value[[1]]$meetingEndDateTime %||% NA_character_,
        reports = res$value)
+}
+
+#' Anwesenheitsberichte eines Online-Meetings in Sessions zerlegen (rein)
+#'
+#' Jeder Anwesenheitsbericht ist eine Session: ein Vorkommen des Online-Meetings
+#' mit eigenem Start, eigenem Ende und eigenen Teilnehmern. Ein wiederverwendeter
+#' Teams-Link (Serie, persoenlicher Link) hat viele davon. Frueher wurde daraus
+#' ein einziger Call mit dem Start des zuerst gelisteten Berichts, jeder andere Termin
+#' am selben Link zaehlte als No-Show.
+#'
+#' @param reports Liste von attendanceReport-Objekten (mit attendanceRecords).
+#' @param online_meeting_id onlineMeeting-id, der Graph-Griff fuer Transkripte.
+#' @param meeting_id thread-id aus der joinUrl (Paarung mit dem Event).
+#' @param tenant_id Eigene Tenant-GUID, siehe `parse_attendance_records()`.
+#' @return list(calls, parts). `calls` hat eine Zeile je Session mit
+#'   `msgraph_call_id` = Bericht-ID; `parts` traegt dieselbe ID in `meeting_id`.
+#'   Attribut `n_ohne_start`: Berichte ohne ID oder Startzeit, die wegfallen
+#'   (die Zielspalten sind NOT NULL).
+#' @keywords internal
+sessions_from_reports <- function(reports, online_meeting_id, meeting_id, tenant_id = NULL) {
+  # ---- start ---- #
+  calls <- list(); parts <- list(); n_ohne_start <- 0L
+  for (rep in reports) {
+    rid <- rep$id %||% NA_character_
+    cs  <- lubridate::ymd_hms(rep$meetingStartDateTime %||% NA_character_, quiet = TRUE)
+    if (is.na(rid) || !nzchar(rid) || is.na(cs)) { n_ohne_start <- n_ohne_start + 1L; next }
+    df <- parse_attendance_records(list(rep), rid, tenant_id = tenant_id)
+    # Ein Bericht ohne Teilnehmer ist keine Session, an der jemand teilnahm
+    if (nrow(df) == 0) next
+    ce <- lubridate::ymd_hms(rep$meetingEndDateTime %||% NA_character_, quiet = TRUE)
+    if (is.na(ce)) ce <- cs   # Fallback: NOT NULL column, use start when end missing
+    calls[[length(calls) + 1]] <- tibble::tibble(
+      msgraph_call_id = rid, call_start = cs, call_end = ce,
+      meeting_id = meeting_id, msgraph_online_meeting_id = online_meeting_id)
+    parts[[length(parts) + 1]] <- df
+  }
+  out <- list(
+    calls = if (length(calls)) dplyr::bind_rows(calls) else tibble::tibble(
+      msgraph_call_id = character(), call_start = as.POSIXct(character(), tz = "UTC"),
+      call_end = as.POSIXct(character(), tz = "UTC"), meeting_id = character(),
+      msgraph_online_meeting_id = character()),
+    parts = if (length(parts)) dplyr::bind_rows(parts) else
+      parse_attendance_records(list(), NA_character_))
+  attr(out, "n_ohne_start") <- n_ohne_start
+  out
+}
+
+#' Umschluesselung des Call-Bestands planen (rein)
+#'
+#' Calls, die vor dem Session-Schluessel geschrieben wurden, tragen in
+#' `msgraph_call_id` noch die onlineMeeting-id und den Start des Berichts, den
+#' Graph beim letzten Lauf zuerst lieferte - das ist der neueste, nicht der
+#' erste. Jede solche Zeile bekommt die Session desselben Online-Meetings, deren
+#' Start ihrem `call_start` am naechsten liegt, im Normalfall genau diese.
+#' Hatte genau diese Session keinen verwertbaren Teilnehmer, ist sie nicht in
+#' `calls_df`, und die naechstgelegene andere Session erbt die Zeile. Das ist in
+#' Kauf genommen: die Alternative waere eine Dublette unter altem Schluessel.
+#'
+#' @param bestand data.frame(id, msgraph_call_id, call_start): vorhandene Zeilen,
+#'   deren `msgraph_call_id` eine onlineMeeting-id aus `calls_df` ist.
+#' @param calls_df Die Sessions dieses Laufs (`sessions_from_reports()$calls`).
+#' @return tibble(id, new_call_id, online_meeting_id), eine Zeile je umzuschluesselnder Zeile.
+#' @keywords internal
+plan_call_rekey <- function(bestand, calls_df) {
+  # ---- start ---- #
+  if (nrow(bestand) == 0 || nrow(calls_df) == 0)
+    return(tibble::tibble(id = bestand$id[0], new_call_id = character(), online_meeting_id = character()))
+  bestand %>%
+    dplyr::transmute(id, online_meeting_id = msgraph_call_id, alt_start = call_start) %>%
+    dplyr::inner_join(
+      calls_df %>% dplyr::transmute(new_call_id = msgraph_call_id,
+                                    online_meeting_id = msgraph_online_meeting_id, call_start),
+      by = "online_meeting_id") %>%
+    dplyr::mutate(abstand = abs(as.numeric(difftime(call_start, alt_start, units = "secs")))) %>%
+    dplyr::group_by(id) %>%
+    dplyr::slice_min(abstand, n = 1, with_ties = FALSE) %>%
+    dplyr::ungroup() %>%
+    dplyr::select(id, new_call_id, online_meeting_id)
+}
+
+#' Call-Bestand auf den Session-Schluessel umschluesseln
+#'
+#' Setzt fuer Zeilen mit onlineMeeting-id in `msgraph_call_id` die Bericht-ID
+#' ihrer Session und `msgraph_online_meeting_id`. Die `id` bleibt, damit
+#' Transkripte, Mapping und Klassifikation weiter auf dieselbe Zeile zeigen.
+#' Die Teilnehmer dieser Zeilen werden geleert: dort standen die Teilnehmer
+#' aller Sessions des Links, der anschliessende Upsert schreibt die der einen
+#' Session neu. Nach dem ersten Lauf findet die Abfrage nichts mehr (No-op).
+#'
+#' @param con Pool oder DBI-Verbindung.
+#' @param rs Ziel-Schema (config-Schalter, i.d.R. "raw").
+#' @param calls_df Die Sessions dieses Laufs (`sessions_from_reports()$calls`).
+#' @return invisible(Anzahl umgeschluesselter Zeilen).
+#' @keywords internal
+rekey_meeting_calls <- function(con, rs, calls_df) {
+  # ---- start ---- #
+  omids <- unique(stats::na.omit(calls_df$msgraph_online_meeting_id))
+  if (length(omids) == 0) return(invisible(0L))
+  # rs kommt aus der Config (kein User-Input); die ids werden per dbQuoteLiteral gequotet.
+  bestand <- DBI::dbGetQuery(con, sprintf(
+    "SELECT id, msgraph_call_id, call_start FROM %s.msgraph_calls WHERE msgraph_call_id IN (%s)",
+    rs, paste(DBI::dbQuoteLiteral(con, omids), collapse = ", ")))
+  plan <- plan_call_rekey(bestand, calls_df)
+  if (nrow(plan) == 0) return(invisible(0L))
+  # id ist bigint und kommt als integer64 -> als Text in die Statements
+  ids <- as.character(plan$id)
+  values <- paste(sprintf("(%s::bigint, %s, %s)", ids,
+                          DBI::dbQuoteLiteral(con, plan$new_call_id),
+                          DBI::dbQuoteLiteral(con, plan$online_meeting_id)), collapse = ",\n")
+  upd <- sprintf("
+    UPDATE %1$s.msgraph_calls AS c
+       SET msgraph_call_id = v.new_call_id, msgraph_online_meeting_id = v.online_meeting_id
+      FROM (VALUES %2$s) AS v(id, new_call_id, online_meeting_id)
+     WHERE c.id = v.id", rs, values)
+  del <- sprintf("DELETE FROM %s.msgraph_call_participants WHERE call_id IN (%s)",
+                 rs, paste(ids, collapse = ", "))
+  # Beides in einer Transaktion: ein umgeschluesselter Call mit den Teilnehmern
+  # aller Sessions waere genau der Zustand, den der Fix beseitigen soll.
+  schreibe <- function(conn) { n <- DBI::dbExecute(conn, upd); DBI::dbExecute(conn, del); n }
+  n <- if (inherits(con, "Pool")) pool::poolWithTransaction(con, schreibe) else
+    DBI::dbWithTransaction(con, schreibe(con))
+  message(sprintf("%d Call(s) vom onlineMeeting- auf den Session-Schluessel umgeschluesselt.", n))
+  invisible(n)
+}
+
+#' Abbrechen, wenn msgraph_calls.msgraph_online_meeting_id fehlt
+#'
+#' @param con Pool oder DBI-Verbindung.
+#' @param rs Ziel-Schema (config-Schalter, i.d.R. "raw").
+#' @return invisible(TRUE), sonst Fehler mit Verweis auf die Migration.
+#' @keywords internal
+assert_online_meeting_id_column <- function(con, rs) {
+  # ---- start ---- #
+  hat_spalte <- DBI::dbGetQuery(con, "
+    SELECT count(*) AS n FROM information_schema.columns
+     WHERE table_schema = $1 AND table_name = 'msgraph_calls'
+       AND column_name = 'msgraph_online_meeting_id'", params = list(rs))$n
+  if (as.numeric(hat_spalte) == 0) {
+    stop(sprintf(paste0(
+      "Spalte %s.msgraph_calls.msgraph_online_meeting_id fehlt. Erst die Migration ",
+      "ausfuehren: dbconnectorR/inst/sql/2026-10-06-msgraph-calls-online-meeting-id.sql ",
+      "(sie aendert nur raw; fuer ein anderes Schema die ALTER-Zeile dort nachziehen)."), rs))
+  }
+  invisible(TRUE)
 }
 
 #' Calls/Teilnehmer gescopt via Attendance aktualisieren
@@ -177,6 +325,11 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
   # abgelaufener Token oder ein Graph-Ausfall sah dadurch aus wie "keine Calls" -
   # und weiter unten wie eine Welle von No-Shows.
   n_versucht <- 0L; n_resolve_fehler <- 0L; n_attendance_fehler <- 0L; n_policy_403 <- 0L
+  n_session_ohne_start <- 0L
+  # Graph listet hoechstens die 50 juengsten Berichte eines Online-Meetings. Bei
+  # einem viel genutzten persoenlichen Link fehlen aeltere Sessions dann still -
+  # deshalb zaehlen, wie oft die Grenze erreicht ist.
+  GRAPH_MAX_BERICHTE <- 50L; n_bericht_grenze <- 0L
   for (i in seq_len(nrow(disc))) {
     ju <- disc$join_url[i]; oid <- disc$organizer_oid[i]
     if (oid %in% blocked_oids) next
@@ -194,25 +347,29 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
     # Keine Reports ist KEIN Fehler: ein Meeting, an dem niemand teilgenommen
     # hat, liefert legitim nichts - das ist der echte No-Show.
     if (length(at$reports) == 0) next
-    df <- parse_attendance_records(at$reports, mt$id, tenant_id = cfg$tenant_id)
-    if (nrow(df) == 0) next
-    cs <- lubridate::ymd_hms(at$meeting_start, quiet = TRUE)
-    ce <- lubridate::ymd_hms(at$meeting_end, quiet = TRUE)
-    if (is.na(ce)) ce <- cs   # Fallback: NOT NULL column, use start when end missing
+    if (length(at$reports) >= GRAPH_MAX_BERICHTE) n_bericht_grenze <- n_bericht_grenze + 1L
     # meeting_id = thread-id aus der joinUrl, identische Ableitung wie in
     # parse_scoped_events und im alten base-35-Pfad (msgraph_calls.R:414). Nur so
     # paart msgraph_map_calls_events den Call mit seinem Event; ohne das bleibt
-    # jedes Event ohne Call und wird als No-Show klassifiziert. Die
-    # onlineMeeting-id bleibt als Graph-Griff in msgraph_call_id erhalten.
+    # jedes Event ohne Call und wird als No-Show klassifiziert.
     mid_thread <- extract_meeting_id_safe(ju)
     if (is.na(mid_thread))
       message("meeting_id nicht aus joinUrl ableitbar, Call bleibt ohne Event-Zuordnung: ",
               substr(ju, 1, 90))
-    calls[[length(calls) + 1]] <- tibble::tibble(
-      msgraph_call_id = mt$id, call_start = cs, call_end = ce,
-      meeting_id = mid_thread)
-    parts[[length(parts) + 1]] <- df
+    # Ein Call je Session (= Anwesenheitsbericht), nicht je Online-Meeting: ein
+    # wiederverwendeter Teams-Link hat viele Sessions an verschiedenen Tagen.
+    sess <- sessions_from_reports(at$reports, online_meeting_id = mt$id,
+                                  meeting_id = mid_thread, tenant_id = cfg$tenant_id)
+    n_session_ohne_start <- n_session_ohne_start + attr(sess, "n_ohne_start")
+    if (nrow(sess$calls) == 0) next
+    calls[[length(calls) + 1]] <- sess$calls
+    parts[[length(parts) + 1]] <- sess$parts
   }
+  if (n_session_ohne_start > 0)
+    message(n_session_ohne_start, " Anwesenheitsbericht(e) ohne ID oder Startzeit uebersprungen.")
+  if (n_bericht_grenze > 0)
+    message(n_bericht_grenze, " Online-Meeting(s) mit ", GRAPH_MAX_BERICHTE,
+            " Berichten (Graph-Grenze): aeltere Sessions dieser Links liefert Graph nicht mehr.")
   if (length(blocked_oids) > 0)
     message("Policy-403 fuer ", length(blocked_oids), " Organizer-oid(s) — deren Meetings uebersprungen.")
 
@@ -264,6 +421,12 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
     return(invisible(nrow(calls_df)))
   }
 
+  # Ohne die Spalte verwirft postgres_upsert_data sie still, und die Transkripte
+  # verloeren ihren Graph-Griff. Deshalb vor jedem Schreiben pruefen.
+  assert_online_meeting_id_column(con, rs)
+  # Bestand aus der Zeit vor dem Session-Schluessel umschluesseln, BEVOR der
+  # Upsert laeuft - sonst legte er fuer diese Session eine zweite Zeile an.
+  rekey_meeting_calls(con, rs, calls_df)
   # Kontakte upserten
   contacts <- parts_df %>% dplyr::transmute(email, ms_name) %>% dplyr::distinct(email, .keep_all = TRUE)
   Billomatics::postgres_upsert_data(con, rs, "msgraph_contacts", contacts, match_cols = "email")
@@ -279,7 +442,7 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
     dplyr::left_join(ct_ids, by = "email") %>%
     dplyr::filter(!is.na(call_id), !is.na(contact_id)) %>%
     dplyr::transmute(call_id, contact_id) %>%
-    # dieselbe Person kann in mehreren Attendance-Reports eines Meetings stehen
+    # zwei Records eines Berichts koennen auf denselben Kontakt fallen
     dplyr::distinct(call_id, contact_id)
   Billomatics::postgres_upsert_data(con, rs, "msgraph_call_participants", cp,
                                     match_cols = c("call_id", "contact_id"))

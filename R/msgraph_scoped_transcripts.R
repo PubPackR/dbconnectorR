@@ -61,6 +61,30 @@ filter_transcript_window_calls <- function(calls, window_start) {
   dplyr::filter(calls, call_start >= !!ws | created_at >= !!ws)
 }
 
+#' Transkript der Session seines Online-Meetings zuordnen (rein)
+#'
+#' Die Sessions eines wiederverwendeten Teams-Links teilen sich die
+#' Transkript-Liste in Graph. Ein Transkript gehoert zu der Session, waehrend der
+#' es entstanden ist. Liegt `createdDateTime` in keiner (Uhrversatz, Ende fehlt),
+#' gewinnt die letzte Session, die davor begonnen hat; ohne eine solche die
+#' frueheste.
+#'
+#' @param sessions data.frame(call_db_id, call_start, call_end) der Sessions eines
+#'   Online-Meetings (mindestens eine Zeile).
+#' @param created POSIXct, `createdDateTime` des Transkripts (darf NA sein).
+#' @return `call_db_id` der zugeordneten Session.
+#' @keywords internal
+assign_transcript_session <- function(sessions, created) {
+  # ---- start ---- #
+  sessions <- sessions[order(sessions$call_start), , drop = FALSE]
+  if (is.na(created)) return(sessions$call_db_id[1])
+  waehrend <- which(sessions$call_start <= created & sessions$call_end >= created)
+  if (length(waehrend) > 0) return(sessions$call_db_id[max(waehrend)])
+  davor <- which(sessions$call_start <= created)
+  if (length(davor) > 0) return(sessions$call_db_id[max(davor)])
+  sessions$call_db_id[1]
+}
+
 #' Transkripte gescopet aktualisieren (Sliding Window, policy-gescopte Meeting-Kette)
 #'
 #' @param con
@@ -85,39 +109,53 @@ msgraph_scoped_update_transcripts <- function(con, app_token, cfg, dry_run = FAL
   ps <- cfg$processed_schema %||% "processed"
   # Calls im Sliding Window. KEIN Filter auf meeting_id: das Feld traegt seit dem
   # Mapping-Fix die thread-id des Events und sagt nichts darueber aus, ob der Call
-  # in Graph adressierbar ist. Das tut msgraph_call_id (onlineMeeting-id, NOT
-  # NULL), und genau die geht in die Graph-URL. Ein Filter auf meeting_id wuerde
-  # Calls aussortieren, deren joinUrl sich nicht parsen liess, obwohl ihr
-  # Transkript abrufbar waere. Transkriptverlust waere schlimmer als die paar
-  # Fehlversuche auf Alt-Calls aus dem base-35-Bestand, die ohnehin im Fenster
-  # liegen und dort auch vor diesem Fix schon mitliefen.
+  # in Graph adressierbar ist. Das tut die onlineMeeting-id, und genau die geht in
+  # die Graph-URL. Ein Filter auf meeting_id wuerde Calls aussortieren, deren
+  # joinUrl sich nicht parsen liess, obwohl ihr Transkript abrufbar waere.
+  # Transkriptverlust waere schlimmer als die paar Fehlversuche auf Alt-Calls aus
+  # dem base-35-Bestand, die ohnehin im Fenster liegen.
+  #
+  # graph_mid: seit dem Session-Schluessel (ADR 0002) steht die onlineMeeting-id
+  # in msgraph_online_meeting_id, msgraph_call_id ist die Bericht-ID. Zeilen ohne
+  # die Spalte (base-35, noch nicht umgeschluesselt) fallen auf msgraph_call_id
+  # zurueck, wie vor dem Umbau.
   window_start <- Sys.Date() - cfg$transcripts_sliding_window_days
-  calls <- dplyr::tbl(con, I(paste0(rs, ".msgraph_calls"))) %>%
+  calls_tbl <- dplyr::tbl(con, I(paste0(rs, ".msgraph_calls"))) %>%
+    dplyr::mutate(graph_mid = dplyr::coalesce(msgraph_online_meeting_id, msgraph_call_id))
+  mids <- calls_tbl %>%
     filter_transcript_window_calls(window_start) %>%
-    dplyr::select(call_db_id = id, msgraph_call_id) %>% dplyr::collect()
-  if (nrow(calls) == 0) { message("Keine Calls im Fenster."); return(invisible(0L)) }
+    dplyr::distinct(graph_mid) %>% dplyr::collect() %>% dplyr::pull(graph_mid)
+  if (length(mids) == 0) { message("Keine Calls im Fenster."); return(invisible(0L)) }
+  # Alle Sessions dieser Online-Meetings, auch die ausserhalb des Fensters: ein
+  # Transkript muss an seine eigene Session, nicht an die zufaellig im Fenster.
+  sessions <- calls_tbl %>%
+    dplyr::filter(graph_mid %in% !!mids) %>%
+    dplyr::select(call_db_id = id, graph_mid, call_start, call_end) %>% dplyr::collect()
   have <- dplyr::tbl(con, I(paste0(ps, ".msgraph_call_transcripts"))) %>%
     dplyr::select(transcript_id, call_id) %>% dplyr::collect()
 
-  # Kandidaten-object_ids je Meeting = alle INTERNEN Teilnehmer der FENSTER-Calls
-  # (Details zur Organizer-Scoping-Logik siehe resolve_transcript_source). Auf die
-  # Fenster-Calls beschraenkt, statt die ganze Calls-/Teilnehmer-Tabelle zu joinen.
+  # Kandidaten-object_ids je Online-Meeting = alle INTERNEN Teilnehmer seiner
+  # Sessions (Details zur Organizer-Scoping-Logik siehe resolve_transcript_source).
   # rs kommt aus der Config (kein User-Input) -> sichere String-Interpolation;
-  # die msgraph_call_ids werden per dbQuoteLiteral sicher gequotet.
-  quoted_ids <- paste(DBI::dbQuoteLiteral(con, calls$msgraph_call_id), collapse = ", ")
+  # die ids werden per dbQuoteLiteral sicher gequotet.
+  quoted_ids <- paste(DBI::dbQuoteLiteral(con, mids), collapse = ", ")
   cand_lookup <- DBI::dbGetQuery(con, sprintf("
-    SELECT DISTINCT c.msgraph_call_id, u.msgraph_user_id AS object_id
+    SELECT DISTINCT COALESCE(c.msgraph_online_meeting_id, c.msgraph_call_id) AS graph_mid,
+           u.msgraph_user_id AS object_id
     FROM %1$s.msgraph_calls c
     JOIN %1$s.msgraph_call_participants p ON p.call_id = c.id
     JOIN %1$s.msgraph_contacts ct          ON ct.id = p.contact_id
     JOIN %1$s.msgraph_users u              ON lower(u.email) = lower(ct.email)
-    WHERE u.is_internal AND NOT u.is_deleted AND c.msgraph_call_id IN (%2$s)", rs, quoted_ids))
-  cand_map <- split(cand_lookup$object_id, cand_lookup$msgraph_call_id)
+    WHERE u.is_internal AND NOT u.is_deleted
+      AND COALESCE(c.msgraph_online_meeting_id, c.msgraph_call_id) IN (%2$s)", rs, quoted_ids))
+  cand_map <- split(cand_lookup$object_id, cand_lookup$graph_mid)
 
+  # Je Online-Meeting genau eine Abfrage: mehrere Sessions teilen sich dieselben
+  # Transkripte, und dieselbe transcript_id zweimal im Upsert liesse ON CONFLICT
+  # scheitern.
   new_rows <- list()
-  for (i in seq_len(nrow(calls))) {
-    mid <- calls$msgraph_call_id[i]; call_db_id <- calls$call_db_id[i]
-    cands <- cand_map[[calls$msgraph_call_id[i]]]
+  for (mid in mids) {
+    cands <- cand_map[[mid]]
     if (is.null(cands) || length(cands) == 0) next
     src <- resolve_transcript_source(cands, mid, app_token)
     if (is.null(src)) next
@@ -125,6 +163,10 @@ msgraph_scoped_update_transcripts <- function(con, app_token, cfg, dry_run = FAL
     for (t in src$value) {
       tid <- t$id %||% NA_character_
       if (is.na(tid) || tid %in% have$transcript_id) next
+      # Graph liefert createdDateTime als ISO-String -> parsen, die Zielspalte
+      # ist timestamp (Upsert scheitert sonst am Typ-Mismatch)
+      created <- lubridate::ymd_hms(t$createdDateTime %||% NA_character_, quiet = TRUE)
+      call_db_id <- assign_transcript_session(sessions[sessions$graph_mid == mid, ], created)
       url <- sprintf("https://graph.microsoft.com/v1.0/users/%s/onlineMeetings/%s/transcripts/%s/content",
                      oid, utils::URLencode(mid, reserved = TRUE), utils::URLencode(tid, reserved = TRUE))
       vtt <- tryCatch(fetch_with_retry(paste0(url, "?$format=text/vtt"), app_token,
@@ -133,9 +175,7 @@ msgraph_scoped_update_transcripts <- function(con, app_token, cfg, dry_run = FAL
       if (is.null(vtt)) next
       new_rows[[length(new_rows) + 1]] <- tibble::tibble(
         transcript_id = tid, call_id = call_db_id, transcript_url = url,
-        # Graph liefert createdDateTime als ISO-String -> parsen, die Zielspalte
-        # ist timestamp (Upsert scheitert sonst am Typ-Mismatch)
-        transcript_created_at = lubridate::ymd_hms(t$createdDateTime %||% NA_character_, quiet = TRUE),
+        transcript_created_at = created,
         transcript_content = vtt_to_plaintext(vtt))
     }
   }
