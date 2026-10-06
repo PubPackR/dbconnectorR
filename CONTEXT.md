@@ -35,6 +35,10 @@ CRM lead — a mapping gap, not an internal meeting. Kept in the analysis with a
 unknown lead.
 _Avoid_: Orphan meeting, unmatched meeting.
 
+**Session**:
+One occurrence of a Teams online meeting, evidenced by its own attendance report. A reused Teams link (series, personal meeting link) has many sessions, each on its own day with its own attendees; attendance is measured per session, never per link.
+_Avoid_: Occurrence, call, online meeting (that is the link all sessions share).
+
 ### People
 
 **External lead** (or **Lead**):
