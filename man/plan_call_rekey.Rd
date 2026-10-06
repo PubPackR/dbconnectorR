@@ -17,8 +17,12 @@ tibble(id, new_call_id, online_meeting_id), eine Zeile je umzuschluesselnder Zei
 }
 \description{
 Calls, die vor dem Session-Schluessel geschrieben wurden, tragen in
-\code{msgraph_call_id} noch die onlineMeeting-id und den Start des ersten Berichts.
-Jede solche Zeile bekommt die Session desselben Online-Meetings, deren Start
-ihrem \code{call_start} am naechsten liegt - im Normalfall genau die erste.
+\code{msgraph_call_id} noch die onlineMeeting-id und den Start des Berichts, den
+Graph beim letzten Lauf zuerst lieferte - das ist der neueste, nicht der
+erste. Jede solche Zeile bekommt die Session desselben Online-Meetings, deren
+Start ihrem \code{call_start} am naechsten liegt, im Normalfall genau diese.
+Hatte genau diese Session keinen verwertbaren Teilnehmer, ist sie nicht in
+\code{calls_df}, und die naechstgelegene andere Session erbt die Zeile. Das ist in
+Kauf genommen: die Alternative waere eine Dublette unter altem Schluessel.
 }
 \keyword{internal}
