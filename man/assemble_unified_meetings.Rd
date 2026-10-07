@@ -52,10 +52,13 @@ sonst zu einem \code{NA} verschmelzen wuerden: \code{"msgraph"} = Organisator be
 \code{"unbekannt"} = MSGraph-Termin ohne klassifizierte Organisator-Zeile,
 \code{"crm_task"} = netto-neuer CRM-Termin, der grundsaetzlich keinen tragen kann.
 
-\strong{Alt-Tenant.} Traegt die gematchte MSGraph-Zeile den Grund
-\code{alt_tenant_join_url}, ist ihre Anwesenheit nicht messbar, und der CRM-Status
-entscheidet: \code{show_up} und \code{unbekannt} gelten als stattgefunden, \code{no_show} als
-No-Show, der Ausschluss faellt (\code{excluded = FALSE}, \code{exclusion_reason = NA}).
-\code{storniert} bleibt als \code{crm_storniert} ausgeschlossen. Andere Lead-Zeilen
-desselben Meetings bleiben unberuehrt.
+\strong{Alt-Tenant und nicht abrufbares Online-Meeting.} Traegt die gematchte
+MSGraph-Zeile den Grund \code{alt_tenant_join_url} oder
+\code{online_meeting_nicht_abrufbar} (Microsoft gibt das Online-Meeting zum Link
+nicht heraus: nicht gefunden, 403 der Zugriffsregel, Organisator unbekannt),
+ist ihre Anwesenheit nicht messbar, und der CRM-Status entscheidet: \code{show_up}
+und \code{unbekannt} gelten als stattgefunden, \code{no_show} als No-Show, der
+Ausschluss faellt (\code{excluded = FALSE}, \code{exclusion_reason = NA}). \code{storniert}
+bleibt als \code{crm_storniert} ausgeschlossen. Andere Lead-Zeilen desselben
+Meetings bleiben unberuehrt.
 }

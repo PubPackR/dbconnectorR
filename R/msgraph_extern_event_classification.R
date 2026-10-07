@@ -91,11 +91,19 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
   # Alle Events aus DB laden mit event_created_at und msgraph_ical_uid.
   # created_at ist unser eigener Ingest-Stempel und wird als untere Schranke
   # fuer das Anlagedatum gebraucht, siehe compute_original_created_at().
+  # online_meeting_lookup ist der Ausgang der Online-Meeting-Suche aus dem
+  # Calls-Job und traegt den Grund online_meeting_nicht_abrufbar. Fehlt die
+  # Spalte noch (Migration nicht gelaufen), laeuft die Klassifikation ohne ihn
+  # weiter, statt an einem SELECT zu brechen.
+  lookup_spalte <- online_meeting_lookup_select_cols(con)
   all_events <- dplyr::tbl(con, I("raw.msgraph_events")) %>%
     dplyr::select(id, msgraph_ical_uid, event_created_at, event_updated_at,
                   event_start, event_end, is_canceled, is_online_meeting, subject,
-                  join_url, created_at) %>%
+                  join_url, created_at, dplyr::all_of(lookup_spalte)) %>%
     dplyr::collect()
+  if (length(lookup_spalte) == 0) {
+    all_events$online_meeting_lookup <- rep(NA_character_, nrow(all_events))
+  }
 
   # Pro msgraph_ical_uid: fruehestes Anlagedatum, wobei Graph nur bis zu unserem
   # ersten Ingest geglaubt wird. Seit dem Tenant-Wechsel meldet Graph fuer
@@ -476,8 +484,9 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
                    dropped_events, " Events komplett entfernt"))
   }
 
-  # Nicht beobachtbare Events: Zukunft und Alt-Tenant. Ohne diese Ausschluesse
-  # zaehlt jedes Meeting, dessen Anwesenheit nie abrufbar ist, als No-Show.
+  # Nicht beobachtbare Events: Zukunft, Alt-Tenant und bei Microsoft nicht
+  # abrufbare Online-Meetings. Ohne diese Ausschluesse zaehlt jedes Meeting,
+  # dessen Anwesenheit nie abrufbar ist, als No-Show.
   if (is.null(tenant_id)) {
     warning(paste0(
       "update_extern_event_classification: kein tenant_id uebergeben. ",
@@ -502,9 +511,13 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
                             real_no_show_ids)
   alt_tenant_ids <- setdiff(observability$event_id[observability$reason == "alt_tenant_join_url"],
                             real_no_show_ids)
+  nicht_abrufbar_ids <- setdiff(
+    observability$event_id[observability$reason == "online_meeting_nicht_abrufbar"],
+    real_no_show_ids)
 
   message(paste0("  ", length(future_ids), " Events in der Zukunft, ",
-                 length(alt_tenant_ids), " Events aus dem Alt-Tenant -> excluded"))
+                 length(alt_tenant_ids), " Events aus dem Alt-Tenant, ",
+                 length(nicht_abrufbar_ids), " Events mit nicht abrufbarem Online-Meeting -> excluded"))
 
   # Join mit Events-Classification und Exclusion-Regeln
   result <- events_classified %>%
@@ -519,7 +532,8 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
     dplyr::mutate(
       is_no_show = grepl("no_call|intern_call", event_class, ignore.case = TRUE),
       excluded = event_id %in% c(verschobene_final, internal_meeting_ids, duplikat_ids,
-                                 rescheduled_final, future_ids, alt_tenant_ids),
+                                 rescheduled_final, future_ids, alt_tenant_ids,
+                                 nicht_abrufbar_ids),
       exclusion_reason = dplyr::case_when(
         event_id %in% rescheduled_final ~ "rescheduled_without_meeting_id",
         event_id %in% verschobene_final ~ "verschoben",
@@ -527,6 +541,7 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
         event_id %in% duplikat_ids ~ "duplikat_event",
         event_id %in% future_ids ~ "termin_in_zukunft",
         event_id %in% alt_tenant_ids ~ "alt_tenant_join_url",
+        event_id %in% nicht_abrufbar_ids ~ "online_meeting_nicht_abrufbar",
         TRUE ~ NA_character_
       )
     ) %>%
@@ -727,6 +742,40 @@ compute_original_created_at <- function(events) {
     )
 }
 
+# Ausgaenge der Online-Meeting-Suche (raw.msgraph_events.online_meeting_lookup),
+# bei denen Microsoft das Meeting nicht herausgibt und deshalb nie ein
+# Anwesenheitsbericht kommen kann. abruf_fehler gehoert bewusst nicht dazu
+# (zaehlt vorerst als No-Show), gefunden_ohne_bericht auch nicht (echter No-Show).
+ONLINE_MEETING_NICHT_ABRUFBAR <- c("nicht_gefunden", "policy_403", "organisator_unbekannt")
+
+#' Spalte online_meeting_lookup fuer das Laden von msgraph_events
+#'
+#' Prueft ueber `information_schema`, ob `msgraph_events.online_meeting_lookup`
+#' existiert. Die Spalte kommt mit der Migration
+#' `inst/sql/2026-10-07-msgraph-events-online-meeting-lookup.sql`. Fehlt sie, soll
+#' die Klassifikation nicht brechen, sondern ohne den Grund
+#' `online_meeting_nicht_abrufbar` weiterlaufen und das laut sagen.
+#'
+#' @param con Pool oder DBI-Verbindung.
+#' @param rs Schema von msgraph_events, Default "raw".
+#' @return `"online_meeting_lookup"`, wenn die Spalte existiert, sonst
+#'   `character(0)` mit einer Warnung, die auf die Migration verweist.
+#' @keywords internal
+online_meeting_lookup_select_cols <- function(con, rs = "raw") {
+  # ---- start ---- #
+  hat_spalte <- DBI::dbGetQuery(con, "
+    SELECT count(*) AS n FROM information_schema.columns
+     WHERE table_schema = $1 AND table_name = 'msgraph_events'
+       AND column_name = 'online_meeting_lookup'", params = list(rs))$n
+  if (as.numeric(hat_spalte) > 0) return("online_meeting_lookup")
+  warning(sprintf(paste0(
+    "Spalte %s.msgraph_events.online_meeting_lookup fehlt. Die Klassifikation laeuft ohne ",
+    "den Grund online_meeting_nicht_abrufbar weiter. Migration ausfuehren: ",
+    "dbconnectorR/inst/sql/2026-10-07-msgraph-events-online-meeting-lookup.sql"), rs),
+    call. = FALSE)
+  character(0)
+}
+
 #' Determine Which Events Are Not Observable At All
 #'
 #' `is_no_show` is not a measured state -- it is derived from the *absence* of a
@@ -734,7 +783,7 @@ compute_original_created_at <- function(events) {
 #' never be observed therefore looks like a no-show. This helper names those
 #' events so they can be excluded from numerator *and* denominator instead.
 #'
-#' Two conditions, both permanent for the event in question:
+#' Three conditions:
 #'
 #' - **`termin_in_zukunft`** -- the meeting has not happened yet. There cannot be
 #'   a call record for it, so it is not a no-show. Relevant because the scoped
@@ -745,11 +794,25 @@ compute_original_created_at <- function(events) {
 #'   meetings out by the same rule, which is why no call ever arrives for them.
 #'   Recurring series created before the tenant migration keep their original
 #'   `join_url` indefinitely, so this does not age out on its own.
+#' - **`online_meeting_nicht_abrufbar`** -- the calls job asked Microsoft for the
+#'   online meeting behind the `join_url` and could not get at it:
+#'   `online_meeting_lookup` is `nicht_gefunden` (search by `JoinWebUrl` returned
+#'   no hit), `policy_403` (the `CsApplicationAccessPolicy` does not cover the
+#'   organizer) or `organisator_unbekannt` (the organizer's account cannot be
+#'   resolved in Graph). No attendance report can arrive for such a link, so the
+#'   missing call is an observability gap, not a no-show. Deliberately *not*
+#'   `abruf_fehler` (counted as no-show for now, the stored HTTP status shows
+#'   whether that needs to change) and not `gefunden_ohne_bericht` (the meeting
+#'   was reachable and nobody joined -- the genuine no-show). Unlike the tenant
+#'   rule there is no start date: the outcome only exists for links inside
+#'   base-62's window, so it cannot reach back into the base-35 era.
 #'
-#' Precedence when both apply: `termin_in_zukunft` wins while the meeting is still
-#' ahead, `alt_tenant_join_url` takes over once it has passed. The future reason is
-#' the one that changes, so reporting it first keeps "not due yet" separable from
-#' "never observable".
+#' Precedence: `termin_in_zukunft` > `alt_tenant_join_url` >
+#' `online_meeting_nicht_abrufbar`. The future reason wins while the meeting is
+#' still ahead; it is the one that changes, so reporting it first keeps "not due
+#' yet" separable from "never observable". An old-tenant link is never searched
+#' by the calls job in the first place, so the tenant reason is the more specific
+#' explanation when both would apply.
 #'
 #' Events with a missing `join_url` are never excluded here. They are not online
 #' meetings and were not counted differently before this fix; changing that is a
@@ -759,9 +822,13 @@ compute_original_created_at <- function(events) {
 #'
 #' - **Call evidence wins.** An event with a matching call was observed, whatever
 #'   its `join_url` says, and is never excluded as `alt_tenant_join_url`. Without
-#'   this the whole pre-migration series would disappear. It deliberately does
-#'   *not* apply to `termin_in_zukunft`: a meeting that has not happened yet is
-#'   no no-show even if some call row points at it -- that is a data
+#'   this the whole pre-migration series would disappear. The same applies to
+#'   `online_meeting_nicht_abrufbar`: the outcome is stored per link, while the
+#'   call is matched per event. A link that fails today (an organizer who has
+#'   left) may have delivered a call through base-35 before any outcome was
+#'   stored. A call is a measurement and beats a later "not reachable". It deliberately
+#'   does *not* apply to `termin_in_zukunft`: a meeting that has not happened yet
+#'   is no no-show even if some call row points at it -- that is a data
 #'   contradiction, not an observation.
 #' - **The rule has a start date (`alt_tenant_ab`).** Old-tenant meetings only
 #'   became unreachable once base-62 was the sole supplier. Before that base-35
@@ -770,14 +837,17 @@ compute_original_created_at <- function(events) {
 #'   real no-shows from July alone and pushed its rate from 17.2 % to 11.5 %.
 #'
 #' @param events Data frame of events with columns `id`, `event_start` and
-#'   `join_url`.
+#'   `join_url`, optionally `online_meeting_lookup` (outcome of the calls job's
+#'   online meeting search). Without that column `online_meeting_nicht_abrufbar`
+#'   is never returned and the result is the same as before the reason existed.
 #' @param tenant_id Character or NULL. GUID of the own tenant, matched literally
 #'   against `join_url` -- the same rule `discover_meetings_from_events` applies.
 #'   NULL skips the tenant check entirely.
 #' @param now_utc POSIXct. Reference point for the future check.
 #' @param event_ids_mit_call Vector of event ids for which a call was found
 #'   (`event_class` without `no_call`). These were observed by definition and are
-#'   never returned as `alt_tenant_join_url`. Defaults to none.
+#'   never returned as `alt_tenant_join_url` or `online_meeting_nicht_abrufbar`.
+#'   Defaults to none.
 #' @param alt_tenant_ab Date. `alt_tenant_join_url` is only applied to events
 #'   starting on or after this date. Default 2026-08-19 -- the last successful
 #'   run of base-35's `msgraph_update_calls` (per `processed.data_job_events`),
@@ -787,8 +857,8 @@ compute_original_created_at <- function(events) {
 #' @keywords internal
 #'
 #' @return Data frame with one row per excluded event: `event_id` and `reason`
-#'   (`"termin_in_zukunft"` or `"alt_tenant_join_url"`). Zero rows when nothing
-#'   is excluded.
+#'   (`"termin_in_zukunft"`, `"alt_tenant_join_url"` or
+#'   `"online_meeting_nicht_abrufbar"`). Zero rows when nothing is excluded.
 #'
 #' @details
 #' `event_start` is a `timestamp without time zone` holding UTC. Depending on the
@@ -834,8 +904,22 @@ compute_observability_exclusions <- function(events, tenant_id = NULL, now_utc =
 
   is_alt_tenant <- is_alt_tenant & !hat_call & im_unerreichbaren_fenster
 
+  # Microsoft hat das Online-Meeting zum Link nicht herausgegeben: nicht
+  # gefunden, 403 der Zugriffsregel oder Organisator unbekannt. Dann kann kein
+  # Anwesenheitsbericht kommen, der fehlende Call ist keine Messung. Der Call
+  # sticht wie beim Alt-Tenant. Keine Datumsschranke: der Ausgang entsteht nur
+  # im Fenster von base-62. Spalte optional, ohne sie bleibt alles wie vorher.
+  lookup <- if ("online_meeting_lookup" %in% names(events)) {
+    as.character(events$online_meeting_lookup)
+  } else {
+    rep(NA_character_, nrow(events))
+  }
+  is_nicht_abrufbar <- lookup %in% ONLINE_MEETING_NICHT_ABRUFBAR & !hat_call
+
   reason <- ifelse(is_future, "termin_in_zukunft",
-                   ifelse(is_alt_tenant, "alt_tenant_join_url", NA_character_))
+                   ifelse(is_alt_tenant, "alt_tenant_join_url",
+                          ifelse(is_nicht_abrufbar, "online_meeting_nicht_abrufbar",
+                                 NA_character_)))
 
   out <- data.frame(event_id = events$id, reason = reason,
                     stringsAsFactors = FALSE)

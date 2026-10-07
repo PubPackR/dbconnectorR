@@ -2,8 +2,8 @@
 #
 # Hintergrund: is_no_show ist das FEHLEN einer Call-Zuordnung. Jedes Meeting,
 # dessen Anwesenheit nie abrufbar ist, sieht damit aus wie ein No-Show. Diese
-# Tests decken die beiden Faelle ab, in denen genau das passiert ist:
-# Zukunftstermine und Meetings aus dem Alt-Tenant.
+# Tests decken die Faelle ab, in denen genau das passiert ist: Zukunftstermine,
+# Meetings aus dem Alt-Tenant und Online-Meetings, die Microsoft nicht herausgibt.
 
 TENANT <- "1ca8bd94-3c97-4fc6-8955-bad266b43f0b"
 
@@ -143,6 +143,104 @@ test_that("event_start wird als UTC gelesen, nicht in der Session-Zeitzone", {
   res <- compute_observability_exclusions(ev, TENANT,
                                           as.POSIXct("2026-08-29 00:00:00", tz = "UTC"))
   expect_equal(res$reason, "termin_in_zukunft")
+})
+
+# Tests fuer den Grund online_meeting_nicht_abrufbar.
+#
+# Der Calls-Job speichert je Link, ob Microsoft das Online-Meeting herausgibt.
+# Bei nicht_gefunden, policy_403 und organisator_unbekannt kann nie ein
+# Anwesenheitsbericht kommen, der fehlende Call ist dann keine Messung.
+
+lookup_event <- function(lookup, id = 20L, start = "2026-08-20 10:00:00",
+                         tenant = TENANT) {
+  data.frame(
+    id = id,
+    event_start = as.POSIXct(start, tz = "UTC"),
+    join_url = join_url_fuer(tenant),
+    online_meeting_lookup = lookup,
+    stringsAsFactors = FALSE
+  )
+}
+
+test_that("nicht abrufbare Ausgaenge schliessen das Event aus", {
+  for (ausgang in c("nicht_gefunden", "policy_403", "organisator_unbekannt")) {
+    res <- compute_observability_exclusions(lookup_event(ausgang), TENANT, JETZT)
+    expect_equal(res$reason, "online_meeting_nicht_abrufbar", info = ausgang)
+  }
+})
+
+test_that("abruf_fehler, gefunden_* und NA bleiben ohne Grund", {
+  # abruf_fehler zaehlt vorerst als No-Show, gefunden_ohne_bericht ist der
+  # echte No-Show, gefunden_mit_bericht hat einen Call.
+  for (ausgang in c("abruf_fehler", "gefunden_ohne_bericht", "gefunden_mit_bericht",
+                    NA_character_)) {
+    res <- compute_observability_exclusions(lookup_event(ausgang), TENANT, JETZT)
+    expect_equal(nrow(res), 0L, info = ausgang)
+  }
+})
+
+test_that("ein gefundener Call sticht online_meeting_nicht_abrufbar", {
+  res <- compute_observability_exclusions(lookup_event("policy_403"), TENANT, JETZT,
+                                          event_ids_mit_call = 20L)
+  expect_equal(nrow(res), 0L)
+})
+
+test_that("Zukunft hat Vorrang vor online_meeting_nicht_abrufbar", {
+  ev <- lookup_event("nicht_gefunden", start = "2026-09-15 09:00:00")
+  res <- compute_observability_exclusions(ev, TENANT, JETZT)
+  expect_equal(res$reason, "termin_in_zukunft")
+})
+
+test_that("Alt-Tenant hat Vorrang vor online_meeting_nicht_abrufbar", {
+  ev <- lookup_event("organisator_unbekannt",
+                     tenant = "99999999-0000-0000-0000-000000000000")
+  res <- compute_observability_exclusions(ev, TENANT, JETZT)
+  expect_equal(res$reason, "alt_tenant_join_url")
+})
+
+test_that("online_meeting_nicht_abrufbar kennt keine Datumsschranke", {
+  # Anders als der Alt-Tenant: der Ausgang entsteht nur im Fenster von base-62.
+  ev <- lookup_event("policy_403", start = "2026-07-15 10:00:00")
+  res <- compute_observability_exclusions(ev, TENANT, JETZT)
+  expect_equal(res$reason, "online_meeting_nicht_abrufbar")
+})
+
+test_that("online_meeting_nicht_abrufbar greift auch ohne tenant_id", {
+  res <- compute_observability_exclusions(lookup_event("nicht_gefunden"), NULL, JETZT)
+  expect_equal(res$reason, "online_meeting_nicht_abrufbar")
+})
+
+test_that("fehlende Spalte online_meeting_lookup: kein neuer Grund, Verhalten wie bisher", {
+  ev <- lookup_event("policy_403")
+  ev$online_meeting_lookup <- NULL
+  res <- compute_observability_exclusions(ev, TENANT, JETZT)
+  expect_equal(nrow(res), 0L)
+  # Auch als tibble ohne die Spalte keine Warnung "Unknown or uninitialised column".
+  expect_no_warning(compute_observability_exclusions(tibble::as_tibble(ev), TENANT, JETZT))
+  expect_setequal(compute_observability_exclusions(make_events(), TENANT, JETZT)$event_id,
+                  c(2L, 3L, 4L))
+})
+
+test_that("online_meeting_lookup_select_cols liefert die Spalte, wenn sie existiert", {
+  gesehen <- NULL
+  testthat::local_mocked_bindings(
+    dbGetQuery = function(conn, statement, ...) {
+      gesehen <<- list(sql = statement, args = list(...))
+      data.frame(n = 1L)
+    },
+    .package = "DBI")
+  expect_no_warning(spalte <- online_meeting_lookup_select_cols(NULL))
+  expect_equal(spalte, "online_meeting_lookup")
+  expect_match(gesehen$sql, "column_name = 'online_meeting_lookup'", fixed = TRUE)
+  expect_equal(gesehen$args$params, list("raw"))
+})
+
+test_that("online_meeting_lookup_select_cols warnt mit Verweis auf die Migration, wenn sie fehlt", {
+  testthat::local_mocked_bindings(dbGetQuery = function(conn, statement, ...) data.frame(n = 0L),
+                                  .package = "DBI")
+  expect_warning(spalte <- online_meeting_lookup_select_cols(NULL),
+                 "2026-10-07-msgraph-events-online-meeting-lookup.sql", fixed = TRUE)
+  expect_equal(spalte, character(0))
 })
 
 # Tests fuer compute_original_created_at().

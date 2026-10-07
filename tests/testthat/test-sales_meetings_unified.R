@@ -424,6 +424,67 @@ test_that("Alt-Tenant mit zwei Leads: nur die Zeile des gematchten Leads wird ge
   expect_equal(andere$no_show_source, "msgraph")
 })
 
+# online_meeting_nicht_abrufbar: Link aus dem eigenen Tenant, Microsoft gibt das
+# Online-Meeting aber nicht heraus (nicht gefunden, 403, Organisator unbekannt).
+# Gleiche Lage wie beim Alt-Tenant, gleiche Regel.
+nicht_abrufbar_mit_crm <- function(status) {
+  res <- assemble_unified_meetings(mk_msgraph_alt_tenant("online_meeting_nicht_abrufbar"),
+                                   mk_crm(list(crm_row(95, 30L, "2026-07-03", "teams", status,
+                                                       FALSE, rep = 600L))))
+  res[res$meeting_key == "msgraph_12_30", ]
+}
+
+test_that("Nicht abrufbar + CRM show_up: Termin ist nicht mehr ausgeschlossen", {
+  r <- nicht_abrufbar_mit_crm("show_up")
+  expect_false(r$excluded)
+  expect_true(is.na(r$exclusion_reason))
+  expect_false(r$is_no_show)
+  expect_equal(r$no_show_source, "crm_override")
+})
+
+test_that("Nicht abrufbar + CRM unbekannt: stattgefunden, obwohl ein Link existiert", {
+  r <- nicht_abrufbar_mit_crm("unbekannt")
+  expect_false(r$excluded)
+  expect_true(is.na(r$exclusion_reason))
+  expect_false(r$is_no_show)
+  expect_equal(r$meeting_status, "unbekannt")
+})
+
+test_that("Nicht abrufbar + CRM no_show: zaehlt als No-Show statt ausgeschlossen", {
+  r <- nicht_abrufbar_mit_crm("no_show")
+  expect_false(r$excluded)
+  expect_true(is.na(r$exclusion_reason))
+  expect_true(r$is_no_show)
+})
+
+test_that("Nicht abrufbar + CRM storniert: bleibt ausgeschlossen, Grund wird crm_storniert", {
+  r <- nicht_abrufbar_mit_crm("storniert")
+  expect_true(r$excluded)
+  expect_equal(r$exclusion_reason, "crm_storniert")
+})
+
+test_that("Nicht abrufbar + zwei CRM-Tasks: ein Storno bleibt in jeder Reihenfolge stehen", {
+  storno  <- crm_row(98, 30L, "2026-07-03", "teams", "storniert", FALSE, rep = 600L)
+  show_up <- crm_row(99, 30L, "2026-07-03", "teams", "show_up",   FALSE, rep = 600L)
+  for (reihenfolge in list(list(storno, show_up), list(show_up, storno))) {
+    res <- assemble_unified_meetings(mk_msgraph_alt_tenant("online_meeting_nicht_abrufbar"),
+                                     mk_crm(reihenfolge))
+    r <- res[res$meeting_key == "msgraph_12_30", ]
+    expect_true(r$excluded)
+    expect_equal(r$exclusion_reason, "crm_storniert")
+  }
+})
+
+test_that("Nicht abrufbar ohne CRM-Task: Ausschluss und Grund bleiben stehen", {
+  res <- assemble_unified_meetings(mk_msgraph_alt_tenant("online_meeting_nicht_abrufbar"),
+                                   mk_crm(list(crm_row(97, 10L, "2026-07-01", "teams",
+                                                       "show_up", FALSE))))
+  r <- res[res$meeting_key == "msgraph_12_30", ]
+  expect_true(r$excluded)
+  expect_equal(r$exclusion_reason, "online_meeting_nicht_abrufbar")
+  expect_equal(r$no_show_source, "msgraph")
+})
+
 test_that("Netto-neue CRM-Zeile traegt den Grund nur wenn sie ausgeschlossen ist", {
   res <- assemble_unified_meetings(mk_msgraph(), mk_crm(list(
     crm_row(91, 99L, "2026-07-05", "zoom", "storniert", TRUE),
