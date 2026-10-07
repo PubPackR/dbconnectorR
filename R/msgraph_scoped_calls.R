@@ -161,6 +161,11 @@ attendance_records <- function(object_id, meeting_id, app_token) {
   res <- graph_collect(base, app_token, query = list(`$expand` = "attendanceRecords"))
   if (res$status != 200) return(list(status = res$status, meeting_start = NA_character_,
                                      meeting_end = NA_character_, reports = list()))
+  # 200 ohne Bericht: niemand hat teilgenommen, der echte No-Show. Ohne diesen
+  # Ausstieg griff der Zugriff auf den ersten Bericht unten ins Leere, und der
+  # Calls-Job verbuchte den No-Show als abruf_fehler.
+  if (length(res$value) == 0) return(list(status = 200, meeting_start = NA_character_,
+                                          meeting_end = NA_character_, reports = list()))
   # per-Report-Fallback: $expand liefert oft keine Records -> nachladen
   for (i in seq_along(res$value)) {
     if (length(res$value[[i]]$attendanceRecords %||% list()) == 0 && !is.null(res$value[[i]]$id)) {
@@ -561,10 +566,20 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
   # E-Mail -> list(status, id). Nur Antworten mit 200 werden gemerkt: ein
   # transienter Fehler wird beim naechsten Link desselben Organizers wiederholt.
   konten <- list()
+  # R-Fehler in den Graph-Helfern: Zaehler und erste Meldung, damit ein
+  # Programmfehler im Log nicht wie ein Graph-Ausfall aussieht. So blieb der
+  # Zugriff auf eine leere Berichtsliste wochenlang als "attendance-Fehler"
+  # unentdeckt. Umgebung statt <<-, der Handler schreibt nur hinein.
+  ausnahmen <- new.env(); ausnahmen$n <- 0L; ausnahmen$erste <- NA_character_
+  abfangen <- function(fallback) function(e) {
+    ausnahmen$n <- ausnahmen$n + 1L
+    if (is.na(ausnahmen$erste)) ausnahmen$erste <- conditionMessage(e)
+    fallback
+  }
   konto_per_email <- function(email, konten) {
     if (!is.null(konten[[email]])) return(list(konto = konten[[email]], konten = konten))
     ko <- tryCatch(resolve_organizer_by_email(email, app_token),
-                   error = function(e) list(status = NA, id = NA_character_))
+                   error = abfangen(list(status = NA, id = NA_character_)))
     if (isTRUE(ko$status == 200)) konten[[email]] <- ko
     list(konto = ko, konten = konten)
   }
@@ -600,7 +615,7 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
       versuche[[i]] <- list(ausgang = gesperrt[[oid]], http_status = NA_integer_, stufe = "suche")
       next
     }
-    mt <- tryCatch(resolve_meeting(oid, ju, app_token), error = function(e) list(status = NA, id = NA_character_))
+    mt <- tryCatch(resolve_meeting(oid, ju, app_token), error = abfangen(list(status = NA, id = NA_character_)))
     su <- lookup_outcome_suche(mt$status, mt$id)
     if (su$ausgang %in% c("policy_403", "organisator_unbekannt") && !aus_email && hat_email) {
       # Die oid aus msgraph_users kann veraltet sein (Alt-Tenant-oid aus dem
@@ -621,7 +636,7 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
           versuche[[i]] <- list(ausgang = gesperrt[[oid]], http_status = NA_integer_, stufe = "suche")
           next
         }
-        mt <- tryCatch(resolve_meeting(oid, ju, app_token), error = function(e) list(status = NA, id = NA_character_))
+        mt <- tryCatch(resolve_meeting(oid, ju, app_token), error = abfangen(list(status = NA, id = NA_character_)))
         su <- lookup_outcome_suche(mt$status, mt$id)
       }
     }
@@ -635,7 +650,7 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
       versuche[[i]] <- c(su, stufe = "suche"); next
     }
     at <- tryCatch(attendance_records(oid, mt$id, app_token),
-                   error = function(e) list(status = NA, meeting_start = NA, meeting_end = NA, reports = list()))
+                   error = abfangen(list(status = NA, meeting_start = NA, meeting_end = NA, reports = list())))
     # Keine Reports ist KEIN Fehler: ein Meeting, an dem niemand teilgenommen
     # hat, liefert legitim nichts - das ist der echte No-Show.
     if (!isTRUE(at$status == 200) || length(at$reports) == 0) {
@@ -683,6 +698,9 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
             "(Ausgang 403/404 behalten, oid nicht gesperrt).")
   if (length(umgeschluesselt) > 0)
     message(length(umgeschluesselt), " veraltete Organizer-oid(s) aus msgraph_users per E-Mail ersetzt.")
+  if (ausnahmen$n > 0)
+    message(ausnahmen$n, " R-Fehler in Graph-Abfragen (als abruf_fehler ohne HTTP-Status verbucht), ",
+            "erste Meldung: ", ausnahmen$erste)
 
   # Laut ausfallen statt still nichts zu schreiben. Beide Faelle bedeuten, dass
   # der Job zwar Meetings gefunden, aber keine belastbaren Daten geholt hat -
