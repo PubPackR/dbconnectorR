@@ -25,7 +25,7 @@ Attribut \code{n_ohne_start}: Berichte ohne ID oder Startzeit, die wegfallen
 Jeder Anwesenheitsbericht ist eine Session: ein Vorkommen des Online-Meetings
 mit eigenem Start, eigenem Ende und eigenen Teilnehmern. Ein wiederverwendeter
 Teams-Link (Serie, persoenlicher Link) hat viele davon. Frueher wurde daraus
-ein einziger Call mit dem Start des ersten Berichts, und jeder weitere Termin
+ein einziger Call mit dem Start des zuerst gelisteten Berichts, jeder andere Termin
 am selben Link zaehlte als No-Show.
 }
 \keyword{internal}

@@ -100,12 +100,15 @@ crm_status_flags <- function(status) {
 #' `"unbekannt"` = MSGraph-Termin ohne klassifizierte Organisator-Zeile,
 #' `"crm_task"` = netto-neuer CRM-Termin, der grundsaetzlich keinen tragen kann.
 #'
-#' **Alt-Tenant.** Traegt die gematchte MSGraph-Zeile den Grund
-#' `alt_tenant_join_url`, ist ihre Anwesenheit nicht messbar, und der CRM-Status
-#' entscheidet: `show_up` und `unbekannt` gelten als stattgefunden, `no_show` als
-#' No-Show, der Ausschluss faellt (`excluded = FALSE`, `exclusion_reason = NA`).
-#' `storniert` bleibt als `crm_storniert` ausgeschlossen. Andere Lead-Zeilen
-#' desselben Meetings bleiben unberuehrt.
+#' **Alt-Tenant und nicht abrufbares Online-Meeting.** Traegt die gematchte
+#' MSGraph-Zeile den Grund `alt_tenant_join_url` oder
+#' `online_meeting_nicht_abrufbar` (Microsoft gibt das Online-Meeting zum Link
+#' nicht heraus: nicht gefunden, 403 der Zugriffsregel, Organisator unbekannt),
+#' ist ihre Anwesenheit nicht messbar, und der CRM-Status entscheidet: `show_up`
+#' und `unbekannt` gelten als stattgefunden, `no_show` als No-Show, der
+#' Ausschluss faellt (`excluded = FALSE`, `exclusion_reason = NA`). `storniert`
+#' bleibt als `crm_storniert` ausgeschlossen. Andere Lead-Zeilen desselben
+#' Meetings bleiben unberuehrt.
 #'
 #' @param msgraph_meetings data.frame mit call_event_mapping_id, lead_id,
 #'   event_date, event_start, contact_id (Rep), is_no_show, excluded,
@@ -180,12 +183,16 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
     link_bekannt & (is.na(url) | !nzchar(trimws(url)))
   }
   # Alt-Tenant-Meetings tragen einen Link, ihr Anwesenheitsbericht ist app-only
-  # aber unerreichbar (`compute_observability_exclusions()`). Gemessen wird dort
-  # also ebenso wenig wie ohne Link. Einmal vor der Schleife, weil der Override
-  # den Grund auf der Zeile loescht: ein zweiter CRM-Task auf dieselbe Zeile
-  # saehe sonst ein anderes Meeting als der erste.
-  ms_alt_tenant <- ms_reason %in% "alt_tenant_join_url"
-  ms_nicht_messbar <- ms_ohne_link | ms_alt_tenant
+  # aber unerreichbar. Bei online_meeting_nicht_abrufbar gibt Microsoft das
+  # Online-Meeting zum Link nicht heraus (nicht gefunden, 403, Organisator
+  # unbekannt). Beide Gruende stammen aus `compute_observability_exclusions()`;
+  # gemessen wird dort ebenso wenig wie ohne Link, und ein CRM-Beleg hebt den
+  # Ausschluss auf (Override-Block unten). Einmal vor der Schleife, weil der
+  # Override den Grund auf der Zeile loescht: ein zweiter CRM-Task auf dieselbe
+  # Zeile saehe sonst ein anderes Meeting als der erste.
+  aufhebbare_gruende <- c("alt_tenant_join_url", "online_meeting_nicht_abrufbar")
+  ms_grund_nicht_messbar <- ms_reason %in% aufhebbare_gruende
+  ms_nicht_messbar <- ms_ohne_link | ms_grund_nicht_messbar
   base <- data.frame(
     meeting_key          = paste0("msgraph_", msgraph_meetings$call_event_mapping_id,
                                   "_", ms_lead),
@@ -308,7 +315,13 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
     # `alt_tenant_join_url` ausgeschlossen, und ohne diesen Zweig loeschte der
     # Kalender-Match den CRM-Beleg: haette der Task kein Meeting gefunden, zaehlte
     # er als netto-neue crm_only-Zeile ohnehin als VC. Mit CRM-Task entscheidet
-    # deshalb der CRM-Status, und der Ausschluss faellt. Nur dieser Grund:
+    # deshalb der CRM-Status, und der Ausschluss faellt.
+    #
+    # **Nicht abrufbares Online-Meeting ist der dritte Fall** (07.10.2026, Spec
+    # 2026-10-07-online-meeting-nicht-abrufbar). Der Link ist aus dem eigenen
+    # Tenant, Microsoft gibt das Meeting aber nicht heraus (nicht gefunden, 403
+    # der Zugriffsregel, Organisator unbekannt). Gleiche Lage wie beim
+    # Alt-Tenant, gleiche Regel. Nur diese beiden Gruende (`aufhebbare_gruende`):
     # Identitaetsgruende (duplikat_event, verschoben, ...) und die Zukunft bleiben
     # stehen, ein Beleg macht aus einem Duplikat keinen eigenen Termin.
     #
@@ -321,7 +334,7 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
     if (cm$meeting_status == "unbekannt" && ms_nicht_messbar[j]) {
       base$is_no_show[j] <- FALSE
     }
-    if (base$exclusion_reason[j] %in% "alt_tenant_join_url" &&
+    if (base$exclusion_reason[j] %in% aufhebbare_gruende &&
         cm$meeting_status %in% c("no_show", "show_up", "unbekannt")) {
       base$excluded[j] <- FALSE
       base$exclusion_reason[j] <- NA_character_

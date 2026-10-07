@@ -15,15 +15,24 @@ discover_meetings_from_events(con, cfg)
 sind app-only unerreichbar).}
 }
 \value{
-data.frame(join_url, organizer_oid), distinct.
+data.frame(join_url, organizer_oid, organizer_email), distinct;
+\code{organizer_email} kleingeschrieben, \code{organizer_oid} NA ohne msgraph_users-Zeile.
 }
 \description{
 Ersetzt das fruehere app-only calendarView-Lesen in der Discovery
 (403 — \code{Calendars.Read} als Application-Permission wird nie granted):
 die delegiert ingestierten Events liefern \code{join_url}; der Organizer wird
 ueber \code{is_organizer} -> msgraph_contacts -> msgraph_users (Email-Match)
-auf seine object_id aufgeloest. Nur intern organisierte Meetings sind
-aufloesbar — extern organisierte deckt die CsApplicationAccessPolicy
-ohnehin nicht.
+auf seine object_id aufgeloest.
+}
+\details{
+Jeder Organisator wird abgefragt, auch mit \code{is_deleted} (der Directory-Sync,
+der das Feld pflegte, laeuft nicht mehr) und auch ohne Zeile in
+msgraph_users: dann ist \code{organizer_oid} NA, und der Calls-Job loest das Konto
+ueber \code{organizer_email} in Graph auf. Eine vorhandene Zeile, die nicht intern
+ist, faellt weiter heraus - extern organisierte Meetings deckt die
+CsApplicationAccessPolicy ohnehin nicht. Je Kontakt zaehlt hoechstens eine
+msgraph_users-Zeile: ohne Platzhalter (\verb{merged-\%}), nicht geloeschte zuerst,
+interne vor externen, dann die zuletzt aktualisierte.
 }
 \keyword{internal}

@@ -14,7 +14,9 @@ compute_observability_exclusions(
 }
 \arguments{
 \item{events}{Data frame of events with columns \code{id}, \code{event_start} and
-\code{join_url}.}
+\code{join_url}, optionally \code{online_meeting_lookup} (outcome of the calls job's
+online meeting search). Without that column \code{online_meeting_nicht_abrufbar}
+is never returned and the result is the same as before the reason existed.}
 
 \item{tenant_id}{Character or NULL. GUID of the own tenant, matched literally
 against \code{join_url} -- the same rule \code{discover_meetings_from_events} applies.
@@ -24,7 +26,8 @@ NULL skips the tenant check entirely.}
 
 \item{event_ids_mit_call}{Vector of event ids for which a call was found
 (\code{event_class} without \code{no_call}). These were observed by definition and are
-never returned as \code{alt_tenant_join_url}. Defaults to none.}
+never returned as \code{alt_tenant_join_url} or \code{online_meeting_nicht_abrufbar}.
+Defaults to none.}
 
 \item{alt_tenant_ab}{Date. \code{alt_tenant_join_url} is only applied to events
 starting on or after this date. Default 2026-08-19 -- the last successful
@@ -35,8 +38,8 @@ rule, because the window cannot be decided for them.}
 }
 \value{
 Data frame with one row per excluded event: \code{event_id} and \code{reason}
-(\code{"termin_in_zukunft"} or \code{"alt_tenant_join_url"}). Zero rows when nothing
-is excluded.
+(\code{"termin_in_zukunft"}, \code{"alt_tenant_join_url"} or
+\code{"online_meeting_nicht_abrufbar"}). Zero rows when nothing is excluded.
 }
 \description{
 \code{is_no_show} is not a measured state -- it is derived from the \emph{absence} of a
@@ -45,7 +48,7 @@ never be observed therefore looks like a no-show. This helper names those
 events so they can be excluded from numerator \emph{and} denominator instead.
 }
 \details{
-Two conditions, both permanent for the event in question:
+Three conditions:
 \itemize{
 \item \strong{\code{termin_in_zukunft}} -- the meeting has not happened yet. There cannot be
 a call record for it, so it is not a no-show. Relevant because the scoped
@@ -56,12 +59,26 @@ report is unreachable app-only; \code{discover_meetings_from_events} filters tho
 meetings out by the same rule, which is why no call ever arrives for them.
 Recurring series created before the tenant migration keep their original
 \code{join_url} indefinitely, so this does not age out on its own.
+\item \strong{\code{online_meeting_nicht_abrufbar}} -- the calls job asked Microsoft for the
+online meeting behind the \code{join_url} and could not get at it:
+\code{online_meeting_lookup} is \code{nicht_gefunden} (search by \code{JoinWebUrl} returned
+no hit), \code{policy_403} (the \code{CsApplicationAccessPolicy} does not cover the
+organizer) or \code{organisator_unbekannt} (the organizer's account cannot be
+resolved in Graph). No attendance report can arrive for such a link, so the
+missing call is an observability gap, not a no-show. Deliberately \emph{not}
+\code{abruf_fehler} (counted as no-show for now, the stored HTTP status shows
+whether that needs to change) and not \code{gefunden_ohne_bericht} (the meeting
+was reachable and nobody joined -- the genuine no-show). Unlike the tenant
+rule there is no start date: the outcome only exists for links inside
+base-62's window, so it cannot reach back into the base-35 era.
 }
 
-Precedence when both apply: \code{termin_in_zukunft} wins while the meeting is still
-ahead, \code{alt_tenant_join_url} takes over once it has passed. The future reason is
-the one that changes, so reporting it first keeps "not due yet" separable from
-"never observable".
+Precedence: \code{termin_in_zukunft} > \code{alt_tenant_join_url} >
+\code{online_meeting_nicht_abrufbar}. The future reason wins while the meeting is
+still ahead; it is the one that changes, so reporting it first keeps "not due
+yet" separable from "never observable". An old-tenant link is never searched
+by the calls job in the first place, so the tenant reason is the more specific
+explanation when both would apply.
 
 Events with a missing \code{join_url} are never excluded here. They are not online
 meetings and were not counted differently before this fix; changing that is a
@@ -71,9 +88,13 @@ separate decision.
 \itemize{
 \item \strong{Call evidence wins.} An event with a matching call was observed, whatever
 its \code{join_url} says, and is never excluded as \code{alt_tenant_join_url}. Without
-this the whole pre-migration series would disappear. It deliberately does
-\emph{not} apply to \code{termin_in_zukunft}: a meeting that has not happened yet is
-no no-show even if some call row points at it -- that is a data
+this the whole pre-migration series would disappear. The same applies to
+\code{online_meeting_nicht_abrufbar}: the outcome is stored per link, while the
+call is matched per event. A link that fails today (an organizer who has
+left) may have delivered a call through base-35 before any outcome was
+stored. A call is a measurement and beats a later "not reachable". It deliberately
+does \emph{not} apply to \code{termin_in_zukunft}: a meeting that has not happened yet
+is no no-show even if some call row points at it -- that is a data
 contradiction, not an observation.
 \item \strong{The rule has a start date (\code{alt_tenant_ab}).} Old-tenant meetings only
 became unreachable once base-62 was the sole supplier. Before that base-35
