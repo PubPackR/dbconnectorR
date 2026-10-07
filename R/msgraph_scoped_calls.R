@@ -566,8 +566,11 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
     mt <- tryCatch(resolve_meeting(oid, ju, app_token), error = function(e) list(status = NA, id = NA_character_))
     su <- lookup_outcome_suche(mt$status, mt$id)
     if (!is.na(su$ausgang)) {
-      # Policy-403 ist eine erwartete Abgrenzung, kein Fehlschlag - zaehlt
-      # deshalb nicht in die Fehlerquote unten.
+      # Jeder Ausgang der Suche ausser einem Treffer endet hier. Nur policy_403
+      # sperrt zusaetzlich den Organizer fuer den Rest des Laufs. Fuer die
+      # Fehlerquote unten sind policy_403 und organisator_unbekannt erwartete
+      # Abgrenzung und zaehlen nicht hinein; nicht_gefunden und abruf_fehler
+      # zaehlen als Fehlschlag.
       if (su$ausgang == "policy_403") blocked_oids <- c(blocked_oids, oid)
       versuche[[i]] <- c(su, stufe = "suche"); next
     }
