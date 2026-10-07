@@ -161,6 +161,11 @@ attendance_records <- function(object_id, meeting_id, app_token) {
   res <- graph_collect(base, app_token, query = list(`$expand` = "attendanceRecords"))
   if (res$status != 200) return(list(status = res$status, meeting_start = NA_character_,
                                      meeting_end = NA_character_, reports = list()))
+  # 200 ohne Bericht: niemand hat teilgenommen, der echte No-Show. Ohne diesen
+  # Ausstieg griff der Zugriff auf den ersten Bericht unten ins Leere, und der
+  # Calls-Job verbuchte den No-Show als abruf_fehler.
+  if (length(res$value) == 0) return(list(status = 200, meeting_start = NA_character_,
+                                          meeting_end = NA_character_, reports = list()))
   # per-Report-Fallback: $expand liefert oft keine Records -> nachladen
   for (i in seq_along(res$value)) {
     if (length(res$value[[i]]$attendanceRecords %||% list()) == 0 && !is.null(res$value[[i]]$id)) {

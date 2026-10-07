@@ -144,3 +144,18 @@ test_that("Ausserhalb jeder Session gewinnt die letzte davor, sonst die fruehest
     as.POSIXct("2026-08-30 12:00:00", tz = "UTC")), 1)
   expect_equal(assign_transcript_session(sessions_tr, as.POSIXct(NA)), 1)
 })
+
+test_that("attendance_records: Meeting ohne Bericht ist 200 mit leerer Liste, kein Fehler", {
+  # Graph liefert fuer ein Meeting, an dem niemand teilnahm, 200 mit leerem
+  # value. Frueher griff attendance_records() trotzdem auf den ersten Bericht zu,
+  # warf "subscript out of bounds", und der Calls-Job verbuchte den echten
+  # No-Show als abruf_fehler (07.10.2026: 658 Events ohne HTTP-Status).
+  mockery::stub(attendance_records, "graph_collect",
+                function(...) list(status = 200, error = NULL, value = list()))
+  at <- attendance_records("OID", "MT1", app_token = "x")
+  expect_equal(at$status, 200)
+  expect_length(at$reports, 0)
+  expect_true(is.na(at$meeting_start))
+  expect_true(is.na(at$meeting_end))
+  expect_equal(lookup_outcome_bericht(at$status, 0L)$ausgang, "gefunden_ohne_bericht")
+})
