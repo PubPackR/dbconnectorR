@@ -69,7 +69,7 @@ synthetic_attendance_guest_email <- function(identity, tenant_id = NULL) {
 #' ist, faellt weiter heraus - extern organisierte Meetings deckt die
 #' CsApplicationAccessPolicy ohnehin nicht. Je Kontakt zaehlt hoechstens eine
 #' msgraph_users-Zeile: ohne Platzhalter (`merged-%`), nicht geloeschte zuerst,
-#' dann die zuletzt aktualisierte.
+#' interne vor externen, dann die zuletzt aktualisierte.
 #'
 #' @param con DB-Pool.
 #' @param cfg load_scoped_config(); `raw_schema` steuert das Quell-Schema,
@@ -87,7 +87,8 @@ discover_meetings_from_events <- function(con, cfg) {
   # event_start liegt als UTC-timestamp -> Vergleich gegen now() AT TIME ZONE 'UTC'.
   # LEFT JOIN LATERAL waehlt hoechstens EINE msgraph_users-Zeile je Kontakt:
   # keine Platzhalter aus der Zwillings-Reparatur ('merged-%'), nicht geloeschte
-  # vor geloeschten, dann die zuletzt aktualisierte. Ein einfacher Join faechert
+  # vor geloeschten, interne vor externen, dann die zuletzt aktualisierte; mu.id
+  # macht die Wahl bei Gleichstand deterministisch. Ein einfacher Join faechert
   # bei Dubletten auf und schickte dafuer veraltete oids in die Suche.
   # u.msgraph_user_id IS NULL heisst "keine Zeile" (die Auswahl laesst nur
   # Zeilen mit gesetzter id durch).
@@ -102,7 +103,8 @@ discover_meetings_from_events <- function(con, cfg) {
         FROM %1$s.msgraph_users mu
        WHERE lower(mu.email) = lower(ct.email)
          AND mu.msgraph_user_id NOT LIKE 'merged-%%'
-       ORDER BY (mu.is_deleted IS TRUE), mu.updated_at DESC NULLS LAST
+       ORDER BY (mu.is_deleted IS TRUE), (mu.is_internal IS NOT TRUE),
+                mu.updated_at DESC NULLS LAST, mu.id DESC
        LIMIT 1
     ) u ON TRUE
     WHERE (u.msgraph_user_id IS NULL OR u.is_internal)
@@ -552,6 +554,8 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
   # oid -> Ausgang (policy_403 / organisator_unbekannt): fuer den Rest des Laufs
   # gesperrt, weitere Links dieses Organizers ohne neue Graph-Abfrage.
   gesperrt <- character(0)
+  # gescheiterte E-Mail-Abfragen im Rueckfall fuer veraltete oids (nur Log)
+  n_rueckfall_fehler <- 0L
   # veraltete oid aus msgraph_users -> oid, die Graph per E-Mail liefert
   umgeschluesselt <- character(0)
   # E-Mail -> list(status, id). Nur Antworten mit 200 werden gemerkt: ein
@@ -607,6 +611,7 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
       if (!isTRUE(k$konto$status == 200)) {
         # Konto-Abfrage gescheitert: Ausgang bleibt, die oid wird aber NICHT
         # gesperrt - der naechste Link dieses Organizers versucht es erneut.
+        n_rueckfall_fehler <- n_rueckfall_fehler + 1L
         versuche[[i]] <- c(su, stufe = "suche"); next
       }
       if (!is.na(neu) && neu != oid) {
@@ -673,6 +678,9 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
     message(sprintf(paste0("Gesperrte Organizer-oid(s), weitere Meetings uebersprungen: %d mit Policy-403, ",
                            "%d mit organisator_unbekannt."),
                     sum(gesperrt == "policy_403"), sum(gesperrt == "organisator_unbekannt")))
+  if (n_rueckfall_fehler > 0)
+    message(n_rueckfall_fehler, " E-Mail-Abfrage(n) im Rueckfall fuer veraltete Organizer-oids gescheitert ",
+            "(Ausgang 403/404 behalten, oid nicht gesperrt).")
   if (length(umgeschluesselt) > 0)
     message(length(umgeschluesselt), " veraltete Organizer-oid(s) aus msgraph_users per E-Mail ersetzt.")
 

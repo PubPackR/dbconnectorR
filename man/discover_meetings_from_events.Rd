@@ -33,6 +33,6 @@ ueber \code{organizer_email} in Graph auf. Eine vorhandene Zeile, die nicht inte
 ist, faellt weiter heraus - extern organisierte Meetings deckt die
 CsApplicationAccessPolicy ohnehin nicht. Je Kontakt zaehlt hoechstens eine
 msgraph_users-Zeile: ohne Platzhalter (\verb{merged-\%}), nicht geloeschte zuerst,
-dann die zuletzt aktualisierte.
+interne vor externen, dann die zuletzt aktualisierte.
 }
 \keyword{internal}

@@ -177,8 +177,12 @@ test_that("calls_attendance: Rueckfall ohne neue oid behaelt den Ausgang und spe
   mockery::stub(msgraph_scoped_update_calls_attendance, "assert_online_meeting_lookup_columns", TRUE)
   mockery::stub(msgraph_scoped_update_calls_attendance, "write_online_meeting_lookups", write)
 
-  expect_equal(suppressMessages(msgraph_scoped_update_calls_attendance(
-    con = NULL, app_token = "t", cfg = lookup_cfg, dry_run = FALSE)), 0)
+  # Beide Links von E scheitern an der E-Mail-Abfrage -> eine Log-Zeile mit 2
+  expect_message(
+    n <- msgraph_scoped_update_calls_attendance(con = NULL, app_token = "t",
+                                                cfg = lookup_cfg, dry_run = FALSE),
+    "^2 E-Mail-Abfrage\\(n\\) im Rueckfall")
+  expect_equal(n, 0)
 
   aus <- mockery::mock_args(write)[[1]][[3]]
   ist <- stats::setNames(aus$online_meeting_lookup, aus$join_url)
@@ -425,7 +429,9 @@ test_that("discover_meetings_from_events behaelt Organisatoren ohne msgraph_user
   # geloeschte und zuletzt aktualisierte zuerst
   expect_match(s, "LEFT JOIN LATERAL ( SELECT mu.msgraph_user_id, mu.is_internal FROM raw.msgraph_users mu", fixed = TRUE)
   expect_match(s, "AND mu.msgraph_user_id NOT LIKE 'merged-%'", fixed = TRUE)
-  expect_match(s, "ORDER BY (mu.is_deleted IS TRUE), mu.updated_at DESC NULLS LAST LIMIT 1 ) u ON TRUE", fixed = TRUE)
+  # interne vor externen, mu.id macht die Wahl bei Gleichstand deterministisch
+  expect_match(s, paste0("ORDER BY (mu.is_deleted IS TRUE), (mu.is_internal IS NOT TRUE), ",
+                         "mu.updated_at DESC NULLS LAST, mu.id DESC LIMIT 1 ) u ON TRUE"), fixed = TRUE)
   expect_match(s, "(u.msgraph_user_id IS NULL OR u.is_internal)", fixed = TRUE)
   expect_match(s, "lower(ct.email) AS organizer_email", fixed = TRUE)
   # is_deleted steuert nur die Auswahl, filtert aber keinen Organisator heraus
