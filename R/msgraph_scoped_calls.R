@@ -60,16 +60,22 @@ synthetic_attendance_guest_email <- function(identity, tenant_id = NULL) {
 #' (403 — `Calendars.Read` als Application-Permission wird nie granted):
 #' die delegiert ingestierten Events liefern `join_url`; der Organizer wird
 #' ueber `is_organizer` -> msgraph_contacts -> msgraph_users (Email-Match)
-#' auf seine object_id aufgeloest. Nur intern organisierte Meetings sind
-#' aufloesbar — extern organisierte deckt die CsApplicationAccessPolicy
-#' ohnehin nicht.
+#' auf seine object_id aufgeloest.
+#'
+#' Jeder Organisator wird abgefragt, auch mit `is_deleted` (der Directory-Sync,
+#' der das Feld pflegte, laeuft nicht mehr) und auch ohne Zeile in
+#' msgraph_users: dann ist `organizer_oid` NA, und der Calls-Job loest das Konto
+#' ueber `organizer_email` in Graph auf. Eine vorhandene Zeile, die nicht intern
+#' ist, faellt weiter heraus - extern organisierte Meetings deckt die
+#' CsApplicationAccessPolicy ohnehin nicht.
 #'
 #' @param con DB-Pool.
 #' @param cfg load_scoped_config(); `raw_schema` steuert das Quell-Schema,
 #'   `events_days_back` das Fenster (nur vergangene/laufende Meetings),
 #'   `tenant_id` filtert auf Meetings des eigenen Tenants (Alt-Tenant-URLs
 #'   sind app-only unerreichbar).
-#' @return data.frame(join_url, organizer_oid), distinct.
+#' @return data.frame(join_url, organizer_oid, organizer_email), distinct;
+#'   `organizer_email` kleingeschrieben, `organizer_oid` NA ohne msgraph_users-Zeile.
 #' @keywords internal
 discover_meetings_from_events <- function(con, cfg) {
   # ---- start ---- #
@@ -77,13 +83,16 @@ discover_meetings_from_events <- function(con, cfg) {
   window_start <- format(Sys.Date() - cfg$events_days_back, "%Y-%m-%d")
   # rs kommt aus der Config (kein User-Input) -> sichere String-Interpolation;
   # event_start liegt als UTC-timestamp -> Vergleich gegen now() AT TIME ZONE 'UTC'.
+  # LEFT JOIN: u.email IS NULL heisst "keine Zeile in msgraph_users" (der Join
+  # vergleicht auf u.email, eine gefundene Zeile hat sie also gesetzt).
   kandidaten <- DBI::dbGetQuery(con, sprintf("
-    SELECT DISTINCT e.join_url, u.msgraph_user_id AS organizer_oid
+    SELECT DISTINCT e.join_url, u.msgraph_user_id AS organizer_oid,
+           lower(ct.email) AS organizer_email
     FROM %1$s.msgraph_events e
     JOIN %1$s.msgraph_event_participants p ON p.event_id = e.id AND p.is_organizer
     JOIN %1$s.msgraph_contacts ct          ON ct.id = p.contact_id
-    JOIN %1$s.msgraph_users u              ON lower(u.email) = lower(ct.email)
-    WHERE u.is_internal AND NOT u.is_deleted
+    LEFT JOIN %1$s.msgraph_users u         ON lower(u.email) = lower(ct.email)
+    WHERE (u.email IS NULL OR u.is_internal)
       AND e.join_url IS NOT NULL
       AND NOT e.is_canceled
       AND e.event_start >= %2$s
@@ -100,7 +109,7 @@ discover_meetings_from_events <- function(con, cfg) {
   # Zahl blieb beim Tenant-Wechsel unsichtbar, waehrend die No-Show-Rate davon
   # auf 52,6 Prozent hochlief.
   eigener_tenant <- grepl(cfg$tenant_id, kandidaten$join_url, fixed = TRUE)
-  out <- kandidaten[eigener_tenant, c("join_url", "organizer_oid"), drop = FALSE]
+  out <- kandidaten[eigener_tenant, c("join_url", "organizer_oid", "organizer_email"), drop = FALSE]
   attr(out, "n_kandidaten") <- nrow(kandidaten)
   attr(out, "n_alt_tenant") <- sum(!eigener_tenant)
   out
@@ -297,10 +306,211 @@ assert_online_meeting_id_column <- function(con, rs) {
   invisible(TRUE)
 }
 
+# --- Ausgang der Online-Meeting-Suche je Link ---
+
+# Rangfolge der Ausgaenge der Online-Meeting-Suche, bester zuerst. Hat ein Link
+# mehrere Discovery-Zeilen (mehrere Organisator-Zeilen), gilt der beste Ausgang
+# ueber alle Versuche.
+ONLINE_MEETING_LOOKUP_RANG <- c("gefunden_mit_bericht", "gefunden_ohne_bericht", "nicht_gefunden",
+                                "abruf_fehler", "policy_403", "organisator_unbekannt")
+
+#' Organisator-Konto per E-Mail in Graph aufloesen
+#'
+#' Gleiche Abfrage wie der Users-Job (`msgraph_scoped_update_users`), nur mit
+#' `$select = id`. Fuer Organisatoren ohne Zeile in msgraph_users.
+#'
+#' @param email E-Mail-Adresse des Organisators.
+#' @param app_token app-only Provider (User.ReadBasic.All).
+#' @return list(status, id); `id` NA, wenn Graph keinen Treffer liefert.
+#' @keywords internal
+resolve_organizer_by_email <- function(email, app_token) {
+  # ---- start ---- #
+  # OData-Literal: ein Apostroph in der Adresse wird verdoppelt
+  addr <- gsub("'", "''", email, fixed = TRUE)
+  res <- graph_get("https://graph.microsoft.com/v1.0/users", app_token,
+                   query = list(`$filter` = paste0("userPrincipalName eq '", addr, "' or mail eq '", addr, "'"),
+                                `$select` = "id"))
+  v <- res$content$value
+  list(status = res$status,
+       id = if (!is.null(v) && length(v) > 0) v[[1]]$id %||% NA_character_ else NA_character_)
+}
+
+#' Ausgang der Konto-Aufloesung per E-Mail (rein)
+#'
+#' @param status HTTP-Status der Abfrage (NA bei Exception).
+#' @param id Gefundene object_id oder NA.
+#' @return list(ausgang, http_status); `ausgang` NA, wenn das Konto aufgeloest ist
+#'   und die Suche weiterlaufen kann.
+#' @keywords internal
+lookup_outcome_konto <- function(status, id) {
+  # ---- start ---- #
+  if (isTRUE(status == 200) && !is.na(id)) return(list(ausgang = NA_character_, http_status = NA_integer_))
+  if (isTRUE(status == 200)) return(list(ausgang = "organisator_unbekannt", http_status = NA_integer_))
+  list(ausgang = "abruf_fehler", http_status = as.integer(status))
+}
+
+#' Ausgang der Online-Meeting-Suche ueber JoinWebUrl (rein)
+#'
+#' 404 auf `/users/{oid}/onlineMeetings` heisst: das Konto gibt es bei Microsoft
+#' nicht mehr.
+#'
+#' @param status HTTP-Status von `resolve_meeting()` (NA bei Exception).
+#' @param id Gefundene onlineMeeting-id oder NA.
+#' @return list(ausgang, http_status); `ausgang` NA, wenn das Meeting gefunden ist.
+#' @keywords internal
+lookup_outcome_suche <- function(status, id) {
+  # ---- start ---- #
+  ausgang <- if (isTRUE(status == 403)) "policy_403"
+    else if (isTRUE(status == 404)) "organisator_unbekannt"
+    else if (isTRUE(status == 200) && is.na(id)) "nicht_gefunden"
+    else if (isTRUE(status == 200)) NA_character_
+    else "abruf_fehler"
+  list(ausgang = ausgang,
+       http_status = if (identical(ausgang, "abruf_fehler")) as.integer(status) else NA_integer_)
+}
+
+#' Ausgang des Berichtsabrufs (rein)
+#'
+#' @param status HTTP-Status von `attendance_records()` (NA bei Exception).
+#' @param n_sessions Anzahl Sessions aus `sessions_from_reports()` (0 ohne Berichte).
+#' @return list(ausgang, http_status).
+#' @keywords internal
+lookup_outcome_bericht <- function(status, n_sessions) {
+  # ---- start ---- #
+  if (!isTRUE(status == 200)) return(list(ausgang = "abruf_fehler", http_status = as.integer(status)))
+  list(ausgang = if (n_sessions > 0) "gefunden_mit_bericht" else "gefunden_ohne_bericht",
+       http_status = NA_integer_)
+}
+
+#' Versuche zu einem Ausgang je Link verdichten (rein)
+#'
+#' @param versuche data.frame(join_url, ausgang, http_status), eine Zeile je
+#'   Discovery-Zeile.
+#' @return tibble(join_url, online_meeting_lookup, online_meeting_lookup_http_status),
+#'   eine Zeile je join_url mit dem besten Ausgang nach `ONLINE_MEETING_LOOKUP_RANG`.
+#'   Der HTTP-Status steht nur bei `abruf_fehler`.
+#' @keywords internal
+aggregate_online_meeting_lookups <- function(versuche) {
+  # ---- start ---- #
+  versuche %>%
+    dplyr::mutate(rang = match(ausgang, ONLINE_MEETING_LOOKUP_RANG)) %>%
+    dplyr::group_by(join_url) %>%
+    dplyr::slice_min(rang, n = 1, with_ties = FALSE) %>%
+    dplyr::ungroup() %>%
+    dplyr::transmute(
+      join_url,
+      online_meeting_lookup = ausgang,
+      online_meeting_lookup_http_status = dplyr::if_else(
+        ausgang == "abruf_fehler", as.integer(http_status), NA_integer_))
+}
+
+#' UPDATE-Statement der Ausgaenge (rein)
+#'
+#' Eigene Funktion, damit die Bedingungen ohne Datenbank pruefbar sind:
+#' 1. Nur Zeilen, deren Wert sich aendert (`IS DISTINCT FROM`). Sonst zoege
+#'    `trigger_set_updated_at` jede Nacht `updated_at` des ganzen Fensters mit.
+#' 2. `online_meeting_lookup_at` springt nur, wenn sich der Ausgang aendert: er
+#'    ist der Zeitpunkt, seit dem der aktuelle Ausgang gilt. Ein anderer
+#'    HTTP-Status bei weiter `abruf_fehler` laesst ihn stehen.
+#' 3. Ein gefundenes Meeting wird nie verschlechtert: Nach dem Ausscheiden ist
+#'    das Konto bei Microsoft weg, und der Befund aus der Zeit davor ist der
+#'    einzige. Zwischen den beiden gefunden_-Werten gilt der neue.
+#'
+#' @param rs Ziel-Schema.
+#' @param tmp Name der Temp-Tabelle (join_url, lookup, http_status).
+#' @return SQL-Statement als character.
+#' @keywords internal
+online_meeting_lookup_sql <- function(rs, tmp) {
+  # ---- start ---- #
+  sprintf("
+    UPDATE %s.msgraph_events e
+       SET online_meeting_lookup             = t.lookup,
+           online_meeting_lookup_http_status = t.http_status,
+           online_meeting_lookup_at          = CASE
+             WHEN e.online_meeting_lookup IS DISTINCT FROM t.lookup
+             THEN timezone('UTC', now())
+             ELSE e.online_meeting_lookup_at END
+      FROM %s t
+     WHERE e.join_url = t.join_url
+       AND (e.online_meeting_lookup IS DISTINCT FROM t.lookup
+            OR e.online_meeting_lookup_http_status IS DISTINCT FROM t.http_status)
+       AND (e.online_meeting_lookup IS NULL
+            OR e.online_meeting_lookup NOT IN ('gefunden_mit_bericht', 'gefunden_ohne_bericht')
+            OR t.lookup IN ('gefunden_mit_bericht', 'gefunden_ohne_bericht'))", rs, tmp)
+}
+
+#' Abbrechen, wenn die Ausgangs-Spalten auf msgraph_events fehlen
+#'
+#' @param con Pool oder DBI-Verbindung.
+#' @param rs Ziel-Schema (config-Schalter, i.d.R. "raw").
+#' @return invisible(TRUE), sonst Fehler mit Verweis auf die Migration.
+#' @keywords internal
+assert_online_meeting_lookup_columns <- function(con, rs) {
+  # ---- start ---- #
+  n_spalten <- DBI::dbGetQuery(con, "
+    SELECT count(*) AS n FROM information_schema.columns
+     WHERE table_schema = $1 AND table_name = 'msgraph_events'
+       AND column_name IN ('online_meeting_lookup', 'online_meeting_lookup_http_status',
+                           'online_meeting_lookup_at')", params = list(rs))$n
+  if (as.numeric(n_spalten) < 3) {
+    stop(sprintf(paste0(
+      "Spalten %s.msgraph_events.online_meeting_lookup* fehlen. Erst die Migration ",
+      "ausfuehren: dbconnectorR/inst/sql/2026-10-07-msgraph-events-online-meeting-lookup.sql ",
+      "(sie aendert nur raw; fuer ein anderes Schema die ALTER-Zeilen dort nachziehen)."), rs))
+  }
+  invisible(TRUE)
+}
+
+#' Ausgaenge der Online-Meeting-Suche auf msgraph_events schreiben
+#'
+#' Setzt den Ausgang auf ALLE Events mit derselben join_url (Vorbild
+#' `mark_join_url_checked()`): Temp-Tabelle + UPDATE in einer Transaktion auf
+#' einer Verbindung. Die Bedingungen des UPDATE stehen in
+#' `online_meeting_lookup_sql()`.
+#'
+#' @param con Pool oder DBI-Verbindung.
+#' @param rs Ziel-Schema (config-Schalter, i.d.R. "raw").
+#' @param ausgaenge `aggregate_online_meeting_lookups()`.
+#' @return invisible(Anzahl geaenderter Event-Zeilen).
+#' @keywords internal
+write_online_meeting_lookups <- function(con, rs, ausgaenge) {
+  # ---- start ---- #
+  if (nrow(ausgaenge) == 0) return(invisible(0L))
+  werte <- data.frame(
+    join_url    = as.character(ausgaenge$join_url),
+    lookup      = as.character(ausgaenge$online_meeting_lookup),
+    http_status = as.integer(ausgaenge$online_meeting_lookup_http_status),
+    stringsAsFactors = FALSE)
+  tmp <- "tmp_online_meeting_lookup"
+  sql <- online_meeting_lookup_sql(rs, tmp)
+  # Eine Transaktion auf EINER Verbindung: die Temp-Tabelle ueberlebt keinen
+  # Pool-Checkout, ein zweiter Checkout saehe sie nicht mehr.
+  schreibe <- function(conn) {
+    DBI::dbWriteTable(conn, tmp, werte, temporary = TRUE, overwrite = TRUE)
+    DBI::dbExecute(conn, sql)
+  }
+  n <- if (inherits(con, "Pool")) {
+    pool::poolWithTransaction(con, schreibe)
+  } else {
+    DBI::dbBegin(con)
+    res <- tryCatch(schreibe(con), error = function(e) { DBI::dbRollback(con); stop(e) })
+    DBI::dbCommit(con)
+    res
+  }
+  message(sprintf("Online-Meeting-Ausgang: %d Event-Zeile(n) geaendert.", n))
+  invisible(n)
+}
+
 #' Calls/Teilnehmer gescopt via Attendance aktualisieren
 #'
 #' Discovery aus den delegiert ingestierten Events (`discover_meetings_from_events`),
 #' Meeting-Aufloesung + Attendance app-only (CsApplicationAccessPolicy-gescoped).
+#'
+#' Je Link (join_url) entsteht ein Ausgang der Online-Meeting-Suche
+#' (`gefunden_mit_bericht`, `gefunden_ohne_bericht`, `nicht_gefunden`,
+#' `policy_403`, `organisator_unbekannt`, `abruf_fehler`). Er wird nach der
+#' Schleife auf alle Events mit dieser join_url geschrieben, auch wenn kein
+#' Call entstand - nicht bei `dry_run` und nicht, wenn der Lauf abbricht.
 #'
 #' @param con DB-Pool.
 #' @param app_token app-only Provider (Meeting-Aufloesung + Attendance).
@@ -321,10 +531,12 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
 
   calls <- list(); parts <- list()
   blocked_oids <- character(0)   # 403 = Policy deckt diesen Organizer nicht -> Rest sparen
-  # Fehlerbuchhaltung: bisher fiel jeder Fehlschlag stumm durch 'next'. Ein
-  # abgelaufener Token oder ein Graph-Ausfall sah dadurch aus wie "keine Calls" -
-  # und weiter unten wie eine Welle von No-Shows.
-  n_versucht <- 0L; n_resolve_fehler <- 0L; n_attendance_fehler <- 0L; n_policy_403 <- 0L
+  konten <- list()               # E-Mail -> list(status, id); je E-Mail nur eine Graph-Abfrage pro Lauf
+  # Ausgang je Discovery-Zeile. Er ersetzt die frueheren Zaehler: bisher fiel
+  # jeder Fehlschlag stumm durch 'next', ein abgelaufener Token oder ein
+  # Graph-Ausfall sah dadurch aus wie "keine Calls" - und weiter unten wie eine
+  # Welle von No-Shows. `stufe` trennt Suche (konto/suche) und Berichtsabruf.
+  versuche <- vector("list", nrow(disc))
   n_session_ohne_start <- 0L
   # Graph listet hoechstens die 50 juengsten Berichte eines Online-Meetings. Bei
   # einem viel genutzten persoenlichen Link fehlen aeltere Sessions dann still -
@@ -332,21 +544,40 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
   GRAPH_MAX_BERICHTE <- 50L; n_bericht_grenze <- 0L
   for (i in seq_len(nrow(disc))) {
     ju <- disc$join_url[i]; oid <- disc$organizer_oid[i]
-    if (oid %in% blocked_oids) next
-    n_versucht <- n_versucht + 1L
+    if (is.na(oid)) {
+      # Organisator ohne Zeile in msgraph_users: Konto per E-Mail aufloesen
+      email <- disc$organizer_email[i]
+      if (is.na(email) || !nzchar(email)) {
+        versuche[[i]] <- list(ausgang = "organisator_unbekannt", http_status = NA_integer_, stufe = "konto")
+        next
+      }
+      if (is.null(konten[[email]]))
+        konten[[email]] <- tryCatch(resolve_organizer_by_email(email, app_token),
+                                    error = function(e) list(status = NA, id = NA_character_))
+      ko <- lookup_outcome_konto(konten[[email]]$status, konten[[email]]$id)
+      if (!is.na(ko$ausgang)) { versuche[[i]] <- c(ko, stufe = "konto"); next }
+      oid <- konten[[email]]$id
+    }
+    if (oid %in% blocked_oids) {
+      # Uebersprungen, weil die Policy diesen Organizer schon im selben Lauf ablehnte
+      versuche[[i]] <- list(ausgang = "policy_403", http_status = NA_integer_, stufe = "suche")
+      next
+    }
     mt <- tryCatch(resolve_meeting(oid, ju, app_token), error = function(e) list(status = NA, id = NA_character_))
-    if (isTRUE(mt$status == 403)) {
+    su <- lookup_outcome_suche(mt$status, mt$id)
+    if (!is.na(su$ausgang)) {
       # Policy-403 ist eine erwartete Abgrenzung, kein Fehlschlag - zaehlt
       # deshalb nicht in die Fehlerquote unten.
-      blocked_oids <- c(blocked_oids, oid); n_policy_403 <- n_policy_403 + 1L; next
+      if (su$ausgang == "policy_403") blocked_oids <- c(blocked_oids, oid)
+      versuche[[i]] <- c(su, stufe = "suche"); next
     }
-    if (!isTRUE(mt$status == 200) || is.na(mt$id)) { n_resolve_fehler <- n_resolve_fehler + 1L; next }
     at <- tryCatch(attendance_records(oid, mt$id, app_token),
                    error = function(e) list(status = NA, meeting_start = NA, meeting_end = NA, reports = list()))
-    if (!isTRUE(at$status == 200)) { n_attendance_fehler <- n_attendance_fehler + 1L; next }
     # Keine Reports ist KEIN Fehler: ein Meeting, an dem niemand teilgenommen
     # hat, liefert legitim nichts - das ist der echte No-Show.
-    if (length(at$reports) == 0) next
+    if (!isTRUE(at$status == 200) || length(at$reports) == 0) {
+      versuche[[i]] <- c(lookup_outcome_bericht(at$status, 0L), stufe = "bericht"); next
+    }
     if (length(at$reports) >= GRAPH_MAX_BERICHTE) n_bericht_grenze <- n_bericht_grenze + 1L
     # meeting_id = thread-id aus der joinUrl, identische Ableitung wie in
     # parse_scoped_events und im alten base-35-Pfad (msgraph_calls.R:414). Nur so
@@ -361,10 +592,20 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
     sess <- sessions_from_reports(at$reports, online_meeting_id = mt$id,
                                   meeting_id = mid_thread, tenant_id = cfg$tenant_id)
     n_session_ohne_start <- n_session_ohne_start + attr(sess, "n_ohne_start")
+    versuche[[i]] <- c(lookup_outcome_bericht(at$status, nrow(sess$calls)), stufe = "bericht")
     if (nrow(sess$calls) == 0) next
     calls[[length(calls) + 1]] <- sess$calls
     parts[[length(parts) + 1]] <- sess$parts
   }
+  versuche_df <- tibble::tibble(
+    join_url    = disc$join_url,
+    ausgang     = vapply(versuche, function(v) v$ausgang, character(1)),
+    http_status = vapply(versuche, function(v) as.integer(v$http_status), integer(1)),
+    stufe       = vapply(versuche, function(v) v$stufe, character(1)))
+  ausgaenge <- aggregate_online_meeting_lookups(versuche_df)
+  n_je_ausgang <- table(factor(ausgaenge$online_meeting_lookup, levels = ONLINE_MEETING_LOOKUP_RANG))
+  message("Online-Meeting-Ausgang je Link: ",
+          paste(names(n_je_ausgang), as.integer(n_je_ausgang), sep = " ", collapse = ", "))
   if (n_session_ohne_start > 0)
     message(n_session_ohne_start, " Anwesenheitsbericht(e) ohne ID oder Startzeit uebersprungen.")
   if (n_bericht_grenze > 0)
@@ -375,9 +616,18 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
 
   # Laut ausfallen statt still nichts zu schreiben. Beide Faelle bedeuten, dass
   # der Job zwar Meetings gefunden, aber keine belastbaren Daten geholt hat -
-  # jedes betroffene Event wird downstream sonst zum No-Show.
+  # jedes betroffene Event wird downstream sonst zum No-Show. Gezaehlt wird je
+  # Discovery-Zeile. nicht_gefunden zaehlt weiter als Resolve-Fehler: ist die
+  # Suche systematisch kaputt, soll der Lauf laut abbrechen.
+  n_versucht <- nrow(versuche_df)
+  n_policy_403 <- sum(versuche_df$ausgang == "policy_403")
+  n_organisator_unbekannt <- sum(versuche_df$ausgang == "organisator_unbekannt")
+  n_resolve_fehler <- sum(versuche_df$stufe %in% c("konto", "suche") &
+                            versuche_df$ausgang %in% c("nicht_gefunden", "abruf_fehler"))
+  n_attendance_fehler <- sum(versuche_df$stufe == "bericht" & versuche_df$ausgang == "abruf_fehler")
   n_fehler <- n_resolve_fehler + n_attendance_fehler
-  n_bewertbar <- n_versucht - n_policy_403   # 403 ist Abgrenzung, kein Fehlschlag
+  # 403 und unbekannter Organisator sind Abgrenzung, kein Fehlschlag
+  n_bewertbar <- n_versucht - n_policy_403 - n_organisator_unbekannt
 
   # Mindestmenge, bevor eine Quote ueberhaupt aussagekraeftig ist. Ohne sie
   # kippt ein einzelner transienter 500 an einem ruhigen Tag - Feiertag, Ferien,
@@ -391,17 +641,25 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
       "Graph-Ausfall. Abbruch, statt die fehlenden Calls als No-Shows wirken zu lassen."),
       n_fehler, n_bewertbar, n_resolve_fehler, n_attendance_fehler))
   }
+  # Null Calls: nur abbrechen, wenn tatsaechlich etwas fehlgeschlagen ist. Null
+  # Calls bei null Fehlern ist der Normalfall an einem Tag, an dem die gefundenen
+  # Meetings schlicht niemand besucht hat - das IST der echte No-Show und darf
+  # den Lauf nicht abbrechen.
+  if (length(calls) == 0 && n_fehler > 0) {
+    stop(sprintf(paste0(
+      "msgraph_scoped_update_calls_attendance: %d bewertbare Meetings versucht, kein ",
+      "einziger Attendance-Report verwertbar (%d resolve-, %d attendance-Fehler). Abbruch."),
+      n_bewertbar, n_resolve_fehler, n_attendance_fehler))
+  }
+  # Ausgaenge erst nach den Abbruch-Pruefungen schreiben: ein abgebrochener Lauf
+  # schreibt nichts. Die Spalten vor jedem Schreiben pruefen, auch vor den Calls.
+  if (dry_run) {
+    message(sprintf("[dry-run] %d Link-Ausgaenge (nicht geschrieben).", nrow(ausgaenge)))
+  } else {
+    assert_online_meeting_lookup_columns(con, rs)
+  }
   if (length(calls) == 0) {
-    # Nur abbrechen, wenn tatsaechlich etwas fehlgeschlagen ist. Null Calls bei
-    # null Fehlern ist der Normalfall an einem Tag, an dem die gefundenen
-    # Meetings schlicht niemand besucht hat - das IST der echte No-Show und darf
-    # den Lauf nicht abbrechen.
-    if (n_fehler > 0) {
-      stop(sprintf(paste0(
-        "msgraph_scoped_update_calls_attendance: %d bewertbare Meetings versucht, kein ",
-        "einziger Attendance-Report verwertbar (%d resolve-, %d attendance-Fehler). Abbruch."),
-        n_bewertbar, n_resolve_fehler, n_attendance_fehler))
-    }
+    if (!dry_run) write_online_meeting_lookups(con, rs, ausgaenge)
     message(sprintf("Keine Calls/Attendance (%d bewertbare Meetings, keine Fehler).", n_bewertbar))
     return(invisible(0L))
   }
@@ -446,5 +704,7 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
     dplyr::distinct(call_id, contact_id)
   Billomatics::postgres_upsert_data(con, rs, "msgraph_call_participants", cp,
                                     match_cols = c("call_id", "contact_id"))
+  # Nach den Calls: gefunden_mit_bericht steht erst, wenn die Sessions geschrieben sind
+  write_online_meeting_lookups(con, rs, ausgaenge)
   invisible(nrow(calls_df))
 }

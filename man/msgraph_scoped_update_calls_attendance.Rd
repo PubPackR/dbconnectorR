@@ -30,3 +30,10 @@ invisible(Anzahl Calls).
 Discovery aus den delegiert ingestierten Events (\code{discover_meetings_from_events}),
 Meeting-Aufloesung + Attendance app-only (CsApplicationAccessPolicy-gescoped).
 }
+\details{
+Je Link (join_url) entsteht ein Ausgang der Online-Meeting-Suche
+(\code{gefunden_mit_bericht}, \code{gefunden_ohne_bericht}, \code{nicht_gefunden},
+\code{policy_403}, \code{organisator_unbekannt}, \code{abruf_fehler}). Er wird nach der
+Schleife auf alle Events mit dieser join_url geschrieben, auch wenn kein
+Call entstand - nicht bei \code{dry_run} und nicht, wenn der Lauf abbricht.
+}
