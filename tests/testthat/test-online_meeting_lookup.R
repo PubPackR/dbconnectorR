@@ -455,3 +455,52 @@ test_that("resolve_organizer_by_email fragt UPN oder mail ab und quotet Apostrop
                "userPrincipalName eq 'o''neil@bertelsmann.de' or mail eq 'o''neil@bertelsmann.de'")
   expect_equal(gesehen$query$`$select`, "id")
 })
+
+test_that("calls_attendance: Graph 200 ohne Bericht wird durch das echte attendance_records gefunden_ohne_bericht", {
+  # Die anderen Job-Tests stubben attendance_records selbst. Hier laeuft der
+  # echte Helfer, nur graph_collect ist im Paket-Namespace ersetzt. Vor dem Fix
+  # warf er "subscript out of bounds", und der No-Show landete als abruf_fehler.
+  testthat::local_mocked_bindings(
+    graph_collect = function(...) list(status = 200, error = NULL, value = list()))
+  write <- mockery::mock(1L)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "discover_meetings_from_events",
+                function(con, cfg) data.frame(join_url = "https://teams/a", organizer_oid = "OID1",
+                                              organizer_email = "a@studyflix.de"))
+  mockery::stub(msgraph_scoped_update_calls_attendance, "resolve_meeting",
+                function(oid, ju, tok) list(status = 200, id = "MID1"))
+  mockery::stub(msgraph_scoped_update_calls_attendance, "assert_online_meeting_lookup_columns", TRUE)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "write_online_meeting_lookups", write)
+
+  suppressMessages(msgraph_scoped_update_calls_attendance(con = NULL, app_token = "t",
+                                                          cfg = lookup_cfg, dry_run = FALSE))
+
+  aus <- mockery::mock_args(write)[[1]][[3]]
+  expect_equal(aus$online_meeting_lookup, "gefunden_ohne_bericht")
+})
+
+test_that("calls_attendance: ein R-Fehler im Graph-Helfer wird gezaehlt und mit Meldung geloggt", {
+  write <- mockery::mock(1L)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "discover_meetings_from_events",
+                function(con, cfg) data.frame(join_url = "https://teams/a", organizer_oid = "OID1",
+                                              organizer_email = "a@studyflix.de"))
+  mockery::stub(msgraph_scoped_update_calls_attendance, "resolve_meeting",
+                function(oid, ju, tok) list(status = 200, id = "MID1"))
+  mockery::stub(msgraph_scoped_update_calls_attendance, "attendance_records",
+                function(oid, mid, tok) stop("kaputter Helfer"))
+  mockery::stub(msgraph_scoped_update_calls_attendance, "assert_online_meeting_lookup_columns", TRUE)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "write_online_meeting_lookups", write)
+
+  # Ein einziger Link, dessen Abruf scheitert: der Lauf bricht (wie gewollt) ab.
+  # Die Meldung muss VOR dem Abbruch im Log stehen, sonst sieht man im
+  # FlowForce-Log wieder nur die Fehlerquote.
+  log <- new.env(); log$meldungen <- character(0)
+  expect_error(withCallingHandlers(
+    msgraph_scoped_update_calls_attendance(con = NULL, app_token = "t", cfg = lookup_cfg, dry_run = FALSE),
+    message = function(m) {
+      log$meldungen <- c(log$meldungen, conditionMessage(m))
+      invokeRestart("muffleMessage")
+    }), "kein einziger Attendance-Report")
+
+  expect_true(any(grepl("1 R-Fehler in Graph-Abfragen.*kaputter Helfer", log$meldungen)))
+  mockery::expect_called(write, 0)
+})
