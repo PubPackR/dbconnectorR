@@ -67,7 +67,9 @@ synthetic_attendance_guest_email <- function(identity, tenant_id = NULL) {
 #' msgraph_users: dann ist `organizer_oid` NA, und der Calls-Job loest das Konto
 #' ueber `organizer_email` in Graph auf. Eine vorhandene Zeile, die nicht intern
 #' ist, faellt weiter heraus - extern organisierte Meetings deckt die
-#' CsApplicationAccessPolicy ohnehin nicht.
+#' CsApplicationAccessPolicy ohnehin nicht. Je Kontakt zaehlt hoechstens eine
+#' msgraph_users-Zeile: ohne Platzhalter (`merged-%`), nicht geloeschte zuerst,
+#' dann die zuletzt aktualisierte.
 #'
 #' @param con DB-Pool.
 #' @param cfg load_scoped_config(); `raw_schema` steuert das Quell-Schema,
@@ -83,16 +85,27 @@ discover_meetings_from_events <- function(con, cfg) {
   window_start <- format(Sys.Date() - cfg$events_days_back, "%Y-%m-%d")
   # rs kommt aus der Config (kein User-Input) -> sichere String-Interpolation;
   # event_start liegt als UTC-timestamp -> Vergleich gegen now() AT TIME ZONE 'UTC'.
-  # LEFT JOIN: u.email IS NULL heisst "keine Zeile in msgraph_users" (der Join
-  # vergleicht auf u.email, eine gefundene Zeile hat sie also gesetzt).
+  # LEFT JOIN LATERAL waehlt hoechstens EINE msgraph_users-Zeile je Kontakt:
+  # keine Platzhalter aus der Zwillings-Reparatur ('merged-%'), nicht geloeschte
+  # vor geloeschten, dann die zuletzt aktualisierte. Ein einfacher Join faechert
+  # bei Dubletten auf und schickte dafuer veraltete oids in die Suche.
+  # u.msgraph_user_id IS NULL heisst "keine Zeile" (die Auswahl laesst nur
+  # Zeilen mit gesetzter id durch).
   kandidaten <- DBI::dbGetQuery(con, sprintf("
     SELECT DISTINCT e.join_url, u.msgraph_user_id AS organizer_oid,
            lower(ct.email) AS organizer_email
     FROM %1$s.msgraph_events e
     JOIN %1$s.msgraph_event_participants p ON p.event_id = e.id AND p.is_organizer
     JOIN %1$s.msgraph_contacts ct          ON ct.id = p.contact_id
-    LEFT JOIN %1$s.msgraph_users u         ON lower(u.email) = lower(ct.email)
-    WHERE (u.email IS NULL OR u.is_internal)
+    LEFT JOIN LATERAL (
+      SELECT mu.msgraph_user_id, mu.is_internal
+        FROM %1$s.msgraph_users mu
+       WHERE lower(mu.email) = lower(ct.email)
+         AND mu.msgraph_user_id NOT LIKE 'merged-%%'
+       ORDER BY (mu.is_deleted IS TRUE), mu.updated_at DESC NULLS LAST
+       LIMIT 1
+    ) u ON TRUE
+    WHERE (u.msgraph_user_id IS NULL OR u.is_internal)
       AND e.join_url IS NOT NULL
       AND NOT e.is_canceled
       AND e.event_start >= %2$s
@@ -512,6 +525,12 @@ write_online_meeting_lookups <- function(con, rs, ausgaenge) {
 #' Schleife auf alle Events mit dieser join_url geschrieben, auch wenn kein
 #' Call entstand - nicht bei `dry_run` und nicht, wenn der Lauf abbricht.
 #'
+#' Antwortet die Suche fuer eine oid aus msgraph_users mit 403 oder 404, wird
+#' das Konto einmal per E-Mail aufgeloest: rund 290 interne User tragen dort
+#' noch die oid aus dem Alt-Tenant. Liefert Graph eine andere oid, zaehlt die
+#' Suche mit ihr. Eine oid mit endgueltigem 403/404 wird fuer den Rest des Laufs
+#' gesperrt.
+#'
 #' @param con DB-Pool.
 #' @param app_token app-only Provider (Meeting-Aufloesung + Attendance).
 #' @param cfg load_scoped_config(); `raw_schema`/`processed_schema` steuern das Ziel-Schema.
@@ -530,8 +549,21 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
   if (nrow(disc) == 0) { message("Keine Meetings im Fenster (Discovery aus Events)."); return(invisible(0L)) }
 
   calls <- list(); parts <- list()
-  blocked_oids <- character(0)   # 403 = Policy deckt diesen Organizer nicht -> Rest sparen
-  konten <- list()               # E-Mail -> list(status, id); je E-Mail nur eine Graph-Abfrage pro Lauf
+  # oid -> Ausgang (policy_403 / organisator_unbekannt): fuer den Rest des Laufs
+  # gesperrt, weitere Links dieses Organizers ohne neue Graph-Abfrage.
+  gesperrt <- character(0)
+  # veraltete oid aus msgraph_users -> oid, die Graph per E-Mail liefert
+  umgeschluesselt <- character(0)
+  # E-Mail -> list(status, id). Nur Antworten mit 200 werden gemerkt: ein
+  # transienter Fehler wird beim naechsten Link desselben Organizers wiederholt.
+  konten <- list()
+  konto_per_email <- function(email, konten) {
+    if (!is.null(konten[[email]])) return(list(konto = konten[[email]], konten = konten))
+    ko <- tryCatch(resolve_organizer_by_email(email, app_token),
+                   error = function(e) list(status = NA, id = NA_character_))
+    if (isTRUE(ko$status == 200)) konten[[email]] <- ko
+    list(konto = ko, konten = konten)
+  }
   # Ausgang je Discovery-Zeile. Er ersetzt die frueheren Zaehler: bisher fiel
   # jeder Fehlschlag stumm durch 'next', ein abgelaufener Token oder ein
   # Graph-Ausfall sah dadurch aus wie "keine Calls" - und weiter unten wie eine
@@ -543,35 +575,58 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
   # deshalb zaehlen, wie oft die Grenze erreicht ist.
   GRAPH_MAX_BERICHTE <- 50L; n_bericht_grenze <- 0L
   for (i in seq_len(nrow(disc))) {
-    ju <- disc$join_url[i]; oid <- disc$organizer_oid[i]
+    ju <- disc$join_url[i]; oid <- disc$organizer_oid[i]; email <- disc$organizer_email[i]
+    hat_email <- !is.null(email) && !is.na(email) && nzchar(email)
+    aus_email <- FALSE   # TRUE: oid stammt schon aus der E-Mail-Aufloesung
     if (is.na(oid)) {
       # Organisator ohne Zeile in msgraph_users: Konto per E-Mail aufloesen
-      email <- disc$organizer_email[i]
-      if (is.na(email) || !nzchar(email)) {
+      if (!hat_email) {
         versuche[[i]] <- list(ausgang = "organisator_unbekannt", http_status = NA_integer_, stufe = "konto")
         next
       }
-      if (is.null(konten[[email]]))
-        konten[[email]] <- tryCatch(resolve_organizer_by_email(email, app_token),
-                                    error = function(e) list(status = NA, id = NA_character_))
-      ko <- lookup_outcome_konto(konten[[email]]$status, konten[[email]]$id)
+      k <- konto_per_email(email, konten); konten <- k$konten
+      ko <- lookup_outcome_konto(k$konto$status, k$konto$id)
       if (!is.na(ko$ausgang)) { versuche[[i]] <- c(ko, stufe = "konto"); next }
-      oid <- konten[[email]]$id
+      oid <- k$konto$id; aus_email <- TRUE
+    } else if (oid %in% names(umgeschluesselt)) {
+      oid <- umgeschluesselt[[oid]]; aus_email <- TRUE
     }
-    if (oid %in% blocked_oids) {
-      # Uebersprungen, weil die Policy diesen Organizer schon im selben Lauf ablehnte
-      versuche[[i]] <- list(ausgang = "policy_403", http_status = NA_integer_, stufe = "suche")
+    if (oid %in% names(gesperrt)) {
+      # Uebersprungen, weil dieser Organizer im selben Lauf schon 403/404 lieferte
+      versuche[[i]] <- list(ausgang = gesperrt[[oid]], http_status = NA_integer_, stufe = "suche")
       next
     }
     mt <- tryCatch(resolve_meeting(oid, ju, app_token), error = function(e) list(status = NA, id = NA_character_))
     su <- lookup_outcome_suche(mt$status, mt$id)
+    if (su$ausgang %in% c("policy_403", "organisator_unbekannt") && !aus_email && hat_email) {
+      # Die oid aus msgraph_users kann veraltet sein (Alt-Tenant-oid aus dem
+      # base-35-Directory-Load). Einmal per E-Mail nachschlagen; nur eine ANDERE
+      # oid fuehrt zu einer zweiten Suche, sonst bleibt der Ausgang.
+      k <- konto_per_email(email, konten); konten <- k$konten
+      neu <- k$konto$id %||% NA_character_
+      if (!isTRUE(k$konto$status == 200)) {
+        # Konto-Abfrage gescheitert: Ausgang bleibt, die oid wird aber NICHT
+        # gesperrt - der naechste Link dieses Organizers versucht es erneut.
+        versuche[[i]] <- c(su, stufe = "suche"); next
+      }
+      if (!is.na(neu) && neu != oid) {
+        umgeschluesselt[oid] <- neu
+        oid <- neu
+        if (oid %in% names(gesperrt)) {
+          versuche[[i]] <- list(ausgang = gesperrt[[oid]], http_status = NA_integer_, stufe = "suche")
+          next
+        }
+        mt <- tryCatch(resolve_meeting(oid, ju, app_token), error = function(e) list(status = NA, id = NA_character_))
+        su <- lookup_outcome_suche(mt$status, mt$id)
+      }
+    }
     if (!is.na(su$ausgang)) {
-      # Jeder Ausgang der Suche ausser einem Treffer endet hier. Nur policy_403
-      # sperrt zusaetzlich den Organizer fuer den Rest des Laufs. Fuer die
-      # Fehlerquote unten sind policy_403 und organisator_unbekannt erwartete
-      # Abgrenzung und zaehlen nicht hinein; nicht_gefunden und abruf_fehler
-      # zaehlen als Fehlschlag.
-      if (su$ausgang == "policy_403") blocked_oids <- c(blocked_oids, oid)
+      # Jeder Ausgang der Suche ausser einem Treffer endet hier. policy_403 und
+      # organisator_unbekannt sperren zusaetzlich die oid, die zuletzt geantwortet
+      # hat, fuer den Rest des Laufs. Fuer die Fehlerquote unten sind beide
+      # erwartete Abgrenzung und zaehlen nicht hinein; nicht_gefunden und
+      # abruf_fehler zaehlen als Fehlschlag.
+      if (su$ausgang %in% c("policy_403", "organisator_unbekannt")) gesperrt[oid] <- su$ausgang
       versuche[[i]] <- c(su, stufe = "suche"); next
     }
     at <- tryCatch(attendance_records(oid, mt$id, app_token),
@@ -614,8 +669,12 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
   if (n_bericht_grenze > 0)
     message(n_bericht_grenze, " Online-Meeting(s) mit ", GRAPH_MAX_BERICHTE,
             " Berichten (Graph-Grenze): aeltere Sessions dieser Links liefert Graph nicht mehr.")
-  if (length(blocked_oids) > 0)
-    message("Policy-403 fuer ", length(blocked_oids), " Organizer-oid(s) — deren Meetings uebersprungen.")
+  if (length(gesperrt) > 0)
+    message(sprintf(paste0("Gesperrte Organizer-oid(s), weitere Meetings uebersprungen: %d mit Policy-403, ",
+                           "%d mit organisator_unbekannt."),
+                    sum(gesperrt == "policy_403"), sum(gesperrt == "organisator_unbekannt")))
+  if (length(umgeschluesselt) > 0)
+    message(length(umgeschluesselt), " veraltete Organizer-oid(s) aus msgraph_users per E-Mail ersetzt.")
 
   # Laut ausfallen statt still nichts zu schreiben. Beide Faelle bedeuten, dass
   # der Job zwar Meetings gefunden, aber keine belastbaren Daten geholt hat -

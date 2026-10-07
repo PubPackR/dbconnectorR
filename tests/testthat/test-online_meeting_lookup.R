@@ -53,6 +53,8 @@ test_that("calls_attendance: jeder Link bekommt seinen Ausgang, der beste ueber 
   konto <- function(email, tok) {
     assign(email, (abfragen[[email]] %||% 0L) + 1L, envir = abfragen)
     switch(email,
+           "x@studyflix.de"           = list(status = 200, id = "OID_403"),   # gleiche oid: bleibt 403
+           "weg@studyflix.de"         = list(status = 200, id = NA_character_),
            "neu@bertelsmann.de"       = list(status = 200, id = "OID_OK"),
            "unbekannt@bertelsmann.de" = list(status = 200, id = NA_character_),
            "kaputt@bertelsmann.de"    = list(status = 503, id = NA_character_))
@@ -106,6 +108,111 @@ test_that("calls_attendance: jeder Link bekommt seinen Ausgang, der beste ueber 
   expect_true(is.na(status[["https://teams/o"]]))
   # Je E-Mail nur eine Graph-Abfrage pro Lauf
   expect_equal(abfragen[["unbekannt@bertelsmann.de"]], 1L)
+  expect_equal(abfragen[["x@studyflix.de"]], 1L)   # Rueckfall nach 403 nur einmal, dann gesperrt
+})
+
+# --- Veraltete oid aus msgraph_users: Rueckfall per E-Mail ------------------------
+
+zaehle <- function(env, key) assign(key, (env[[key]] %||% 0L) + 1L, envir = env)
+
+test_that("calls_attendance: 403/404 auf eine veraltete oid sucht mit der oid aus der E-Mail weiter", {
+  disc <- data.frame(join_url = c("https://teams/a1", "https://teams/a2", "https://teams/b1", "https://teams/b2"),
+                     organizer_oid = c("ALT1", "ALT1", "ALT2", "ALT2"),
+                     organizer_email = c("eins@studyflix.de", "eins@studyflix.de",
+                                         "zwei@studyflix.de", "zwei@studyflix.de"),
+                     stringsAsFactors = FALSE)
+  suchen <- new.env(); konten <- new.env()
+  write <- mockery::mock(1L)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "discover_meetings_from_events",
+                function(con, cfg) disc)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "resolve_meeting", function(oid, ju, tok) {
+    zaehle(suchen, oid)
+    switch(oid, ALT1 = list(status = 403, id = NA_character_), ALT2 = list(status = 404, id = NA_character_),
+           list(status = 200, id = paste0("MID_", ju)))
+  })
+  mockery::stub(msgraph_scoped_update_calls_attendance, "resolve_organizer_by_email", function(email, tok) {
+    zaehle(konten, email)
+    list(status = 200, id = if (email == "eins@studyflix.de") "NEU1" else "NEU2")
+  })
+  mockery::stub(msgraph_scoped_update_calls_attendance, "attendance_records",
+                function(oid, mid, tok) list(status = 200, reports = list()))
+  mockery::stub(msgraph_scoped_update_calls_attendance, "assert_online_meeting_lookup_columns", TRUE)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "write_online_meeting_lookups", write)
+
+  suppressMessages(msgraph_scoped_update_calls_attendance(con = NULL, app_token = "t",
+                                                          cfg = lookup_cfg, dry_run = FALSE))
+
+  aus <- mockery::mock_args(write)[[1]][[3]]
+  expect_true(all(aus$online_meeting_lookup == "gefunden_ohne_bericht"))
+  expect_equal(nrow(aus), 4)
+  # Die alte oid wird je Organizer genau einmal gefragt, danach direkt die neue
+  expect_equal(suchen[["ALT1"]], 1L); expect_equal(suchen[["ALT2"]], 1L)
+  expect_equal(suchen[["NEU1"]], 2L); expect_equal(suchen[["NEU2"]], 2L)
+  expect_equal(konten[["eins@studyflix.de"]], 1L); expect_equal(konten[["zwei@studyflix.de"]], 1L)
+})
+
+test_that("calls_attendance: Rueckfall ohne neue oid behaelt den Ausgang und sperrt die oid", {
+  # S: E-Mail liefert dieselbe oid -> policy_403, gesperrt
+  # U: E-Mail ohne Treffer -> organisator_unbekannt, gesperrt (kein weiterer 404-Aufruf)
+  # E: E-Mail-Abfrage scheitert -> policy_403, aber NICHT gesperrt: der naechste Link fragt neu
+  disc <- data.frame(join_url = paste0("https://teams/", c("s1", "s2", "u1", "u2", "e1", "e2")),
+                     organizer_oid = c("OID_S", "OID_S", "OID_U", "OID_U", "OID_E", "OID_E"),
+                     organizer_email = c("s@studyflix.de", "s@studyflix.de", "u@studyflix.de",
+                                         "u@studyflix.de", "e@studyflix.de", "e@studyflix.de"),
+                     stringsAsFactors = FALSE)
+  suchen <- new.env(); konten <- new.env()
+  write <- mockery::mock(1L)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "discover_meetings_from_events",
+                function(con, cfg) disc)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "resolve_meeting", function(oid, ju, tok) {
+    zaehle(suchen, oid)
+    list(status = if (oid == "OID_U") 404 else 403, id = NA_character_)
+  })
+  mockery::stub(msgraph_scoped_update_calls_attendance, "resolve_organizer_by_email", function(email, tok) {
+    zaehle(konten, email)
+    switch(email, "s@studyflix.de" = list(status = 200, id = "OID_S"),
+           "u@studyflix.de" = list(status = 200, id = NA_character_),
+           "e@studyflix.de" = stop("Graph weg"))
+  })
+  mockery::stub(msgraph_scoped_update_calls_attendance, "assert_online_meeting_lookup_columns", TRUE)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "write_online_meeting_lookups", write)
+
+  expect_equal(suppressMessages(msgraph_scoped_update_calls_attendance(
+    con = NULL, app_token = "t", cfg = lookup_cfg, dry_run = FALSE)), 0)
+
+  aus <- mockery::mock_args(write)[[1]][[3]]
+  ist <- stats::setNames(aus$online_meeting_lookup, aus$join_url)
+  expect_equal(unname(ist[paste0("https://teams/", c("s1", "s2", "u1", "u2", "e1", "e2"))]),
+               c("policy_403", "policy_403", "organisator_unbekannt", "organisator_unbekannt",
+                 "policy_403", "policy_403"))
+  expect_equal(suchen[["OID_S"]], 1L); expect_equal(konten[["s@studyflix.de"]], 1L)
+  expect_equal(suchen[["OID_U"]], 1L); expect_equal(konten[["u@studyflix.de"]], 1L)
+  expect_equal(suchen[["OID_E"]], 2L); expect_equal(konten[["e@studyflix.de"]], 2L)
+})
+
+test_that("calls_attendance: gescheiterte Konto-Abfrage wird nicht gemerkt, der naechste Link fragt neu", {
+  disc <- data.frame(join_url = c("https://teams/a", "https://teams/b", "https://teams/c"),
+                     organizer_oid = c(NA, NA, "OID_OK"),
+                     organizer_email = c("neu@bertelsmann.de", "neu@bertelsmann.de", "ok@studyflix.de"),
+                     stringsAsFactors = FALSE)
+  konten <- new.env(); suchen <- new.env()
+  mockery::stub(msgraph_scoped_update_calls_attendance, "discover_meetings_from_events",
+                function(con, cfg) disc)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "resolve_organizer_by_email", function(email, tok) {
+    zaehle(konten, email)
+    if (konten[[email]] == 1L) list(status = 503, id = NA_character_) else list(status = 200, id = "OID_NEU")
+  })
+  mockery::stub(msgraph_scoped_update_calls_attendance, "resolve_meeting", function(oid, ju, tok) {
+    zaehle(suchen, oid); list(status = 200, id = "MID1")
+  })
+  mockery::stub(msgraph_scoped_update_calls_attendance, "attendance_records",
+                function(oid, mid, tok) list(status = 200, reports = list(bericht_mit_teilnehmer)))
+
+  expect_message(
+    msgraph_scoped_update_calls_attendance(con = NULL, app_token = "t", cfg = lookup_cfg, dry_run = TRUE),
+    "gefunden_mit_bericht 2, gefunden_ohne_bericht 0, nicht_gefunden 0, abruf_fehler 1", fixed = TRUE)
+  expect_equal(konten[["neu@bertelsmann.de"]], 2L)   # 503 nicht gecacht, zweiter Versuch gelingt
+  expect_equal(suchen[["OID_NEU"]], 1L)
 })
 
 # --- Schreiben: auch bei 0 Calls, nicht bei dry_run, nicht bei Abbruch -----------
@@ -314,10 +421,15 @@ test_that("discover_meetings_from_events behaelt Organisatoren ohne msgraph_user
   out <- discover_meetings_from_events(NULL, list(raw_schema = "raw", events_days_back = 50,
                                                   tenant_id = "TEN"))
   s <- gsub("\\s+", " ", gesehen)
-  expect_match(s, "LEFT JOIN raw.msgraph_users u", fixed = TRUE)
-  expect_match(s, "(u.email IS NULL OR u.is_internal)", fixed = TRUE)
+  # Hoechstens eine msgraph_users-Zeile je Kontakt, ohne Platzhalter, nicht
+  # geloeschte und zuletzt aktualisierte zuerst
+  expect_match(s, "LEFT JOIN LATERAL ( SELECT mu.msgraph_user_id, mu.is_internal FROM raw.msgraph_users mu", fixed = TRUE)
+  expect_match(s, "AND mu.msgraph_user_id NOT LIKE 'merged-%'", fixed = TRUE)
+  expect_match(s, "ORDER BY (mu.is_deleted IS TRUE), mu.updated_at DESC NULLS LAST LIMIT 1 ) u ON TRUE", fixed = TRUE)
+  expect_match(s, "(u.msgraph_user_id IS NULL OR u.is_internal)", fixed = TRUE)
   expect_match(s, "lower(ct.email) AS organizer_email", fixed = TRUE)
-  expect_false(grepl("is_deleted", s, fixed = TRUE))
+  # is_deleted steuert nur die Auswahl, filtert aber keinen Organisator heraus
+  expect_false(grepl("NOT (mu|u)\\.is_deleted", s))
   expect_equal(names(out), c("join_url", "organizer_oid", "organizer_email"))
   expect_equal(out$organizer_oid, c("OID1", NA))
   expect_equal(attr(out, "n_alt_tenant"), 1L)

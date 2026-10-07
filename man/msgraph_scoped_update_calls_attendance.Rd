@@ -36,4 +36,10 @@ Je Link (join_url) entsteht ein Ausgang der Online-Meeting-Suche
 \code{policy_403}, \code{organisator_unbekannt}, \code{abruf_fehler}). Er wird nach der
 Schleife auf alle Events mit dieser join_url geschrieben, auch wenn kein
 Call entstand - nicht bei \code{dry_run} und nicht, wenn der Lauf abbricht.
+
+Antwortet die Suche fuer eine oid aus msgraph_users mit 403 oder 404, wird
+das Konto einmal per E-Mail aufgeloest: rund 290 interne User tragen dort
+noch die oid aus dem Alt-Tenant. Liefert Graph eine andere oid, zaehlt die
+Suche mit ihr. Eine oid mit endgueltigem 403/404 wird fuer den Rest des Laufs
+gesperrt.
 }

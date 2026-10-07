@@ -31,6 +31,8 @@ der das Feld pflegte, laeuft nicht mehr) und auch ohne Zeile in
 msgraph_users: dann ist \code{organizer_oid} NA, und der Calls-Job loest das Konto
 ueber \code{organizer_email} in Graph auf. Eine vorhandene Zeile, die nicht intern
 ist, faellt weiter heraus - extern organisierte Meetings deckt die
-CsApplicationAccessPolicy ohnehin nicht.
+CsApplicationAccessPolicy ohnehin nicht. Je Kontakt zaehlt hoechstens eine
+msgraph_users-Zeile: ohne Platzhalter (\verb{merged-\%}), nicht geloeschte zuerst,
+dann die zuletzt aktualisierte.
 }
 \keyword{internal}
