@@ -49,6 +49,11 @@ aus Zähler und Nenner jeder Anwesenheitsquote fällt.
 - **Discovery fragt jeden Organisator ab**: auch mit `is_deleted`. Fehlt der Organisator in
   `raw.msgraph_users`, löst der Job sein Konto per E-Mail über Graph auf (`User.ReadBasic.All`,
   wie der Users-Job). Gelingt das nicht → `organisator_unbekannt`.
+- **Veraltete oid** (Code-Review 07.10.): Antwortet die Suche mit 403 oder 404 auf eine oid aus
+  `raw.msgraph_users`, löst der Job das Konto einmal per E-Mail auf. Liefert Graph eine andere
+  oid, sucht er damit neu. Grund: rund 290 interne Konten stammen aus dem Directory-Load von
+  base-35 und tragen noch die oid des alten Tenants. Je Kontakt nimmt die Discovery genau eine
+  Zeile aus `raw.msgraph_users`: keine `merged-%`-Platzhalter, nicht gelöschte und interne zuerst.
 - **Ein Befund wird nie verschlechtert**: Steht schon `gefunden_mit_bericht` oder
   `gefunden_ohne_bericht`, überschreibt ein späteres `policy_403`, `organisator_unbekannt` oder
   `abruf_fehler` ihn nicht. Grund: Nach dem Ausscheiden ist das Konto bei Microsoft weg, und der
