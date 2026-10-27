@@ -219,6 +219,63 @@ test_that("calls_attendance: gescheiterte Konto-Abfrage wird nicht gemerkt, der 
   expect_equal(suchen[["OID_NEU"]], 1L)
 })
 
+# --- Fremder Link im Kalender: gesucht wird mit der Oid aus dem Link -----------
+
+oid_kalender <- "11111111-aaaa-4bbb-8ccc-000000000001"
+oid_besitzer <- "22222222-aaaa-4bbb-8ccc-000000000002"
+teams_link <- function(thread, oid) paste0(
+  "https://teams.microsoft.com/l/meetup-join/19%3ameeting_", thread, "%40thread.v2/0?context=",
+  "%7b%22Tid%22%3a%2200000000-0000-4000-8000-0000000000aa%22%2c%22Oid%22%3a%22", oid, "%22%7d")
+
+test_that("calls_attendance: ein 403 auf einen fremden Link sperrt nicht die Kalender-Person", {
+  # Asana 1219771315423579: Im Kalender liegt ein Link, der einer anderen Person gehoert.
+  # Bisher lief die Suche unter der oid der Kalender-Person, bekam 403 und sperrte sie fuer
+  # alle weiteren eigenen Links des Laufs.
+  fremd <- teams_link("FREMD", oid_besitzer); eigen <- teams_link("EIGEN", oid_kalender)
+  disc <- data.frame(join_url = c(fremd, eigen), organizer_oid = oid_kalender,
+                     organizer_email = "kalender@studyflix.de", stringsAsFactors = FALSE)
+  suchen <- new.env()
+  write <- mockery::mock(1L)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "discover_meetings_from_events",
+                function(con, cfg) disc)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "resolve_meeting", function(oid, ju, tok) {
+    zaehle(suchen, oid)
+    # Besitzer steht nicht in der Policy; die Kalender-Person findet nur ihr eigenes Meeting
+    if (oid == oid_besitzer) list(status = 403, id = NA_character_)
+    else if (ju == eigen) list(status = 200, id = "MID_EIGEN")
+    else list(status = 403, id = NA_character_)
+  })
+  mockery::stub(msgraph_scoped_update_calls_attendance, "attendance_records",
+                function(oid, mid, tok) list(status = 200, reports = list()))
+  konto <- mockery::mock(list(status = 200, id = oid_kalender), cycle = TRUE)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "resolve_organizer_by_email", konto)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "assert_online_meeting_lookup_columns", TRUE)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "write_online_meeting_lookups", write)
+
+  suppressMessages(msgraph_scoped_update_calls_attendance(con = NULL, app_token = "t",
+                                                          cfg = lookup_cfg, dry_run = FALSE))
+
+  aus <- mockery::mock_args(write)[[1]][[3]]
+  ist <- stats::setNames(aus$online_meeting_lookup, aus$join_url)
+  expect_equal(ist[[fremd]], "policy_403")              # fremdes Meeting: oid des Besitzers, sein 403
+  expect_equal(ist[[eigen]], "gefunden_ohne_bericht")   # Kalender-Person bleibt abfragbar
+  expect_equal(suchen[[oid_besitzer]], 1L)
+  expect_equal(suchen[[oid_kalender]], 1L)
+  mockery::expect_called(konto, 0)                      # oid aus dem Link braucht keinen Rueckfall
+})
+
+test_that("organizer_oid_from_join_url liest die Oid kodiert und im Klartext", {
+  expect_equal(organizer_oid_from_join_url(teams_link("X", toupper(oid_besitzer))), oid_besitzer)
+  klartext <- paste0("https://teams.microsoft.com/l/meetup-join/19:meeting_X@thread.v2/0?context=",
+                     '{"Tid":"00000000-0000-4000-8000-0000000000aa","Oid":"', oid_kalender, '"}')
+  expect_equal(organizer_oid_from_join_url(klartext), oid_kalender)
+  expect_true(is.na(organizer_oid_from_join_url("https://teams/a")))
+  expect_true(is.na(organizer_oid_from_join_url(NA_character_)))
+  expect_true(is.na(organizer_oid_from_join_url("")))
+  # Kaputte Prozent-Kodierung bricht nicht ab
+  expect_true(is.na(organizer_oid_from_join_url("https://teams/%zz")))
+})
+
 # --- Schreiben: auch bei 0 Calls, nicht bei dry_run, nicht bei Abbruch -----------
 
 test_that("calls_attendance schreibt die Ausgaenge auch, wenn kein Call entstand", {

@@ -155,6 +155,27 @@ resolve_meeting <- function(object_id, join_url, app_token) {
          res$content$value[[1]]$id %||% NA_character_ else NA_character_)
 }
 
+#' Organisator-oid aus einer Teams-joinUrl (rein)
+#'
+#' Die joinUrl traegt im `context`-Parameter den Tenant (`Tid`) und die
+#' object_id der Person, der das Online-Meeting gehoert (`Oid`), URL-kodiert
+#' oder im Klartext. Das ist nicht zwingend die Person, in deren Kalender der
+#' Termin steht: ein kopierter oder fuer jemanden angelegter Link gehoert
+#' weiter seinem Ersteller.
+#'
+#' @param join_url Teams-joinUrl.
+#' @return `Oid` kleingeschrieben, oder `NA_character_`, wenn keine ablesbar ist.
+#' @keywords internal
+organizer_oid_from_join_url <- function(join_url) {
+  # ---- start ---- #
+  if (length(join_url) != 1 || is.na(join_url) || !nzchar(join_url)) return(NA_character_)
+  klartext <- tryCatch(utils::URLdecode(join_url), error = function(e) join_url)
+  treffer <- regmatches(klartext, regexec('"Oid"\\s*:\\s*"([0-9a-fA-F-]{36})"', klartext,
+                                          ignore.case = TRUE))[[1]]
+  if (length(treffer) < 2) return(NA_character_)
+  tolower(treffer[2])
+}
+
 attendance_records <- function(object_id, meeting_id, app_token) {
   base <- paste0("https://graph.microsoft.com/v1.0/users/", object_id,
                  "/onlineMeetings/", meeting_id, "/attendanceReports")
@@ -532,6 +553,8 @@ write_online_meeting_lookups <- function(con, rs, ausgaenge) {
 #' Schleife auf alle Events mit dieser join_url geschrieben, auch wenn kein
 #' Call entstand - nicht bei `dry_run` und nicht, wenn der Lauf abbricht.
 #'
+#' Gesucht wird mit der `Oid` aus der joinUrl, also der Person, der das
+#' Online-Meeting gehoert. Nur ohne sie zaehlt die oid der Kalender-Person.
 #' Antwortet die Suche fuer eine oid aus msgraph_users mit 403 oder 404, wird
 #' das Konto einmal per E-Mail aufgeloest: rund 290 interne User tragen dort
 #' noch die oid aus dem Alt-Tenant. Liefert Graph eine andere oid, zaehlt die
@@ -557,7 +580,7 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
 
   calls <- list(); parts <- list()
   # oid -> Ausgang (policy_403 / organisator_unbekannt): fuer den Rest des Laufs
-  # gesperrt, weitere Links dieses Organizers ohne neue Graph-Abfrage.
+  # gesperrt, weitere Links derselben oid ohne neue Graph-Abfrage.
   gesperrt <- character(0)
   # gescheiterte E-Mail-Abfragen im Rueckfall fuer veraltete oids (nur Log)
   n_rueckfall_fehler <- 0L
@@ -597,7 +620,16 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
     ju <- disc$join_url[i]; oid <- disc$organizer_oid[i]; email <- disc$organizer_email[i]
     hat_email <- !is.null(email) && !is.na(email) && nzchar(email)
     aus_email <- FALSE   # TRUE: oid stammt schon aus der E-Mail-Aufloesung
-    if (is.na(oid)) {
+    # Gesucht wird mit der oid aus dem Link, nicht mit der der Kalender-Person.
+    # Ein fremder Link im Kalender lieferte unter deren oid 403 und sperrte sie
+    # damit fuer alle eigenen Links des Laufs (Asana 1219771315423579). Die oid
+    # aus dem Link ist aktuell (Alt-Tenant-Links filtert die Discovery), der
+    # E-Mail-Rueckfall fuer veraltete oids entfaellt dann.
+    url_oid <- organizer_oid_from_join_url(ju)
+    aus_link <- !is.na(url_oid)
+    if (aus_link) {
+      oid <- url_oid
+    } else if (is.na(oid)) {
       # Organisator ohne Zeile in msgraph_users: Konto per E-Mail aufloesen
       if (!hat_email) {
         versuche[[i]] <- list(ausgang = "organisator_unbekannt", http_status = NA_integer_, stufe = "konto")
@@ -617,7 +649,7 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
     }
     mt <- tryCatch(resolve_meeting(oid, ju, app_token), error = abfangen(list(status = NA, id = NA_character_)))
     su <- lookup_outcome_suche(mt$status, mt$id)
-    if (su$ausgang %in% c("policy_403", "organisator_unbekannt") && !aus_email && hat_email) {
+    if (su$ausgang %in% c("policy_403", "organisator_unbekannt") && !aus_email && !aus_link && hat_email) {
       # Die oid aus msgraph_users kann veraltet sein (Alt-Tenant-oid aus dem
       # base-35-Directory-Load). Einmal per E-Mail nachschlagen; nur eine ANDERE
       # oid fuehrt zu einer zweiten Suche, sonst bleibt der Ausgang.

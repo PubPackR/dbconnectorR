@@ -37,6 +37,8 @@ Je Link (join_url) entsteht ein Ausgang der Online-Meeting-Suche
 Schleife auf alle Events mit dieser join_url geschrieben, auch wenn kein
 Call entstand - nicht bei \code{dry_run} und nicht, wenn der Lauf abbricht.
 
+Gesucht wird mit der \code{Oid} aus der joinUrl, also der Person, der das
+Online-Meeting gehoert. Nur ohne sie zaehlt die oid der Kalender-Person.
 Antwortet die Suche fuer eine oid aus msgraph_users mit 403 oder 404, wird
 das Konto einmal per E-Mail aufgeloest: rund 290 interne User tragen dort
 noch die oid aus dem Alt-Tenant. Liefert Graph eine andere oid, zaehlt die
