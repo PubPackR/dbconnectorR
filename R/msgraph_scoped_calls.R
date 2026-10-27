@@ -60,7 +60,9 @@ synthetic_attendance_guest_email <- function(identity, tenant_id = NULL) {
 #' (403 — `Calendars.Read` als Application-Permission wird nie granted):
 #' die delegiert ingestierten Events liefern `join_url`; der Organizer wird
 #' ueber `is_organizer` -> msgraph_contacts -> msgraph_users (Email-Match)
-#' auf seine object_id aufgeloest.
+#' auf seine object_id aufgeloest. Der Calls-Job sucht mit dieser oid nur, wenn
+#' die joinUrl keine `Oid` traegt (`organizer_oid_from_join_url`): ein Link im
+#' Kalender kann einer anderen Person gehoeren.
 #'
 #' Jeder Organisator wird abgefragt, auch mit `is_deleted` (der Directory-Sync,
 #' der das Feld pflegte, laeuft nicht mehr) und auch ohne Zeile in

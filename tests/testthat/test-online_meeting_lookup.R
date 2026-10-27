@@ -264,6 +264,29 @@ test_that("calls_attendance: ein 403 auf einen fremden Link sperrt nicht die Kal
   mockery::expect_called(konto, 0)                      # oid aus dem Link braucht keinen Rueckfall
 })
 
+test_that("calls_attendance: 404 auf die oid aus dem Link fragt nicht per E-Mail nach", {
+  # Ohne Rueckfall: die E-Mail gehoert der Kalender-Person, nicht dem Besitzer
+  fremd <- teams_link("WEG", oid_besitzer)
+  disc <- data.frame(join_url = fremd, organizer_oid = oid_kalender,
+                     organizer_email = "kalender@studyflix.de", stringsAsFactors = FALSE)
+  write <- mockery::mock(1L)
+  konto <- mockery::mock(list(status = 200, id = oid_kalender), cycle = TRUE)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "discover_meetings_from_events",
+                function(con, cfg) disc)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "resolve_meeting",
+                function(oid, ju, tok) list(status = 404, id = NA_character_))
+  mockery::stub(msgraph_scoped_update_calls_attendance, "resolve_organizer_by_email", konto)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "assert_online_meeting_lookup_columns", TRUE)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "write_online_meeting_lookups", write)
+
+  suppressMessages(msgraph_scoped_update_calls_attendance(con = NULL, app_token = "t",
+                                                          cfg = lookup_cfg, dry_run = FALSE))
+
+  aus <- mockery::mock_args(write)[[1]][[3]]
+  expect_equal(aus$online_meeting_lookup, "organisator_unbekannt")
+  mockery::expect_called(konto, 0)
+})
+
 test_that("organizer_oid_from_join_url liest die Oid kodiert und im Klartext", {
   expect_equal(organizer_oid_from_join_url(teams_link("X", toupper(oid_besitzer))), oid_besitzer)
   klartext <- paste0("https://teams.microsoft.com/l/meetup-join/19:meeting_X@thread.v2/0?context=",
