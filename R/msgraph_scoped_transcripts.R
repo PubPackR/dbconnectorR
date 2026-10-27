@@ -22,11 +22,12 @@ vtt_to_plaintext <- function(vtt) {
 #'
 #' Das onlineMeeting ist organizer-scoped: nur die oid des Organisators liefert am
 #' `/onlineMeetings/{id}/transcripts`-Endpoint HTTP 200 mit Transkripten;
-#' nicht-Organisatoren geben 403/leer. Der Organisator wird (noch) nicht separat
-#' gespeichert, daher werden alle internen Teilnehmer-Kandidaten durchprobiert und
-#' der erste mit 200 + Transkripten genommen.
+#' nicht-Organisatoren geben 403/leer. Der Job stellt den Meeting-Besitzer aus der
+#' Online-Meeting-ID an die erste Stelle, danach die internen Teilnehmer; der
+#' erste mit 200 + Transkripten wird genommen.
 #'
-#' @param cands Character-Vektor kandidierender object_ids (interne Teilnehmer).
+#' @param cands Character-Vektor kandidierender object_ids in Abfrage-Reihenfolge
+#'   (Meeting-Besitzer, dann interne Teilnehmer).
 #' @param mid onlineMeeting-id.
 #' @param app_token app-only Provider.
 #' @return list(oid, value) des ersten treffenden Kandidaten, oder NULL.
@@ -41,6 +42,32 @@ resolve_transcript_source <- function(cands, mid, app_token) {
     if (isTRUE(resp$status == 200) && length(resp$value) > 0) return(list(oid = cand, value = resp$value))
   }
   NULL
+}
+
+#' Meeting-Besitzer aus einer Online-Meeting-ID (rein)
+#'
+#' Die Online-Meeting-ID aus Graph ist base64 von `1*<oid>*0**<thread-id>`
+#' (siehe `build_online_meeting_id`). Die oid ist die des Meeting-Besitzers, der
+#' den Teams-Link angelegt hat - nur unter ihr liefert der Transkript-Endpoint.
+#'
+#' @param online_meeting_id Online-Meeting-ID, mit oder ohne base64-Padding.
+#' @return oid kleingeschrieben, oder `NA_character_`, wenn keine ablesbar ist
+#'   (z.B. Bericht-ID aus dem base-35-Bestand).
+#' @keywords internal
+meeting_owner_oid_from_online_meeting_id <- function(online_meeting_id) {
+  # ---- start ---- #
+  if (length(online_meeting_id) != 1 || is.na(online_meeting_id) || !nzchar(online_meeting_id))
+    return(NA_character_)
+  # URL-sicheres Alphabet (-_) auf das Standard-Alphabet (+/) abbilden
+  b64 <- chartr("-_", "+/", online_meeting_id)
+  if (nchar(b64) %% 4 != 0) b64 <- paste0(b64, strrep("=", 4 - nchar(b64) %% 4))
+  klartext <- tryCatch(rawToChar(jsonlite::base64_dec(b64)), error = function(e) NA_character_)
+  if (is.na(klartext)) return(NA_character_)
+  # useBytes: eine Bericht-ID (base-35-Bestand) dekodiert zu beliebigen Bytes,
+  # die in der Locale ungueltig sind - ohne useBytes bricht regexec den Job ab.
+  treffer <- regmatches(klartext, regexec("^1\\*([0-9a-fA-F-]{36})\\*", klartext, useBytes = TRUE))[[1]]
+  if (length(treffer) < 2) return(NA_character_)
+  tolower(treffer[2])
 }
 
 #' Calls im Transkript-Fenster auswaehlen
@@ -135,7 +162,8 @@ msgraph_scoped_update_transcripts <- function(con, app_token, cfg, dry_run = FAL
     dplyr::select(transcript_id, call_id) %>% dplyr::collect()
 
   # Kandidaten-object_ids je Online-Meeting = alle INTERNEN Teilnehmer seiner
-  # Sessions (Details zur Organizer-Scoping-Logik siehe resolve_transcript_source).
+  # Sessions (Details zur Organizer-Scoping-Logik siehe resolve_transcript_source),
+  # in der Schleife unten ergaenzt um den Meeting-Besitzer an erster Stelle.
   # rs kommt aus der Config (kein User-Input) -> sichere String-Interpolation;
   # die ids werden per dbQuoteLiteral sicher gequotet.
   quoted_ids <- paste(DBI::dbQuoteLiteral(con, mids), collapse = ", ")
@@ -155,8 +183,14 @@ msgraph_scoped_update_transcripts <- function(con, app_token, cfg, dry_run = FAL
   # scheitern.
   new_rows <- list()
   for (mid in mids) {
-    cands <- cand_map[[mid]]
-    if (is.null(cands) || length(cands) == 0) next
+    # Der Meeting-Besitzer zuerst: nur unter seiner oid liefert Graph Transkripte.
+    # Seit dem Calls-Job mit der oid aus der joinUrl entstehen Calls zu Links, die
+    # nicht der Kalender-Person gehoeren - nimmt der Besitzer nicht teil, steht er
+    # unter den internen Teilnehmern gar nicht drin.
+    besitzer <- meeting_owner_oid_from_online_meeting_id(mid)
+    cands <- c(besitzer[!is.na(besitzer)], cand_map[[mid]])
+    cands <- cands[!duplicated(tolower(cands))]   # oids sind GUIDs, Schreibweise egal
+    if (length(cands) == 0) next
     src <- resolve_transcript_source(cands, mid, app_token)
     if (is.null(src)) next
     oid <- src$oid

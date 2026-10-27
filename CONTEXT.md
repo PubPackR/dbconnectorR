@@ -51,6 +51,14 @@ The internal salesperson accountable for a meeting. A rep cannot be in two
 meetings at the same instant — the basis for time-based disambiguation.
 _Avoid_: Owner, organizer, agent, Mitarbeiter.
 
+**Meeting owner** (Meeting-Besitzer):
+The account that created the Teams link of a meeting. Microsoft keeps the
+online meeting, its attendance reports and its transcripts under this account.
+Not necessarily the person whose calendar holds the appointment, nor the
+responsible rep: a rep may hold a link a colleague created and lead the meeting
+alone.
+_Avoid_: Organizer, calendar owner, host.
+
 **Internal contact**:
 A Studyflix or partner-group person (identified by email pattern). Never counts
 as a lead, even when present as a participant.

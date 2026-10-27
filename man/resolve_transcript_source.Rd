@@ -7,7 +7,8 @@
 resolve_transcript_source(cands, mid, app_token)
 }
 \arguments{
-\item{cands}{Character-Vektor kandidierender object_ids (interne Teilnehmer).}
+\item{cands}{Character-Vektor kandidierender object_ids in Abfrage-Reihenfolge
+(Meeting-Besitzer, dann interne Teilnehmer).}
 
 \item{mid}{onlineMeeting-id.}
 
@@ -19,8 +20,8 @@ list(oid, value) des ersten treffenden Kandidaten, oder NULL.
 \description{
 Das onlineMeeting ist organizer-scoped: nur die oid des Organisators liefert am
 \verb{/onlineMeetings/\{id\}/transcripts}-Endpoint HTTP 200 mit Transkripten;
-nicht-Organisatoren geben 403/leer. Der Organisator wird (noch) nicht separat
-gespeichert, daher werden alle internen Teilnehmer-Kandidaten durchprobiert und
-der erste mit 200 + Transkripten genommen.
+nicht-Organisatoren geben 403/leer. Der Job stellt den Meeting-Besitzer aus der
+Online-Meeting-ID an die erste Stelle, danach die internen Teilnehmer; der
+erste mit 200 + Transkripten wird genommen.
 }
 \keyword{internal}
