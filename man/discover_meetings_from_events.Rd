@@ -23,7 +23,9 @@ Ersetzt das fruehere app-only calendarView-Lesen in der Discovery
 (403 — \code{Calendars.Read} als Application-Permission wird nie granted):
 die delegiert ingestierten Events liefern \code{join_url}; der Organizer wird
 ueber \code{is_organizer} -> msgraph_contacts -> msgraph_users (Email-Match)
-auf seine object_id aufgeloest.
+auf seine object_id aufgeloest. Der Calls-Job sucht mit dieser oid nur, wenn
+die joinUrl keine \code{Oid} traegt (\code{organizer_oid_from_join_url}): ein Link im
+Kalender kann einer anderen Person gehoeren.
 }
 \details{
 Jeder Organisator wird abgefragt, auch mit \code{is_deleted} (der Directory-Sync,
