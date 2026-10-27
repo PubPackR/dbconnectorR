@@ -26,7 +26,8 @@ vtt_to_plaintext <- function(vtt) {
 #' Online-Meeting-ID an die erste Stelle, danach die internen Teilnehmer; der
 #' erste mit 200 + Transkripten wird genommen.
 #'
-#' @param cands Character-Vektor kandidierender object_ids (interne Teilnehmer).
+#' @param cands Character-Vektor kandidierender object_ids in Abfrage-Reihenfolge
+#'   (Meeting-Besitzer, dann interne Teilnehmer).
 #' @param mid onlineMeeting-id.
 #' @param app_token app-only Provider.
 #' @return list(oid, value) des ersten treffenden Kandidaten, oder NULL.
@@ -57,7 +58,8 @@ meeting_owner_oid_from_online_meeting_id <- function(online_meeting_id) {
   # ---- start ---- #
   if (length(online_meeting_id) != 1 || is.na(online_meeting_id) || !nzchar(online_meeting_id))
     return(NA_character_)
-  b64 <- online_meeting_id
+  # URL-sicheres Alphabet (-_) auf das Standard-Alphabet (+/) abbilden
+  b64 <- chartr("-_", "+/", online_meeting_id)
   if (nchar(b64) %% 4 != 0) b64 <- paste0(b64, strrep("=", 4 - nchar(b64) %% 4))
   klartext <- tryCatch(rawToChar(jsonlite::base64_dec(b64)), error = function(e) NA_character_)
   if (is.na(klartext)) return(NA_character_)
@@ -186,7 +188,8 @@ msgraph_scoped_update_transcripts <- function(con, app_token, cfg, dry_run = FAL
     # nicht der Kalender-Person gehoeren - nimmt der Besitzer nicht teil, steht er
     # unter den internen Teilnehmern gar nicht drin.
     besitzer <- meeting_owner_oid_from_online_meeting_id(mid)
-    cands <- unique(c(besitzer[!is.na(besitzer)], cand_map[[mid]]))
+    cands <- c(besitzer[!is.na(besitzer)], cand_map[[mid]])
+    cands <- cands[!duplicated(tolower(cands))]   # oids sind GUIDs, Schreibweise egal
     if (length(cands) == 0) next
     src <- resolve_transcript_source(cands, mid, app_token)
     if (is.null(src)) next

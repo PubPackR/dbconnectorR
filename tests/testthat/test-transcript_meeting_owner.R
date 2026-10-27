@@ -10,6 +10,10 @@ test_that("meeting_owner_oid_from_online_meeting_id liest die oid aus der Online
   expect_equal(meeting_owner_oid_from_online_meeting_id(mid), oid_besitzer)
   # Graph liefert die ID teils ohne Padding
   expect_equal(meeting_owner_oid_from_online_meeting_id(sub("=+$", "", mid)), oid_besitzer)
+  # URL-sicheres Alphabet: die thread-id erzwingt '/' im Standard-base64
+  mid_slash <- build_online_meeting_id(oid_besitzer, "19:meeting_???@thread.v2")
+  expect_match(mid_slash, "/", fixed = TRUE)
+  expect_equal(meeting_owner_oid_from_online_meeting_id(chartr("+/", "-_", mid_slash)), oid_besitzer)
   expect_true(is.na(meeting_owner_oid_from_online_meeting_id("REP1")))          # Bericht-ID, kein base64-Format
   expect_true(is.na(meeting_owner_oid_from_online_meeting_id("bm9wZQ==")))      # base64, aber nicht 1*<oid>*
   expect_true(is.na(meeting_owner_oid_from_online_meeting_id(NA_character_)))
@@ -65,7 +69,7 @@ test_that("Besitzer, der auch Teilnehmer ist, wird nur einmal gefragt", {
   mockery::stub(msgraph_scoped_update_transcripts, "DBI::dbQuoteLiteral",
                 function(con, x) paste0("'", x, "'"))
   mockery::stub(msgraph_scoped_update_transcripts, "DBI::dbGetQuery",
-                function(con, sql) data.frame(graph_mid = mid, object_id = c(oid_besitzer, "KALENDER")))
+                function(con, sql) data.frame(graph_mid = mid, object_id = c(toupper(oid_besitzer), "KALENDER")))
   mockery::stub(msgraph_scoped_update_transcripts, "resolve_transcript_source",
                 function(cands, mid, app_token) { rec$cands <- cands; NULL })
 

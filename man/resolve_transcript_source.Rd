@@ -7,7 +7,8 @@
 resolve_transcript_source(cands, mid, app_token)
 }
 \arguments{
-\item{cands}{Character-Vektor kandidierender object_ids (interne Teilnehmer).}
+\item{cands}{Character-Vektor kandidierender object_ids in Abfrage-Reihenfolge
+(Meeting-Besitzer, dann interne Teilnehmer).}
 
 \item{mid}{onlineMeeting-id.}
 
