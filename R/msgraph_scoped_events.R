@@ -266,6 +266,10 @@ msgraph_scoped_update_events <- function(con, del_token, cfg, suppression_pepper
   }, cals$value)
 
   all_events <- list()
+  # Owner der Kalender, die in diesem Lauf wirklich geladen wurden. Nur deren
+  # Bestands-Events duerfen als verschwunden gelten, siehe
+  # mark_vanished_events_canceled().
+  loaded_owners <- character(0)
   for (cal in shared) {
     cid <- cal$id
     res <- graph_collect(
@@ -290,6 +294,7 @@ msgraph_scoped_update_events <- function(con, del_token, cfg, suppression_pepper
         ev
       })
       all_events <- c(all_events, tagged)
+      loaded_owners <- c(loaded_owners, cal_owner_email)
     }
   }
 
@@ -337,6 +342,17 @@ msgraph_scoped_update_events <- function(con, del_token, cfg, suppression_pepper
   # 2b) Geprueft-Marke nachtragen. Muss NACH dem Upsert laufen: Zeilen, die
   # dieser Lauf erst angelegt hat, sollen die Marke ebenfalls bekommen.
   mark_join_url_checked(con, rs, parsed$events)
+
+  # 2c) Verschobene/geloeschte Termine als abgesagt markieren. Ohne diesen
+  # Schritt bleibt die alte Haelfte eines verschobenen Termins aktiv, und die
+  # Verschiebe-Regeln in update_extern_event_classification() greifen nicht,
+  # weil sie is_canceled = TRUE voraussetzen.
+  loaded_owners <- unique(loaded_owners[nzchar(loaded_owners)])
+  mark_vanished_events_canceled(
+    con, rs, parsed$events,
+    scope_map    = tibble::tibble(email = loaded_owners, scope = loaded_owners),
+    window_start = lubridate::ymd_hms(start_dt), window_end = lubridate::ymd_hms(end_dt),
+    source       = "calendar")
 
   if (nrow(parsed$participants) == 0) return(invisible(nrow(parsed$events)))
 

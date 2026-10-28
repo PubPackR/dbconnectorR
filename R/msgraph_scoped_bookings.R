@@ -120,6 +120,9 @@ msgraph_scoped_update_bookings <- function(con, del_token, cfg, suppression_pepp
   if (biz$status != 200) stop("bookingBusinesses HTTP ", biz$status)
 
   all_events <- tibble::tibble(); all_part <- tibble::tibble()
+  # Staff-E-Mails je Business, dessen calendarView in diesem Lauf geladen wurde,
+  # siehe mark_vanished_events_canceled().
+  loaded_scope <- tibble::tibble(email = character(0), scope = character(0))
   for (b in biz$value) {
     bid <- b$id %||% next
     staff <- graph_collect(paste0("https://graph.microsoft.com/v1.0/solutions/bookingBusinesses/",
@@ -131,6 +134,9 @@ msgraph_scoped_update_bookings <- function(con, del_token, cfg, suppression_pepp
                                   utils::URLencode(bid, reserved = TRUE), "/calendarView"),
                            del_token, query = list(start = start_dt, end = end_dt, `$top` = 400))
     if (appts$status != 200) next
+    staff_emails <- unique(tolower(normalize_external_email(stats::na.omit(unname(staff_map)))))
+    loaded_scope <- dplyr::bind_rows(loaded_scope,
+                                     tibble::tibble(email = staff_emails, scope = rep(bid, length(staff_emails))))
     parsed <- parse_scoped_bookings(appts$value, staff_map)
     all_events <- dplyr::bind_rows(all_events, parsed$events)
     all_part   <- dplyr::bind_rows(all_part, parsed$participants)
@@ -148,6 +154,14 @@ msgraph_scoped_update_bookings <- function(con, del_token, cfg, suppression_pepp
 
   Billomatics::postgres_upsert_data(con, rs, "msgraph_events", all_events,
                                     match_cols = c("msgraph_ical_uid", "event_start"))
+
+  # Verschwundene Buchungen als abgesagt markieren. bookingAppointment liefert
+  # fuer geloeschte Termine kein Status-Feld, das Verschwinden ist dort das
+  # einzige Absage-Signal (alter Abruf: 6 von 8 Booking-Absagen).
+  mark_vanished_events_canceled(
+    con, rs, all_events, scope_map = loaded_scope,
+    window_start = lubridate::ymd_hms(start_dt), window_end = lubridate::ymd_hms(end_dt),
+    source = "booking")
 
   if (nrow(all_part) == 0) return(invisible(nrow(all_events)))
 
