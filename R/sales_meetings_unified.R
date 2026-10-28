@@ -355,6 +355,90 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
   base
 }
 
+#' Eindeutige Domain-Leads aus den CRM-Mailadressen
+#'
+#' Je Mail-Domain der Lead, dem sie im CRM gehoert, aber nur wenn es genau einer
+#' ist. Eine Domain mehrerer Leads sagt nicht, welcher gemeint ist (Spec
+#' 2026-10-28-domain-fallback-lead, Q9 zurueckgestellt). Freemail-Domains
+#' ([FREEMAIL_DOMAINS]) und geloeschte Adressen zaehlen nicht.
+#'
+#' @param mails data.frame mit lead_id, mail_address_name, is_deleted
+#'   (Spalten aus `raw.crm_lead_mail_address`).
+#' @return data.frame mit domain (lower case) und lead_id (character), eine
+#'   Zeile je Domain.
+#' @export
+# ---- start ---- #
+domain_leads_aus_crm_mails <- function(mails) {
+  aktiv <- mails[!(mails$is_deleted %in% TRUE) & grepl("@", mails$mail_address_name), , drop = FALSE]
+  paare <- unique(data.frame(
+    domain  = email_domain(aktiv$mail_address_name),
+    lead_id = as.character(aktiv$lead_id),
+    stringsAsFactors = FALSE))
+  paare <- paare[nzchar(paare$domain) & !(paare$domain %in% FREEMAIL_DOMAINS), , drop = FALSE]
+  n_leads <- table(paare$domain)
+  eindeutig <- paare[paare$domain %in% names(n_leads)[n_leads == 1], , drop = FALSE]
+  rownames(eindeutig) <- NULL
+  eindeutig
+}
+
+#' Domain-Fallback fuer Leadless meetings
+#'
+#' Ordnet einer MSGraph-Platzhalter-Zeile (`lead_id = NA`) den Domain-matched
+#' lead zu: je externer Teilnehmer-Domain den Lead, dem sie im CRM eindeutig
+#' gehoert. Mehrere solche Leads ergeben eine Zeile je Lead, wie beim Mapping.
+#'
+#' **Laeuft auf dem Ergebnis von [assemble_unified_meetings()]**, nicht davor.
+#' Der Platzhalter-Fallback dort ordnet einen CRM-Task nur Zeilen ohne Lead zu.
+#' Truege die Zeile vorher schon einen Domain-Lead, der oft ein Kollege des
+#' echten Gegenuebers ist, faende der Task mit dem echten Lead nichts und
+#' wuerde als netto-neue Zeile doppelt zaehlen. Eine per CRM-Task zugeordnete
+#' Zeile (`no_show_source = "crm_override"`) bleibt deshalb unberuehrt.
+#'
+#' **Jedes Mail-Mapping hat Vorrang**, auch ein nicht-primaeres: hat irgendein
+#' externer Teilnehmer eine Zeile in `mapping.crm_lead_msgraph_contact`, greift
+#' der Fallback fuer das ganze Meeting nicht. So ueberdeckt er nie einen Lead,
+#' den das Mapping liefern kann.
+#'
+#' @param rows Ergebnis von [assemble_unified_meetings()].
+#' @param ext_participants data.frame mit call_event_mapping_id, contact_id,
+#'   email; nur externe, nicht-synthetische Teilnehmer.
+#' @param mapped_contact_ids character, msgraph_contact_id jedes Kontakts mit
+#'   irgendeinem Mail-Mapping (ohne Filter auf is_primary_crm).
+#' @param domain_leads Ergebnis von [domain_leads_aus_crm_mails()].
+#' @return `rows`, Platzhalter mit Domain-Lead ersetzt durch je eine Zeile pro
+#'   Lead (`meeting_key = msgraph_<id>_<lead>`).
+#' @export
+# ---- start ---- #
+apply_domain_fallback <- function(rows, ext_participants, mapped_contact_ids, domain_leads) {
+  gemappt <- unique(ext_participants$call_event_mapping_id[
+    as.character(ext_participants$contact_id) %in% as.character(mapped_contact_ids)])
+  kandidaten <- ext_participants[!(ext_participants$call_event_mapping_id %in% gemappt), , drop = FALSE]
+  kandidaten$domain <- email_domain(kandidaten$email)
+  kandidaten <- kandidaten[!(kandidaten$domain %in% FREEMAIL_DOMAINS), , drop = FALSE]
+
+  treffer <- merge(kandidaten[, c("call_event_mapping_id", "domain")], domain_leads, by = "domain")
+  treffer <- unique(treffer[, c("call_event_mapping_id", "lead_id")])
+  if (nrow(treffer) == 0) return(rows)
+  treffer$platzhalter_key <- paste0("msgraph_", treffer$call_event_mapping_id, "_NA")
+
+  ziel <- which(rows$source == "msgraph" & is.na(rows$lead_id) &
+                  rows$no_show_source != "crm_override" &
+                  rows$meeting_key %in% treffer$platzhalter_key)
+  if (length(ziel) == 0) return(rows)
+
+  je_key <- split(treffer, treffer$platzhalter_key)
+  neu <- lapply(ziel, function(j) {
+    leads <- je_key[[rows$meeting_key[j]]]
+    r <- rows[rep(j, nrow(leads)), , drop = FALSE]
+    r$lead_id     <- as.character(leads$lead_id)
+    r$meeting_key <- paste0("msgraph_", leads$call_event_mapping_id, "_", leads$lead_id)
+    r
+  })
+  ergebnis <- rbind(rows[-ziel, , drop = FALSE], do.call(rbind, neu))
+  rownames(ergebnis) <- NULL
+  ergebnis
+}
+
 #' Rebuild processed.sales_meetings_unified (voll rueckwirkend)
 #'
 #' Laeuft nach update_crm_task_meeting_classification. MSGraph-Meetings (extern-only
@@ -412,10 +496,13 @@ update_sales_meetings_unified <- function(con) {
   has_ext <- unique(participants$call_event_mapping_id[participants$is_external])
 
   # Externe MAPPED Leads (is_primary_crm) je Meeting.
-  crm_map <- dplyr::tbl(con, I("mapping.crm_lead_msgraph_contact")) %>%
-    dplyr::filter(is_primary_crm == TRUE) %>%
-    dplyr::select(msgraph_contact_id, crm_lead_id) %>%
+  # Einmal komplett laden: die Kette nutzt nur is_primary_crm, die
+  # Vorrang-Pruefung des Domain-Fallbacks jedes Mapping.
+  alle_mappings <- dplyr::tbl(con, I("mapping.crm_lead_msgraph_contact")) %>%
+    dplyr::select(msgraph_contact_id, crm_lead_id, is_primary_crm) %>%
     dplyr::collect()
+  crm_map <- alle_mappings[alle_mappings$is_primary_crm %in% TRUE,
+                           c("msgraph_contact_id", "crm_lead_id")]
   ext_part <- participants[participants$is_external, c("call_event_mapping_id", "contact_id")]
   meeting_lead <- merge(ext_part, crm_map, by.x = "contact_id", by.y = "msgraph_contact_id")
   meeting_lead <- unique(data.frame(
@@ -470,6 +557,19 @@ update_sales_meetings_unified <- function(con) {
     original_created_at = vc$task_created_at, stringsAsFactors = FALSE)
 
   rows <- assemble_unified_meetings(msgraph_meetings, crm_meetings)
+
+  message("  Domain-Fallback fuer Leadless meetings ...")
+  crm_mails <- dplyr::tbl(con, I("raw.crm_lead_mail_address")) %>%
+    dplyr::select(lead_id, mail_address_name, is_deleted) %>%
+    dplyr::collect()
+  ohne_lead_vorher <- sum(is.na(rows$lead_id) & rows$source == "msgraph")
+  rows <- apply_domain_fallback(
+    rows,
+    participants[participants$is_external, c("call_event_mapping_id", "contact_id", "email")],
+    as.character(unique(alle_mappings$msgraph_contact_id)),
+    domain_leads_aus_crm_mails(crm_mails))
+  message(paste0("  ", ohne_lead_vorher - sum(is.na(rows$lead_id) & rows$source == "msgraph"),
+                 " von ", ohne_lead_vorher, " MSGraph-Zeilen ohne Lead per Domain zugeordnet"))
 
   # ID-Spalten (im Assemble character) auf integer64 (=bigint) casten; NA -> NULL.
   rows$contact_id           <- bit64::as.integer64(rows$contact_id)
