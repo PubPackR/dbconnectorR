@@ -67,13 +67,13 @@ scoped_cancellation_plan <- function(rows, min_coverage = 0.5) {
 scoped_cancellation_rows_sql <- function(rs, tmp_seen, tmp_scope, source = c("calendar", "booking")) {
   # ---- start ---- #
   source <- match.arg(source)
-  # Kalender: nur Zeilen, die der delegierte Abruf selbst schon einmal gesehen
-  # hat (join_url_checked_at, siehe mark_join_url_checked()). Der alte
-  # app-only-Abruf hat auch Events gespeichert, die delegiert nie geliefert
-  # werden (etwa private Termine) - sie fehlten in jedem Download und wuerden
-  # sonst jede Nacht abgesagt.
+  # Bewusst auch Zeilen des alten app-only-Abrufs, die der delegierte nie
+  # gesehen hat (Ticket-Entscheidung Q24): gerade deren verschobene oder
+  # geloeschte Termine sollen abgesagt werden. Was delegiert grundsaetzlich
+  # nicht geliefert wird (vermutlich private Termine), wird dadurch einmal
+  # abgesagt - neu gespeichert wird so etwas ohnehin nicht mehr.
   quelle <- if (source == "booking") "e.msgraph_ical_uid LIKE 'booking:%'"
-            else "e.msgraph_ical_uid NOT LIKE 'booking:%' AND e.join_url_checked_at IS NOT NULL"
+            else "e.msgraph_ical_uid NOT LIKE 'booking:%'"
   sprintf("
     SELECT DISTINCT e.id::text AS id, s.scope,
            NOT EXISTS (SELECT 1 FROM %s t
