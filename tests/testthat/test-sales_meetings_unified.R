@@ -493,3 +493,87 @@ test_that("Netto-neue CRM-Zeile traegt den Grund nur wenn sie ausgeschlossen ist
   expect_equal(res[res$meeting_key == "crm_91", ]$exclusion_reason, "crm_storniert")
   expect_true(is.na(res[res$meeting_key == "crm_92", ]$exclusion_reason))
 })
+
+# --- Domain-Fallback: Leadless meeting ueber eindeutige Domain -----------------
+# Spec docs/specs/2026-10-28-domain-fallback-lead.md. Der Fallback laeuft auf dem
+# Ergebnis von assemble_unified_meetings(), also nach dem CRM-Task-Abgleich.
+mk_leadless <- function() {
+  ms <- mk_msgraph()
+  rbind(ms,
+        transform(ms[1, ], call_event_mapping_id = 40L, event_id = "e40",
+                  lead_id = NA_integer_, event_date = as.Date("2026-08-10")),
+        transform(ms[1, ], call_event_mapping_id = 41L, event_id = "e41",
+                  lead_id = NA_integer_, event_date = as.Date("2026-08-11")))
+}
+ohne_crm <- function() crm_row(0, 1L, "2026-01-01", "teams", "unbekannt", FALSE)[0, ]
+mk_ext <- function(cemid, contact, email) data.frame(
+  call_event_mapping_id = cemid, contact_id = as.character(contact), email = email,
+  stringsAsFactors = FALSE)
+mk_mails <- function() data.frame(
+  lead_id           = c(77L, 88L, 89L, 90L, 91L),
+  mail_address_name = c(" Anna@Firma-A.de ", "x@firma-b.de", "y@firma-b.de",
+                        "kunde@gmail.com", "z@firma-c.de"),
+  is_deleted        = c(FALSE, FALSE, FALSE, FALSE, TRUE),
+  stringsAsFactors  = FALSE)
+
+test_that("Domain-Leads: nur Domains mit genau einem Lead, ohne Freemail und Geloeschte", {
+  dl <- domain_leads_aus_crm_mails(mk_mails())
+  expect_equal(dl$domain, "firma-a.de")   # firma-b: zwei Leads, gmail: Freemail, firma-c: geloescht
+  expect_equal(as.character(dl$lead_id), "77")
+})
+
+test_that("Platzhalter ohne Mapping bekommt den Lead seiner eindeutigen Domain", {
+  rows <- assemble_unified_meetings(mk_leadless(), ohne_crm())
+  res <- apply_domain_fallback(rows, mk_ext(40L, 1, "max@FIRMA-A.de"), character(0),
+                               domain_leads_aus_crm_mails(mk_mails()))
+  expect_false(any(res$meeting_key == "msgraph_40_NA"))
+  r <- res[res$meeting_key == "msgraph_40_77", ]
+  expect_equal(nrow(r), 1)
+  expect_equal(r$lead_id, "77")
+  expect_equal(nrow(res), nrow(rows))
+})
+
+test_that("Freemail und Domain mit mehreren Leads loesen nichts aus", {
+  rows <- assemble_unified_meetings(mk_leadless(), ohne_crm())
+  ext <- rbind(mk_ext(40L, 1, "max@gmail.com"), mk_ext(41L, 2, "q@firma-b.de"))
+  res <- apply_domain_fallback(rows, ext, character(0), domain_leads_aus_crm_mails(mk_mails()))
+  expect_equal(res, rows)
+})
+
+test_that("ein Mapping eines Teilnehmers hat Vorrang, auch ein nicht-primaeres", {
+  rows <- assemble_unified_meetings(mk_leadless(), ohne_crm())
+  ext <- rbind(mk_ext(40L, 1, "max@firma-a.de"), mk_ext(40L, 2, "bekannt@irgendwo.de"))
+  res <- apply_domain_fallback(rows, ext, mapped_contact_ids = "2",
+                               domain_leads_aus_crm_mails(mk_mails()))
+  expect_true(any(res$meeting_key == "msgraph_40_NA"))
+  expect_false(any(res$meeting_key == "msgraph_40_77"))
+})
+
+test_that("ein per CRM-Task zugeordneter Platzhalter bleibt unberuehrt, kein CRM-Task wird netto-neu", {
+  cm <- mk_crm(list(crm_row(60, 555L, "2026-08-10", "teams", "show_up", FALSE)))
+  rows <- assemble_unified_meetings(mk_leadless(), cm)
+  expect_equal(rows[rows$meeting_key == "msgraph_40_NA", ]$no_show_source, "crm_override")
+  res <- apply_domain_fallback(rows, mk_ext(40L, 1, "max@firma-a.de"), character(0),
+                               domain_leads_aus_crm_mails(mk_mails()))
+  expect_equal(res, rows)
+  expect_equal(sum(res$source == "crm_task"), sum(rows$source == "crm_task"))
+})
+
+test_that("zwei eindeutige Domains in einem Meeting ergeben eine Zeile je Lead", {
+  mails <- rbind(mk_mails(), data.frame(lead_id = 95L, mail_address_name = "k@firma-d.de",
+                                        is_deleted = FALSE, stringsAsFactors = FALSE))
+  rows <- assemble_unified_meetings(mk_leadless(), ohne_crm())
+  ext <- rbind(mk_ext(40L, 1, "max@firma-a.de"), mk_ext(40L, 3, "eva@firma-d.de"))
+  res <- apply_domain_fallback(rows, ext, character(0), domain_leads_aus_crm_mails(mails))
+  r <- res[grepl("^msgraph_40_", res$meeting_key), ]
+  expect_setequal(r$meeting_key, c("msgraph_40_77", "msgraph_40_95"))
+  expect_true(all(r$event_id == "e40"))
+  expect_equal(nrow(res), nrow(rows) + 1)
+})
+
+test_that("Zeilen mit Lead bleiben unveraendert, auch wenn die Domain passt", {
+  rows <- assemble_unified_meetings(mk_leadless(), ohne_crm())
+  res <- apply_domain_fallback(rows, mk_ext(10L, 1, "max@firma-a.de"), character(0),
+                               domain_leads_aus_crm_mails(mk_mails()))
+  expect_equal(res, rows)
+})

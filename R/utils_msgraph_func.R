@@ -20,6 +20,20 @@
 #' @export
 INTERNAL_EMAIL_PATTERNS <- c("@studyflix.de", "/o=exchangelabs", "@bertelsmann.", "@ausbildung.de", "@vocanto.de", "@ad-alliance.de", "@arvato", "@rtl.de", "@rtl.com", "@rtl2.de", "@embrace.")
 
+#' Freemail Domains
+#'
+#' Domains of public mail providers. An address there says nothing about the
+#' company behind it, so a domain from this list never identifies a lead.
+#' Exact, lower-case domain match (no regex).
+#'
+#' @export
+FREEMAIL_DOMAINS <- c(
+  "gmail.com", "googlemail.com", "gmx.de", "gmx.net", "gmx.at", "gmx.ch", "web.de",
+  "outlook.com", "outlook.de", "hotmail.com", "hotmail.de", "live.de", "live.com",
+  "msn.com", "yahoo.com", "yahoo.de", "t-online.de", "icloud.com", "me.com", "aol.com",
+  "freenet.de", "posteo.de", "mail.de", "protonmail.com", "proton.me", "onmicrosoft.com"
+)
+
 #' Check if Email is Internal
 #'
 #' Checks whether an email address matches any internal pattern.

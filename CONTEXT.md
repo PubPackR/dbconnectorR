@@ -31,9 +31,16 @@ with external attendees but no identifiable lead yields one placeholder row.
 
 **Leadless meeting**:
 A meeting with external (customer-side) attendees but none that map to a known
-CRM lead — a mapping gap, not an internal meeting. Kept in the analysis with an
-unknown lead.
+CRM lead, neither by address nor by unique domain — a mapping gap, not an
+internal meeting. Kept in the analysis with an unknown lead.
 _Avoid_: Orphan meeting, unmatched meeting.
+
+**Domain-matched lead**:
+A lead assigned to a meeting no attendee address maps to, because an external
+attendee's email domain belongs to exactly one CRM lead. Often a colleague of
+the attendee rather than the attendee. Never a freemail domain, never when any
+attendee address maps or a CRM VC-task already claimed the meeting.
+_Avoid_: Fallback lead, guessed lead.
 
 **Session**:
 One occurrence of a Teams online meeting, evidenced by its own attendance report. A reused Teams link (series, personal meeting link) has many sessions, each on its own day with its own attendees; attendance is measured per session, never per link.
