@@ -577,3 +577,19 @@ test_that("Zeilen mit Lead bleiben unveraendert, auch wenn die Domain passt", {
                                domain_leads_aus_crm_mails(mk_mails()))
   expect_equal(res, rows)
 })
+
+test_that("Domain-Fallback traegt integer64-IDs aus der DB und Teilnehmer ohne Mail", {
+  ms <- mk_leadless()
+  ms$call_event_mapping_id <- bit64::as.integer64(c(10, 11, 12, 100000, 4000000001))
+  ms$contact_id <- bit64::as.integer64(ms$contact_id)
+  rows <- assemble_unified_meetings(ms, ohne_crm())
+  expect_true("msgraph_100000_NA" %in% rows$meeting_key)   # keine 1e+05-Darstellung
+  ext <- data.frame(call_event_mapping_id = bit64::as.integer64(c(100000, 4000000001)),
+                    contact_id = bit64::as.integer64(c(7, 8)),
+                    email = c("max@firma-a.de", NA), stringsAsFactors = FALSE)
+  mails <- transform(mk_mails(), lead_id = bit64::as.integer64(lead_id))
+  res <- apply_domain_fallback(rows, ext, as.character(bit64::as.integer64(9)),
+                               domain_leads_aus_crm_mails(mails))
+  expect_true("msgraph_100000_77" %in% res$meeting_key)
+  expect_true("msgraph_4000000001_NA" %in% res$meeting_key)
+})

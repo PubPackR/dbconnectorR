@@ -34,6 +34,19 @@ FREEMAIL_DOMAINS <- c(
   "freenet.de", "posteo.de", "mail.de", "protonmail.com", "proton.me", "onmicrosoft.com"
 )
 
+#' Domain of an Email Address
+#'
+#' Lower-case part after the last `@`, surrounding whitespace removed. Shared by
+#' both sides of the domain fallback so CRM and participant domains are
+#' normalised identically.
+#'
+#' @param email Character vector of email addresses
+#' @return Character vector of domains (NA stays NA)
+#' @keywords internal
+email_domain <- function(email) {
+  tolower(trimws(sub("^.*@", "", trimws(email))))
+}
+
 #' Check if Email is Internal
 #'
 #' Checks whether an email address matches any internal pattern.

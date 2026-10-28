@@ -371,7 +371,7 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
 domain_leads_aus_crm_mails <- function(mails) {
   aktiv <- mails[!(mails$is_deleted %in% TRUE) & grepl("@", mails$mail_address_name), , drop = FALSE]
   paare <- unique(data.frame(
-    domain  = tolower(trimws(sub("^.*@", "", trimws(aktiv$mail_address_name)))),
+    domain  = email_domain(aktiv$mail_address_name),
     lead_id = as.character(aktiv$lead_id),
     stringsAsFactors = FALSE))
   paare <- paare[nzchar(paare$domain) & !(paare$domain %in% FREEMAIL_DOMAINS), , drop = FALSE]
@@ -413,7 +413,7 @@ apply_domain_fallback <- function(rows, ext_participants, mapped_contact_ids, do
   gemappt <- unique(ext_participants$call_event_mapping_id[
     as.character(ext_participants$contact_id) %in% as.character(mapped_contact_ids)])
   kandidaten <- ext_participants[!(ext_participants$call_event_mapping_id %in% gemappt), , drop = FALSE]
-  kandidaten$domain <- tolower(trimws(sub("^.*@", "", trimws(kandidaten$email))))
+  kandidaten$domain <- email_domain(kandidaten$email)
   kandidaten <- kandidaten[!(kandidaten$domain %in% FREEMAIL_DOMAINS), , drop = FALSE]
 
   treffer <- merge(kandidaten[, c("call_event_mapping_id", "domain")], domain_leads, by = "domain")
@@ -426,8 +426,9 @@ apply_domain_fallback <- function(rows, ext_participants, mapped_contact_ids, do
                   rows$meeting_key %in% treffer$platzhalter_key)
   if (length(ziel) == 0) return(rows)
 
+  je_key <- split(treffer, treffer$platzhalter_key)
   neu <- lapply(ziel, function(j) {
-    leads <- treffer[treffer$platzhalter_key == rows$meeting_key[j], , drop = FALSE]
+    leads <- je_key[[rows$meeting_key[j]]]
     r <- rows[rep(j, nrow(leads)), , drop = FALSE]
     r$lead_id     <- as.character(leads$lead_id)
     r$meeting_key <- paste0("msgraph_", leads$call_event_mapping_id, "_", leads$lead_id)
@@ -495,10 +496,13 @@ update_sales_meetings_unified <- function(con) {
   has_ext <- unique(participants$call_event_mapping_id[participants$is_external])
 
   # Externe MAPPED Leads (is_primary_crm) je Meeting.
-  crm_map <- dplyr::tbl(con, I("mapping.crm_lead_msgraph_contact")) %>%
-    dplyr::filter(is_primary_crm == TRUE) %>%
-    dplyr::select(msgraph_contact_id, crm_lead_id) %>%
+  # Einmal komplett laden: die Kette nutzt nur is_primary_crm, die
+  # Vorrang-Pruefung des Domain-Fallbacks jedes Mapping.
+  alle_mappings <- dplyr::tbl(con, I("mapping.crm_lead_msgraph_contact")) %>%
+    dplyr::select(msgraph_contact_id, crm_lead_id, is_primary_crm) %>%
     dplyr::collect()
+  crm_map <- alle_mappings[alle_mappings$is_primary_crm %in% TRUE,
+                           c("msgraph_contact_id", "crm_lead_id")]
   ext_part <- participants[participants$is_external, c("call_event_mapping_id", "contact_id")]
   meeting_lead <- merge(ext_part, crm_map, by.x = "contact_id", by.y = "msgraph_contact_id")
   meeting_lead <- unique(data.frame(
@@ -555,11 +559,6 @@ update_sales_meetings_unified <- function(con) {
   rows <- assemble_unified_meetings(msgraph_meetings, crm_meetings)
 
   message("  Domain-Fallback fuer Leadless meetings ...")
-  # Vorrang-Pruefung gegen jedes Mapping, nicht nur is_primary_crm (siehe
-  # apply_domain_fallback()).
-  alle_gemappten <- dplyr::tbl(con, I("mapping.crm_lead_msgraph_contact")) %>%
-    dplyr::distinct(msgraph_contact_id) %>%
-    dplyr::collect()
   crm_mails <- dplyr::tbl(con, I("raw.crm_lead_mail_address")) %>%
     dplyr::select(lead_id, mail_address_name, is_deleted) %>%
     dplyr::collect()
@@ -567,7 +566,7 @@ update_sales_meetings_unified <- function(con) {
   rows <- apply_domain_fallback(
     rows,
     participants[participants$is_external, c("call_event_mapping_id", "contact_id", "email")],
-    as.character(alle_gemappten$msgraph_contact_id),
+    as.character(unique(alle_mappings$msgraph_contact_id)),
     domain_leads_aus_crm_mails(crm_mails))
   message(paste0("  ", ohne_lead_vorher - sum(is.na(rows$lead_id) & rows$source == "msgraph"),
                  " von ", ohne_lead_vorher, " MSGraph-Zeilen ohne Lead per Domain zugeordnet"))
