@@ -268,8 +268,10 @@ msgraph_scoped_update_events <- function(con, del_token, cfg, suppression_pepper
   all_events <- list()
   # Owner der Kalender, die in diesem Lauf wirklich geladen wurden. Nur deren
   # Bestands-Events duerfen als verschwunden gelten, siehe
-  # mark_vanished_events_canceled().
-  loaded_owners <- character(0)
+  # mark_vanished_events_canceled(). Ein Owner kann mehrere Kalender
+  # freigeben: schlaegt einer davon fehl, faellt der Owner ganz aus dem Scope,
+  # sonst saehen die Events des fehlenden Kalenders verschwunden aus.
+  loaded_owners <- character(0); failed_owners <- character(0)
   for (cal in shared) {
     cid <- cal$id
     res <- graph_collect(
@@ -295,6 +297,8 @@ msgraph_scoped_update_events <- function(con, del_token, cfg, suppression_pepper
       })
       all_events <- c(all_events, tagged)
       loaded_owners <- c(loaded_owners, cal_owner_email)
+    } else {
+      failed_owners <- c(failed_owners, tolower(normalize_external_email(cal$owner$address %||% "")))
     }
   }
 
@@ -347,7 +351,7 @@ msgraph_scoped_update_events <- function(con, del_token, cfg, suppression_pepper
   # Schritt bleibt die alte Haelfte eines verschobenen Termins aktiv, und die
   # Verschiebe-Regeln in update_extern_event_classification() greifen nicht,
   # weil sie is_canceled = TRUE voraussetzen.
-  loaded_owners <- unique(loaded_owners[nzchar(loaded_owners)])
+  loaded_owners <- setdiff(unique(loaded_owners[nzchar(loaded_owners)]), failed_owners)
   mark_vanished_events_canceled(
     con, rs, parsed$events,
     scope_map    = tibble::tibble(email = loaded_owners, scope = loaded_owners),

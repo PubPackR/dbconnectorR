@@ -38,11 +38,9 @@ scoped_cancellation_plan <- function(rows, min_coverage = 0.5) {
   coverage <- rows %>%
     dplyr::group_by(scope) %>%
     dplyr::summarise(in_scope_n = dplyr::n(), to_cancel_n = sum(fehlt), .groups = "drop") %>%
-    dplyr::rowwise() %>%
-    dplyr::mutate(
-      coverage = cancellation_coverage_check(in_scope_n, to_cancel_n, min_coverage)$coverage,
-      skip     = cancellation_coverage_check(in_scope_n, to_cancel_n, min_coverage)$skip) %>%
-    dplyr::ungroup()
+    # vektorisiert dieselbe Rechnung wie cancellation_coverage_check()
+    dplyr::mutate(coverage = 1 - to_cancel_n / in_scope_n,
+                  skip     = coverage < min_coverage)
   ids <- rows %>%
     dplyr::filter(fehlt) %>%
     dplyr::semi_join(dplyr::filter(coverage, !skip), by = "scope") %>%
@@ -69,8 +67,13 @@ scoped_cancellation_plan <- function(rows, min_coverage = 0.5) {
 scoped_cancellation_rows_sql <- function(rs, tmp_seen, tmp_scope, source = c("calendar", "booking")) {
   # ---- start ---- #
   source <- match.arg(source)
+  # Kalender: nur Zeilen, die der delegierte Abruf selbst schon einmal gesehen
+  # hat (join_url_checked_at, siehe mark_join_url_checked()). Der alte
+  # app-only-Abruf hat auch Events gespeichert, die delegiert nie geliefert
+  # werden (etwa private Termine) - sie fehlten in jedem Download und wuerden
+  # sonst jede Nacht abgesagt.
   quelle <- if (source == "booking") "e.msgraph_ical_uid LIKE 'booking:%'"
-            else "e.msgraph_ical_uid NOT LIKE 'booking:%'"
+            else "e.msgraph_ical_uid NOT LIKE 'booking:%' AND e.join_url_checked_at IS NOT NULL"
   sprintf("
     SELECT DISTINCT e.id::text AS id, s.scope,
            NOT EXISTS (SELECT 1 FROM %s t
@@ -142,7 +145,7 @@ mark_vanished_events_canceled <- function(con, rs, seen, scope_map, window_start
     }
     if (length(plan$ids) == 0) return(0L)
     DBI::dbExecute(conn, sprintf(
-      "UPDATE %s.msgraph_events SET is_canceled = TRUE WHERE id::text = ANY(string_to_array($1, ','))", rs),
+      "UPDATE %s.msgraph_events SET is_canceled = TRUE WHERE id = ANY(string_to_array($1, ',')::bigint[])", rs),
       params = list(paste(plan$ids, collapse = ",")))
   }
   n <- if (inherits(con, "Pool")) {

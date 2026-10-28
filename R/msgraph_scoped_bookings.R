@@ -121,8 +121,13 @@ msgraph_scoped_update_bookings <- function(con, del_token, cfg, suppression_pepp
 
   all_events <- tibble::tibble(); all_part <- tibble::tibble()
   # Staff-E-Mails je Business, dessen calendarView in diesem Lauf geladen wurde,
-  # siehe mark_vanished_events_canceled().
+  # siehe mark_vanished_events_canceled(). Der Scope haengt an der Staff-E-Mail:
+  # wer zusaetzlich in einem Business steht, dessen calendarView fehlschlug,
+  # faellt heraus, sonst saehen dessen Buchungen verschwunden aus. Ist der Staff
+  # des fehlgeschlagenen Business unbekannt, wird in diesem Lauf gar nichts
+  # abgesagt.
   loaded_scope <- tibble::tibble(email = character(0), scope = character(0))
+  failed_staff <- character(0); booking_scope_unklar <- FALSE
   for (b in biz$value) {
     bid <- b$id %||% next
     staff <- graph_collect(paste0("https://graph.microsoft.com/v1.0/solutions/bookingBusinesses/",
@@ -133,8 +138,12 @@ msgraph_scoped_update_bookings <- function(con, del_token, cfg, suppression_pepp
     appts <- graph_collect(paste0("https://graph.microsoft.com/v1.0/solutions/bookingBusinesses/",
                                   utils::URLencode(bid, reserved = TRUE), "/calendarView"),
                            del_token, query = list(start = start_dt, end = end_dt, `$top` = 400))
-    if (appts$status != 200) next
     staff_emails <- unique(tolower(normalize_external_email(stats::na.omit(unname(staff_map)))))
+    if (appts$status != 200) {
+      if (staff$status != 200) booking_scope_unklar <- TRUE
+      failed_staff <- c(failed_staff, staff_emails)
+      next
+    }
     loaded_scope <- dplyr::bind_rows(loaded_scope,
                                      tibble::tibble(email = staff_emails, scope = rep(bid, length(staff_emails))))
     parsed <- parse_scoped_bookings(appts$value, staff_map)
@@ -158,8 +167,12 @@ msgraph_scoped_update_bookings <- function(con, del_token, cfg, suppression_pepp
   # Verschwundene Buchungen als abgesagt markieren. bookingAppointment liefert
   # fuer geloeschte Termine kein Status-Feld, das Verschwinden ist dort das
   # einzige Absage-Signal (alter Abruf: 6 von 8 Booking-Absagen).
+  if (booking_scope_unklar) {
+    message("booking: ein Business ohne Staff-Liste und ohne calendarView - in diesem Lauf wird nichts abgesagt.")
+    loaded_scope <- loaded_scope[0, ]
+  }
   mark_vanished_events_canceled(
-    con, rs, all_events, scope_map = loaded_scope,
+    con, rs, all_events, scope_map = dplyr::filter(loaded_scope, !email %in% failed_staff),
     window_start = lubridate::ymd_hms(start_dt), window_end = lubridate::ymd_hms(end_dt),
     source = "booking")
 
