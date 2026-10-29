@@ -128,6 +128,18 @@ test_that("filter_new_crm_meetings behaelt externe Tools immer und Teams nur ohn
   expect_false(".in_msgraph" %in% names(res))
 })
 
+test_that("filter_new_crm_meetings: integer-Lead der CRM-Tasks gegen integer64 aus der Lead-Ableitung", {
+  # crm_lead_tasks.lead_id ist integer, update_crm_task_meeting_classification()
+  # reicht die Leads der Meetings als integer64 rein. Als character liefe der
+  # Join gar nicht.
+  crm <- data.frame(crm_task_id = 1:2, lead_id = c(10L, 20L),
+                    event_date = as.Date("2026-07-20"), is_external_tool = FALSE)
+  msgraph <- data.frame(lead_id = bit64::as.integer64(10),
+                        event_date = as.Date("2026-07-20"))
+  res <- filter_new_crm_meetings(crm, msgraph)
+  expect_equal(res$crm_task_id, 2L)
+})
+
 test_that("extract_meeting_type kanonisiert die im Bestand haeufigen Termin-Typen", {
   expect_equal(extract_meeting_type("VC NV"), "nv")
   expect_equal(extract_meeting_type("NV VC "), "nv")

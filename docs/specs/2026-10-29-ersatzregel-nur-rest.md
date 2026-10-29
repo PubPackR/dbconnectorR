@@ -50,12 +50,22 @@ Reihenfolge in `update_sales_meetings_unified()`:
   bleibt für den Rest, aber nur bis 15 Minuten Abstand; die Zeile übernimmt den Lead des Tasks.
 - **Q22 Schnitt B2 und B3:** „okay, passt“: B3 kommt zuerst als eigener PR, B2 baut darauf auf und
   trägt B3 in Asana als Abhängigkeit.
+- **Q28 CRM-Abgleich im VC-Tool auch mit Domain-Leads:** „Beide wie empfohlen“, also ja, im
+  selben PR: `update_crm_task_meeting_classification()` leitet die Leads der Meetings wie die
+  Termintabelle über `meeting_leads_ableiten()` ab. Sonst legt die Termintabelle einen Task mit dem
+  Meeting seines Domain-Leads zusammen, und der Tab „VC-Tool & Show-Up“ führt ihn als netto-neu.
+- **Q29 Zwei Platzhalter im gleichen Abstand:** „Beide wie empfohlen“, also bleibt der Task
+  netto-neu, wie in der alten Regel. Nimmt danach ein anderer Task einen der beiden, wird der
+  übrige nicht nachträglich vergeben.
 
 ## Betroffen
 
 - `R/sales_meetings_unified.R`: `assemble_unified_meetings()` (Ersatzregel mit Zeitfenster,
   Vergabe nach Abstand, Lead-Übernahme), `update_sales_meetings_unified()` (Domain-Fallback vor
   den Abgleich), `apply_domain_fallback()` (Ausnahme `crm_override` entfällt).
+- `R/crm_task_meeting_classification.R`: `update_crm_task_meeting_classification()` nutzt
+  `meeting_leads_ableiten()` für den Abgleich (Q28) und lädt dafür alle Teilnehmer und
+  `raw.crm_lead_mail_address`.
 - `CONTEXT.md`: Satz unter Meeting row.
 - `tests/testthat/test-sales_meetings_unified.R`.
 - Geschrieben: `processed.sales_meetings_unified`; in base-62 daraus neu gebaut

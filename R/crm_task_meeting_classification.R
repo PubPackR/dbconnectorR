@@ -133,15 +133,23 @@ update_crm_task_meeting_classification <- function(con) {
 
   # MSGraph-Meetings fuer den Anti-Join: lead_id + event_date je klassifiziertem
   # Meeting (nur msgraph-Zeilen). Der Lead kommt aus den EXTERNEN Teilnehmern,
-  # ueber jedes Mail-Mapping, mit derselben Ableitung wie die Termintabelle
-  # (meeting_leads_aus_teilnehmern). Bis 29.10.2026 kam er ueber die contact_id
-  # der Klassifikationszeilen; das sind nur interne Kontakte (Organisator,
-  # Verantwortlicher), der Abgleich traf also nur intern gemappte Kontakte
-  # (Asana 1219978400790427, Q27).
-  # Nur gemappte Teilnehmer laden: haelt die Abfrage klein (Job-Timeout 120 s).
+  # ueber jedes Mail-Mapping, sonst ueber die eindeutige Domain, mit derselben
+  # Ableitung wie die Termintabelle (meeting_leads_ableiten). Bis 29.10.2026 kam
+  # er ueber die contact_id der Klassifikationszeilen; das sind nur interne
+  # Kontakte (Organisator, Verantwortlicher), der Abgleich traf also nur intern
+  # gemappte Kontakte (Asana 1219978400790427, Q27). Die Domain kam mit Q28
+  # (Asana 1219978596056611): ohne sie legt die Termintabelle einen Task mit dem
+  # Meeting seines Domain-Leads zusammen, und dieser Abgleich fuehrte ihn als
+  # netto-neu.
+  # Alle Teilnehmer, nicht nur gemappte: die Domain braucht gerade die
+  # Meetings ohne Mapping.
   mappings <- dplyr::tbl(con, I("mapping.crm_lead_msgraph_contact")) %>%
-    dplyr::select(msgraph_contact_id, crm_lead_id)
-  gemappte_teilnehmer <- dplyr::tbl(con, I("mapping.msgraph_call_event")) %>%
+    dplyr::select(msgraph_contact_id, crm_lead_id) %>%
+    dplyr::collect()
+  crm_mails <- dplyr::tbl(con, I("raw.crm_lead_mail_address")) %>%
+    dplyr::select(lead_id, mail_address_name, is_deleted) %>%
+    dplyr::collect()
+  teilnehmer <- dplyr::tbl(con, I("mapping.msgraph_call_event")) %>%
     dplyr::select(call_event_mapping_id = id, event_id, event_date) %>%
     dplyr::semi_join(
       dplyr::tbl(con, I("processed.msgraph_extern_event_classification")) %>%
@@ -153,17 +161,19 @@ update_crm_task_meeting_classification <- function(con) {
         dplyr::filter(is_organizer == FALSE) %>%
         dplyr::select(event_id, contact_id),
       by = "event_id") %>%
-    dplyr::semi_join(mappings, by = c("contact_id" = "msgraph_contact_id")) %>%
     dplyr::inner_join(
       dplyr::tbl(con, I("raw.msgraph_contacts")) %>%
         dplyr::select(id, email),
       by = c("contact_id" = "id")) %>%
     dplyr::select(call_event_mapping_id, event_date, contact_id, email) %>%
     dplyr::collect()
-  meeting_leads <- meeting_leads_aus_teilnehmern(gemappte_teilnehmer,
-                                                 dplyr::collect(mappings))
-  meeting_dates <- unique(gemappte_teilnehmer[, c("call_event_mapping_id", "event_date")])
-  msgraph_meetings <- unique(merge(meeting_leads, meeting_dates,
+  meeting_leads <- meeting_leads_ableiten(teilnehmer, mappings, crm_mails)
+  # lead_id kommt als character; der Anti-Join (dplyr) laesst character gegen
+  # das integer der CRM-Tasks nicht zu, integer64 schon.
+  meeting_leads$lead_id <- bit64::as.integer64(meeting_leads$lead_id)
+  meeting_dates <- unique(teilnehmer[, c("call_event_mapping_id", "event_date")])
+  msgraph_meetings <- unique(merge(meeting_leads[, c("call_event_mapping_id", "lead_id")],
+                                   meeting_dates,
                                    by = "call_event_mapping_id")[, c("lead_id", "event_date")])
 
   # assigned_to_user_id bevorzugen, sonst user_id. Coalesce im CHARACTER-Raum:
