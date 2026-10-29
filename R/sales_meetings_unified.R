@@ -439,6 +439,41 @@ apply_domain_fallback <- function(rows, ext_participants, mapped_contact_ids, do
   ergebnis
 }
 
+#' Leads je MSGraph-Meeting aus den externen Teilnehmern
+#'
+#' Rein (kein DB-Zugriff). Ein Meeting bekommt jeden Lead, auf den einer seiner
+#' externen, nicht-synthetischen Teilnehmer in `mapping.crm_lead_msgraph_contact`
+#' gemappt ist.
+#'
+#' **Jedes Mapping, nicht nur das primaere** (Asana 1219978400790427,
+#' 29.10.2026). `is_primary_crm` markiert je Lead nur die Adresse des hoechsten
+#' Typs (office vor office_hq vor other/private vor from_description); eine
+#' nachrangige Adresse ist trotzdem eine Adresse dieses Leads. Gemessen ueber 12
+#' Monate: ohne den Filter bekommen 1.191 VCs neu einen Lead, nur 21 VCs bekommen
+#' zwei. Mehrere Leads ergeben eine Zeile je Lead.
+#'
+#' Gemeinsame Quelle fuer [update_sales_meetings_unified()] und
+#' [update_crm_task_meeting_classification()], damit Termintabelle und
+#' CRM-Abgleich denselben Lead sehen.
+#'
+#' @param participants data.frame mit call_event_mapping_id, contact_id, email
+#'   (Nicht-Organisator-Teilnehmer; interne und synthetische filtert die Funktion).
+#' @param mappings data.frame mit msgraph_contact_id, crm_lead_id.
+#' @return data.frame mit call_event_mapping_id, lead_id; eine Zeile je Meeting
+#'   und Lead.
+#' @keywords internal
+# ---- start ---- #
+meeting_leads_aus_teilnehmern <- function(participants, mappings) {
+  extern <- participants[!is_internal_email(participants$email) &
+                           !is_synthetic_email(participants$email),
+                         c("call_event_mapping_id", "contact_id"), drop = FALSE]
+  ml <- merge(extern, mappings, by.x = "contact_id", by.y = "msgraph_contact_id")
+  unique(data.frame(
+    call_event_mapping_id = ml$call_event_mapping_id,
+    lead_id               = ml$crm_lead_id,
+    stringsAsFactors      = FALSE))
+}
+
 #' Rebuild processed.sales_meetings_unified (voll rueckwirkend)
 #'
 #' Laeuft nach update_crm_task_meeting_classification. MSGraph-Meetings (extern-only
@@ -474,7 +509,7 @@ update_sales_meetings_unified <- function(con) {
     msgraph_meetings, load_meeting_organizers(con),
     by = "call_event_mapping_id", all.x = TRUE)
 
-  message("  leite externe Leads je Meeting ab (extern-only, is_primary_crm) ...")
+  message("  leite externe Leads je Meeting ab (extern-only, alle Mail-Mappings) ...")
   # Nicht-Organisator-Teilnehmer mit Email -> extern/intern klassifizieren.
   participants <- dplyr::tbl(con, I("mapping.msgraph_call_event")) %>%
     dplyr::select(call_event_mapping_id = id, event_id) %>%
@@ -495,20 +530,13 @@ update_sales_meetings_unified <- function(con) {
   # Meetings mit >=1 externem Teilnehmer (sonst internal-only -> raus).
   has_ext <- unique(participants$call_event_mapping_id[participants$is_external])
 
-  # Externe MAPPED Leads (is_primary_crm) je Meeting.
-  # Einmal komplett laden: die Kette nutzt nur is_primary_crm, die
-  # Vorrang-Pruefung des Domain-Fallbacks jedes Mapping.
+  # Externe MAPPED Leads je Meeting, aus JEDEM Mail-Mapping (Begruendung an
+  # meeting_leads_aus_teilnehmern). Dieselbe Ableitung nutzt der CRM-Abgleich in
+  # update_crm_task_meeting_classification().
   alle_mappings <- dplyr::tbl(con, I("mapping.crm_lead_msgraph_contact")) %>%
-    dplyr::select(msgraph_contact_id, crm_lead_id, is_primary_crm) %>%
+    dplyr::select(msgraph_contact_id, crm_lead_id) %>%
     dplyr::collect()
-  crm_map <- alle_mappings[alle_mappings$is_primary_crm %in% TRUE,
-                           c("msgraph_contact_id", "crm_lead_id")]
-  ext_part <- participants[participants$is_external, c("call_event_mapping_id", "contact_id")]
-  meeting_lead <- merge(ext_part, crm_map, by.x = "contact_id", by.y = "msgraph_contact_id")
-  meeting_lead <- unique(data.frame(
-    call_event_mapping_id = meeting_lead$call_event_mapping_id,
-    lead_id               = meeting_lead$crm_lead_id,
-    stringsAsFactors      = FALSE))
+  meeting_lead <- meeting_leads_aus_teilnehmern(participants, alle_mappings)
 
   # internal-only Meetings raus, dann per (Meeting x externer Lead) expandieren.
   # all.x = TRUE -> Meetings mit externem Teilnehmer aber ohne gemappten Lead

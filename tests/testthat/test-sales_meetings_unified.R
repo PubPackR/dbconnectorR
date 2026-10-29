@@ -593,3 +593,43 @@ test_that("Domain-Fallback traegt integer64-IDs aus der DB und Teilnehmer ohne M
   expect_true("msgraph_100000_77" %in% res$meeting_key)
   expect_true("msgraph_4000000001_NA" %in% res$meeting_key)
 })
+
+# ---- Leads je Meeting aus externen Teilnehmern (alle Mail-Mappings) ----------
+
+mk_teilnehmer <- function() data.frame(
+  call_event_mapping_id = c(1, 1, 2, 3, 4),
+  contact_id            = c(10, 11, 20, 30, 40),
+  email = c("anna@kunde.de", "ben@kunde.de", "chef@studyflix.de",
+            "gast@external.guest", "cara@andere.de"),
+  stringsAsFactors = FALSE)
+
+test_that("jedes Mapping liefert einen Lead, die Primaer-Markierung spielt keine Rolle", {
+  # 11 steht im CRM nur als nachrangige Adresse von Lead 501; die Funktion sieht
+  # keine is_primary_crm-Spalte und darf sie auch nicht brauchen.
+  maps <- data.frame(msgraph_contact_id = c(10, 11), crm_lead_id = c(500, 501))
+  res <- meeting_leads_aus_teilnehmern(mk_teilnehmer(), maps)
+  expect_setequal(paste(res$call_event_mapping_id, res$lead_id), c("1 500", "1 501"))
+})
+
+test_that("interne und synthetische Teilnehmer liefern keinen Lead", {
+  maps <- data.frame(msgraph_contact_id = c(20, 30), crm_lead_id = c(600, 700))
+  res <- meeting_leads_aus_teilnehmern(mk_teilnehmer(), maps)
+  expect_equal(nrow(res), 0)
+})
+
+test_that("zwei Teilnehmer desselben Leads ergeben eine Zeile", {
+  maps <- data.frame(msgraph_contact_id = c(10, 11, 40), crm_lead_id = c(500, 500, 800))
+  res <- meeting_leads_aus_teilnehmern(mk_teilnehmer(), maps)
+  expect_equal(nrow(res), 2)
+  expect_setequal(paste(res$call_event_mapping_id, res$lead_id), c("1 500", "4 800"))
+})
+
+test_that("Lead-Ableitung traegt integer64-IDs aus der DB", {
+  tn <- mk_teilnehmer()
+  tn$call_event_mapping_id <- bit64::as.integer64(tn$call_event_mapping_id)
+  tn$contact_id <- bit64::as.integer64(tn$contact_id)
+  maps <- data.frame(msgraph_contact_id = bit64::as.integer64(c(10, 40)),
+                     crm_lead_id = bit64::as.integer64(c(4000000001, 800)))
+  res <- meeting_leads_aus_teilnehmern(tn, maps)
+  expect_setequal(paste(res$call_event_mapping_id, res$lead_id), c("1 4000000001", "4 800"))
+})
