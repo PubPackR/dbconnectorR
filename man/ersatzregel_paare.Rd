@@ -15,7 +15,7 @@ ersatzregel_paare(tasks, ohne_lead, event_date, rep_kontakt, start)
 Meeting-Zeile, parallel zu \code{ohne_lead}.}
 }
 \value{
-data.frame mit t (Zeile in \code{tasks}) und j (Meeting-Zeile).
+integer je Zeile in \code{tasks}: die zugeordnete Meeting-Zeile, NA = keine.
 }
 \description{
 Rein (kein DB-Zugriff). Ein Paar entsteht aus einem Task und einer Zeile ohne

@@ -246,8 +246,9 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
   # fuer die Ersatzregel. Erst wenn alle Tasks durch sind, steht fest, welche
   # Tasks um welchen Platzhalter konkurrieren; vorher gewann, wer zuerst geladen
   # wurde.
+  # treffer[i] = Meeting-Zeile, die Task i ueberschreibt (NA = keine).
   new_rows <- list()
-  treffer  <- data.frame(i = integer(0), j = integer(0))
+  treffer  <- rep(NA_integer_, nrow(crm_meetings))
   offen    <- integer(0)
   for (i in seq_len(nrow(crm_meetings))) {
     cm <- crm_meetings[i, ]
@@ -274,7 +275,7 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
         } else next  # echte Rest-Mehrdeutigkeit -> verwerfen
       } else next    # kein eindeutiger Rep -> verwerfen
     }
-    treffer <- rbind(treffer, data.frame(i = i, j = cand[1]))
+    treffer[i] <- cand[1]
   }
 
   # Zweiter Durchgang: Ersatzregel fuer die Tasks ohne Kandidat. Ein
@@ -283,18 +284,16 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
   # zweites Mal. Nur bis ERSATZREGEL_MAX_MINUTEN Abstand: gemessen 29.10.2026
   # widersprechen bis 15 Minuten 36 von 928 Paaren dem Task-Lead, darueber 377
   # von 409 (Spec 2026-10-29-ersatzregel-nur-rest).
-  ersatz <- ersatzregel_paare(crm_meetings[offen, , drop = FALSE],
-                              is.na(base$lead_id), base$event_date, base_rep, base_start)
-  ersatz_i <- offen[ersatz$t]
-  for (i in setdiff(offen, ersatz_i)) new_rows[[length(new_rows)+1]] <- netto_neu(crm_meetings[i, ])
-  treffer <- rbind(treffer, data.frame(i = ersatz_i, j = ersatz$j))
+  treffer[offen] <- ersatzregel_paare(crm_meetings[offen, , drop = FALSE],
+                                      is.na(base$lead_id), base$event_date, base_rep, base_start)
+  for (i in offen[is.na(treffer[offen])]) new_rows[[length(new_rows)+1]] <- netto_neu(crm_meetings[i, ])
 
   # In Task-Reihenfolge, damit mehrere Tasks auf derselben Zeile wie bisher
   # nacheinander wirken (siehe Storno-Regel unten).
-  for (k in order(treffer$i)) {
-    cm <- crm_meetings[treffer$i[k], ]
+  for (i in which(!is.na(treffer))) {
+    cm <- crm_meetings[i, ]
     fl <- crm_status_flags(cm$meeting_status)
-    j  <- treffer$j[k]
+    j  <- treffer[i]
 
     # Ersatzregel-Treffer: die Zeile uebernimmt den Lead des Tasks. Nur sie
     # tragen hier noch lead_id = NA, ein Lead x Tag-Treffer hat immer einen Lead.
@@ -393,11 +392,11 @@ ERSATZREGEL_MAX_MINUTEN <- 15
 #' @param ohne_lead logical je Meeting-Zeile, TRUE = kein Lead.
 #' @param event_date,rep_kontakt,start Datum, Rep-Kontakt (character) und Beginn je
 #'   Meeting-Zeile, parallel zu `ohne_lead`.
-#' @return data.frame mit t (Zeile in `tasks`) und j (Meeting-Zeile).
+#' @return integer je Zeile in `tasks`: die zugeordnete Meeting-Zeile, NA = keine.
 #' @keywords internal
 # ---- start ---- #
 ersatzregel_paare <- function(tasks, ohne_lead, event_date, rep_kontakt, start) {
-  leer <- data.frame(t = integer(0), j = integer(0))
+  zeile <- rep(NA_integer_, nrow(tasks))
   max_sek <- ERSATZREGEL_MAX_MINUTEN * 60
   kand <- list()
   for (t in seq_len(nrow(tasks))) {
@@ -407,7 +406,7 @@ ersatzregel_paare <- function(tasks, ohne_lead, event_date, rep_kontakt, start) 
     d <- abs(as.numeric(start[p]) - as.numeric(tasks$precise_time[t]))
     if (any(d <= max_sek)) kand[[length(kand)+1]] <- data.frame(t = t, j = p[d <= max_sek], d = d[d <= max_sek])
   }
-  if (length(kand) == 0) return(leer)
+  if (length(kand) == 0) return(zeile)
   kand <- do.call(rbind, kand)
   # crm_task_id kommt aus der DB als integer64; order() rechnet darauf falsch.
   task_id <- as.numeric(as.character(tasks$crm_task_id))
@@ -415,7 +414,6 @@ ersatzregel_paare <- function(tasks, ohne_lead, event_date, rep_kontakt, start) 
 
   task_fertig <- rep(FALSE, nrow(tasks))
   zeile_belegt <- rep(FALSE, length(ohne_lead))
-  paare <- leer
   for (k in seq_len(nrow(kand))) {
     t <- kand$t[k]; j <- kand$j[k]
     if (task_fertig[t] || zeile_belegt[j]) next
@@ -423,9 +421,9 @@ ersatzregel_paare <- function(tasks, ohne_lead, event_date, rep_kontakt, start) 
     gleich_nah <- kand$t == t & kand$d == kand$d[k] & kand$j != j & !zeile_belegt[kand$j]
     if (any(gleich_nah)) next
     zeile_belegt[j] <- TRUE
-    paare <- rbind(paare, data.frame(t = t, j = j))
+    zeile[t] <- j
   }
-  paare
+  zeile
 }
 
 #' Eindeutige Domain-Leads aus den CRM-Mailadressen
