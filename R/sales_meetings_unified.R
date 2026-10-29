@@ -80,13 +80,15 @@ crm_status_flags <- function(status) {
 #' Rep-Kontakt + naechste `event_start` disambiguiert, echte Rest-Mehrdeutigkeit
 #' (gleicher Rep, gleicher Zeitpunkt) wird verworfen.
 #'
-#' Findet der Match keinen Kandidaten, greift der **Platzhalter-Fallback**: eine
-#' MSGraph-Zeile mit `lead_id = NA` (externer Teilnehmer ohne gemappten Lead)
-#' desselben Reps am selben Tag ist mit hoher Wahrscheinlichkeit derselbe Termin.
-#' Ohne ihn zaehlt der CRM-Task ein zweites Mal (Juni 2026: 76 von 178
-#' netto-neuen CRM-Terminen). Mehrere Platzhalter werden ueber `precise_time`
-#' aufgeloest; bleibt es mehrdeutig, wird die CRM-Zeile netto-neu geschrieben und
-#' nicht verworfen.
+#' Findet der Match keinen Kandidaten, greift die **Ersatzregel**: eine
+#' MSGraph-Zeile mit `lead_id = NA` (kein Lead ableitbar, weder per Mapping noch
+#' per Domain) desselben Reps am selben Tag, deren Beginn hoechstens
+#' [ERSATZREGEL_MAX_MINUTEN] von `precise_time` abweicht, ist derselbe Termin.
+#' Die Zeile uebernimmt den Lead des Tasks (`meeting_key = msgraph_<id>_<lead>`).
+#' Die Paare eines Rep-Tags werden nach Abstand vergeben, das naechste zuerst,
+#' bei Gleichstand die kleinere `crm_task_id`; das Ergebnis haengt nicht von der
+#' Reihenfolge der Tasks ab. Ohne Treffer wird die CRM-Zeile netto-neu
+#' geschrieben und nicht verworfen.
 #'
 #' `lead_id` und `contact_id` werden im CHARACTER-Raum gehalten (rbind-sicher
 #' gegen die integer64-Falle); der Caller castet vor dem Upsert auf bigint.
@@ -216,21 +218,17 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
     organizer_source     = ifelse(is.na(ms_org), "unbekannt", "msgraph"),
     stringsAsFactors     = FALSE
   )
-  # Nur fuer den Tiebreak (nicht im DB-Schema): Rep-Kontakt + event_start je Zeile.
+  # Nur fuer Tiebreak und Ersatzregel (nicht im DB-Schema): Rep-Kontakt +
+  # event_start je Zeile.
   base_rep   <- as.character(msgraph_meetings$contact_id)
   base_start <- msgraph_meetings$event_start
-  # Buchfuehrung fuer den Platzhalter-Fallback: jede Platzhalter-Zeile darf
-  # hoechstens einen CRM-Termin aufnehmen.
-  ph_used    <- rep(FALSE, nrow(base))
 
-  new_rows <- list()
-  for (i in seq_len(nrow(crm_meetings))) {
-    cm <- crm_meetings[i, ]
+  netto_neu <- function(cm) {
     fl <- crm_status_flags(cm$meeting_status)
-    cm_lead <- as.character(cm$lead_id)
-    netto_neu <- function() data.frame(
+    data.frame(
       meeting_key = paste0("crm_", cm$crm_task_id), source = "crm_task",
-      event_date = cm$event_date, contact_id = as.character(cm$contact_id), lead_id = cm_lead,
+      event_date = cm$event_date, contact_id = as.character(cm$contact_id),
+      lead_id = as.character(cm$lead_id),
       is_no_show = fl$is_no_show, no_show_source = "crm_only",
       meeting_status = cm$meeting_status, meeting_tool = cm$meeting_tool, meeting_type = cm$meeting_type,
       is_external_tool = cm$is_external_tool, excluded = fl$excluded,
@@ -242,42 +240,28 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
       # unterscheidbar.
       organizer_contact_id = NA_character_, organizer_source = "crm_task",
       stringsAsFactors = FALSE)
+  }
+
+  # Erster Durchgang: Abgleich Lead x Tag. Tasks ohne Kandidat sammelt `offen`
+  # fuer die Ersatzregel. Erst wenn alle Tasks durch sind, steht fest, welche
+  # Tasks um welchen Platzhalter konkurrieren; vorher gewann, wer zuerst geladen
+  # wurde.
+  # treffer[i] = Meeting-Zeile, die Task i ueberschreibt (NA = keine).
+  new_rows <- list()
+  treffer  <- rep(NA_integer_, nrow(crm_meetings))
+  offen    <- integer(0)
+  for (i in seq_len(nrow(crm_meetings))) {
+    cm <- crm_meetings[i, ]
+    cm_lead <- as.character(cm$lead_id)
 
     # Externes Tool (kein MSGraph-Pendant) und Task ohne Lead -> immer netto-neu.
-    if (isTRUE(cm$is_external_tool)) { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
-    if (is.na(cm$lead_id))          { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
+    if (isTRUE(cm$is_external_tool)) { new_rows[[length(new_rows)+1]] <- netto_neu(cm); next }
+    if (is.na(cm$lead_id))          { new_rows[[length(new_rows)+1]] <- netto_neu(cm); next }
 
     # Kandidaten gleicher (lead_id, event_date).
     cand <- which(!is.na(base$lead_id) & base$lead_id == cm_lead &
                     base$event_date == cm$event_date)
-    if (length(cand) == 0) {
-      # Platzhalter-Fallback. Ein MSGraph-Meeting, dessen externer Teilnehmer
-      # keinem Lead zugeordnet ist, traegt lead_id = NA und kann per (Lead x Tag)
-      # nie gefunden werden. Der CRM-Task desselben Reps am selben Tag ist dann
-      # mit hoher Wahrscheinlichkeit derselbe Termin, und ohne diesen Zweig
-      # zaehlt er ein zweites Mal. Gemessen im Juni 2026: 76 von 178 netto-neuen
-      # CRM-Terminen, rund 5 Prozent zu hohe VC-Zahl.
-      # Bewusst NICHT "gleicher Rep, gleicher Tag" ohne die Platzhalter-Bedingung:
-      # das wuerde zwei erkennbar verschiedene Meetings verschmelzen, sobald ein
-      # Rep an einem Tag mehrere Termine hat.
-      # `ph_used` schliesst bereits verbrauchte Platzhalter aus. Ohne das wuerden
-      # zwei CRM-Termine desselben Reps am selben Tag denselben Platzhalter
-      # matchen, einander ueberschreiben und beide nicht netto-neu geschrieben:
-      # aus zwei Meetings wuerde eines. Die lead-basierte Zuordnung oben ist
-      # ueber lead_id verschluesselt und deshalb strukturell kollisionsfrei;
-      # dieser Zweig gibt den Schluessel auf und braucht die Buchfuehrung.
-      ph <- which(is.na(base$lead_id) & base$event_date == cm$event_date &
-                    base_rep == as.character(cm$contact_id) & !ph_used)
-      if (length(ph) == 1) {
-        cand <- ph
-      } else if (length(ph) > 1 && !is.na(cm$precise_time)) {
-        d <- abs(as.numeric(base_start[ph]) - as.numeric(cm$precise_time))
-        if (sum(d == min(d, na.rm = TRUE), na.rm = TRUE) == 1) {
-          cand <- ph[which.min(d)]
-        } else { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
-      } else { new_rows[[length(new_rows)+1]] <- netto_neu(); next }
-      ph_used[cand] <- TRUE
-    }
+    if (length(cand) == 0) { offen <- c(offen, i); next }
     if (length(cand) > 1) {
       # Tiebreak 1: gleicher Rep-Kontakt.
       same_rep <- cand[base_rep[cand] == as.character(cm$contact_id)]
@@ -290,6 +274,33 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
           cand <- same_rep[which.min(d)]
         } else next  # echte Rest-Mehrdeutigkeit -> verwerfen
       } else next    # kein eindeutiger Rep -> verwerfen
+    }
+    treffer[i] <- cand[1]
+  }
+
+  # Zweiter Durchgang: Ersatzregel fuer die Tasks ohne Kandidat. Ein
+  # MSGraph-Meeting ohne ableitbaren Lead traegt lead_id = NA und kann per
+  # (Lead x Tag) nie gefunden werden; ohne Ersatzregel zaehlte der Task ein
+  # zweites Mal. Nur bis ERSATZREGEL_MAX_MINUTEN Abstand: gemessen 29.10.2026
+  # widersprechen bis 15 Minuten 36 von 928 Paaren dem Task-Lead, darueber 377
+  # von 409 (Spec 2026-10-29-ersatzregel-nur-rest).
+  treffer[offen] <- ersatzregel_paare(crm_meetings[offen, , drop = FALSE],
+                                      is.na(base$lead_id), base$event_date, base_rep, base_start)
+  for (i in offen[is.na(treffer[offen])]) new_rows[[length(new_rows)+1]] <- netto_neu(crm_meetings[i, ])
+
+  # In Task-Reihenfolge, damit mehrere Tasks auf derselben Zeile wie bisher
+  # nacheinander wirken (siehe Storno-Regel unten).
+  for (i in which(!is.na(treffer))) {
+    cm <- crm_meetings[i, ]
+    fl <- crm_status_flags(cm$meeting_status)
+    j  <- treffer[i]
+
+    # Ersatzregel-Treffer: die Zeile uebernimmt den Lead des Tasks. Nur sie
+    # tragen hier noch lead_id = NA, ein Lead x Tag-Treffer hat immer einen Lead.
+    if (is.na(base$lead_id[j])) {
+      base$lead_id[j]     <- as.character(cm$lead_id)
+      base$meeting_key[j] <- paste0("msgraph_", msgraph_meetings$call_event_mapping_id[j],
+                                    "_", base$lead_id[j])
     }
 
     # eindeutiger (bzw. aufgeloester) Match -> Override. Nur ein am CRM-Task
@@ -329,7 +340,6 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
     # zwei CRM-Tasks dieselbe Zeile und der erste ist storniert, steht dort schon
     # crm_storniert, und ein spaeterer show_up darf die Absage nicht wieder
     # aufheben. Vor diesem Zweig blieb der Storno in jeder Reihenfolge stehen.
-    j <- cand[1]
     if (cm$meeting_status %in% c("no_show", "show_up")) base$is_no_show[j] <- fl$is_no_show
     if (cm$meeting_status == "unbekannt" && ms_nicht_messbar[j]) {
       base$is_no_show[j] <- FALSE
@@ -353,6 +363,67 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
 
   if (length(new_rows) > 0) base <- rbind(base, do.call(rbind, new_rows))
   base
+}
+
+#' Hoechster Abstand der Ersatzregel in Minuten
+#'
+#' Ein CRM-VC-Termin wird einem Meeting ohne ableitbaren Lead nur zugeordnet,
+#' wenn `precise_time` und Meetingbeginn hoechstens so weit auseinanderliegen.
+#' Gemessen 29.10.2026 ueber 12 Monate: bis 15 Minuten widersprechen 36 von 928
+#' Paaren dem Task-Lead, von 16 bis 30 Minuten schon 68 von 76.
+#'
+#' @export
+ERSATZREGEL_MAX_MINUTEN <- 15
+
+#' Ersatzregel: CRM-Tasks auf Meetings ohne Lead verteilen
+#'
+#' Rein (kein DB-Zugriff). Ein Paar entsteht aus einem Task und einer Zeile ohne
+#' Lead desselben Reps am selben Tag, deren Beginn hoechstens
+#' [ERSATZREGEL_MAX_MINUTEN] von `precise_time` abweicht. Vergeben wird nach
+#' Abstand, das naechste Paar zuerst, bei Gleichstand die kleinere
+#' `crm_task_id`; jeder Task und jede Zeile hoechstens einmal. Damit haengt das
+#' Ergebnis nicht von der Reihenfolge der Tasks ab.
+#'
+#' Hat ein Task zwei freie Zeilen im selben Abstand, bekommt er keine: zwei
+#' Meetings desselben Reps zur selben Zeit sind nicht unterscheidbar, und der
+#' Task bleibt besser netto-neu als falsch zugeordnet.
+#'
+#' @param tasks data.frame mit crm_task_id, event_date, precise_time, contact_id.
+#' @param ohne_lead logical je Meeting-Zeile, TRUE = kein Lead.
+#' @param event_date,rep_kontakt,start Datum, Rep-Kontakt (character) und Beginn je
+#'   Meeting-Zeile, parallel zu `ohne_lead`.
+#' @return integer je Zeile in `tasks`: die zugeordnete Meeting-Zeile, NA = keine.
+#' @keywords internal
+# ---- start ---- #
+ersatzregel_paare <- function(tasks, ohne_lead, event_date, rep_kontakt, start) {
+  zeile <- rep(NA_integer_, nrow(tasks))
+  max_sek <- ERSATZREGEL_MAX_MINUTEN * 60
+  kand <- list()
+  for (t in seq_len(nrow(tasks))) {
+    if (is.na(tasks$precise_time[t])) next
+    p <- which(ohne_lead & event_date == tasks$event_date[t] &
+                 rep_kontakt == as.character(tasks$contact_id[t]) & !is.na(start))
+    d <- abs(as.numeric(start[p]) - as.numeric(tasks$precise_time[t]))
+    if (any(d <= max_sek)) kand[[length(kand)+1]] <- data.frame(t = t, j = p[d <= max_sek], d = d[d <= max_sek])
+  }
+  if (length(kand) == 0) return(zeile)
+  kand <- do.call(rbind, kand)
+  # crm_task_id kommt aus der DB als integer64; order() rechnet darauf falsch.
+  task_id <- as.numeric(as.character(tasks$crm_task_id))
+  kand <- kand[order(kand$d, task_id[kand$t], kand$j), ]
+
+  task_fertig <- rep(FALSE, nrow(tasks))
+  zeile_belegt <- rep(FALSE, length(ohne_lead))
+  for (k in seq_len(nrow(kand))) {
+    t <- kand$t[k]; j <- kand$j[k]
+    if (task_fertig[t] || zeile_belegt[j]) next
+    task_fertig[t] <- TRUE
+    gleich_nah <- kand$t == t & kand$d == kand$d[k] & kand$j != j & !zeile_belegt[kand$j]
+    if (any(gleich_nah)) next
+    zeile_belegt[j] <- TRUE
+    zeile[t] <- j
+  }
+  zeile
 }
 
 #' Eindeutige Domain-Leads aus den CRM-Mailadressen
@@ -381,60 +452,54 @@ domain_leads_aus_crm_mails <- function(mails) {
   eindeutig
 }
 
-#' Domain-Fallback fuer Leadless meetings
+#' Leads je MSGraph-Meeting: Mapping, sonst eindeutige Domain
 #'
-#' Ordnet einer MSGraph-Platzhalter-Zeile (`lead_id = NA`) den Domain-matched
-#' lead zu: je externer Teilnehmer-Domain den Lead, dem sie im CRM eindeutig
-#' gehoert. Mehrere solche Leads ergeben eine Zeile je Lead, wie beim Mapping.
+#' Rein (kein DB-Zugriff). Je Meeting jeder Lead, den
+#' [meeting_leads_aus_teilnehmern()] ueber ein Mail-Mapping liefert. Hat kein
+#' externer Teilnehmer ein Mapping, der Domain-matched lead: je externer
+#' Teilnehmer-Domain der Lead, dem sie im CRM eindeutig gehoert
+#' ([domain_leads_aus_crm_mails()]). Mehrere Leads ergeben eine Zeile je Lead.
 #'
-#' **Laeuft auf dem Ergebnis von [assemble_unified_meetings()]**, nicht davor.
-#' Der Platzhalter-Fallback dort ordnet einen CRM-Task nur Zeilen ohne Lead zu.
-#' Truege die Zeile vorher schon einen Domain-Lead, der oft ein Kollege des
-#' echten Gegenuebers ist, faende der Task mit dem echten Lead nichts und
-#' wuerde als netto-neue Zeile doppelt zaehlen. Eine per CRM-Task zugeordnete
-#' Zeile (`no_show_source = "crm_override"`) bleibt deshalb unberuehrt.
+#' **Laeuft vor [assemble_unified_meetings()]** (Spec
+#' 2026-10-29-ersatzregel-nur-rest, Q17). So findet ein CRM-Task sein Meeting
+#' ueber Lead x Tag, und die Ersatzregel bleibt fuer Meetings ohne ableitbaren
+#' Lead. Bis dahin lief der Domain-Fallback danach und liess Zeilen aus, die die
+#' Ersatzregel schon einem Task gegeben hatte.
 #'
 #' **Jedes Mail-Mapping hat Vorrang**, auch ein nicht-primaeres: hat irgendein
 #' externer Teilnehmer eine Zeile in `mapping.crm_lead_msgraph_contact`, greift
-#' der Fallback fuer das ganze Meeting nicht. So ueberdeckt er nie einen Lead,
+#' die Domain fuer das ganze Meeting nicht. So ueberdeckt sie nie einen Lead,
 #' den das Mapping liefern kann.
 #'
-#' @param rows Ergebnis von [assemble_unified_meetings()].
-#' @param ext_participants data.frame mit call_event_mapping_id, contact_id,
-#'   email; nur externe, nicht-synthetische Teilnehmer.
-#' @param mapped_contact_ids character, msgraph_contact_id jedes Kontakts mit
-#'   irgendeinem Mail-Mapping (ohne Filter auf is_primary_crm).
-#' @param domain_leads Ergebnis von [domain_leads_aus_crm_mails()].
-#' @return `rows`, Platzhalter mit Domain-Lead ersetzt durch je eine Zeile pro
-#'   Lead (`meeting_key = msgraph_<id>_<lead>`).
+#' @param participants data.frame mit call_event_mapping_id, contact_id, email
+#'   (Nicht-Organisator-Teilnehmer; interne und synthetische filtert die Funktion).
+#' @param mappings data.frame mit msgraph_contact_id, crm_lead_id.
+#' @param crm_mails data.frame mit lead_id, mail_address_name, is_deleted
+#'   (Spalten aus `raw.crm_lead_mail_address`).
+#' @return data.frame mit call_event_mapping_id, lead_id (character) und quelle
+#'   (`"mapping"` oder `"domain"`); eine Zeile je Meeting und Lead.
 #' @export
 # ---- start ---- #
-apply_domain_fallback <- function(rows, ext_participants, mapped_contact_ids, domain_leads) {
-  gemappt <- unique(ext_participants$call_event_mapping_id[
-    as.character(ext_participants$contact_id) %in% as.character(mapped_contact_ids)])
-  kandidaten <- ext_participants[!(ext_participants$call_event_mapping_id %in% gemappt), , drop = FALSE]
+meeting_leads_ableiten <- function(participants, mappings, crm_mails) {
+  per_mapping <- meeting_leads_aus_teilnehmern(participants, mappings)
+  per_mapping$lead_id <- as.character(per_mapping$lead_id)
+  per_mapping$quelle  <- rep("mapping", nrow(per_mapping))
+
+  extern <- participants[!is_internal_email(participants$email) &
+                           !is_synthetic_email(participants$email), , drop = FALSE]
+  gemappt <- unique(extern$call_event_mapping_id[
+    as.character(extern$contact_id) %in% as.character(mappings$msgraph_contact_id)])
+  kandidaten <- extern[!(extern$call_event_mapping_id %in% gemappt), , drop = FALSE]
   kandidaten$domain <- email_domain(kandidaten$email)
   kandidaten <- kandidaten[!(kandidaten$domain %in% FREEMAIL_DOMAINS), , drop = FALSE]
 
-  treffer <- merge(kandidaten[, c("call_event_mapping_id", "domain")], domain_leads, by = "domain")
-  treffer <- unique(treffer[, c("call_event_mapping_id", "lead_id")])
-  if (nrow(treffer) == 0) return(rows)
-  treffer$platzhalter_key <- paste0("msgraph_", treffer$call_event_mapping_id, "_NA")
+  per_domain <- merge(kandidaten[, c("call_event_mapping_id", "domain")],
+                      domain_leads_aus_crm_mails(crm_mails), by = "domain")
+  per_domain <- unique(per_domain[, c("call_event_mapping_id", "lead_id")])
+  per_domain$lead_id <- as.character(per_domain$lead_id)
+  per_domain$quelle  <- rep("domain", nrow(per_domain))
 
-  ziel <- which(rows$source == "msgraph" & is.na(rows$lead_id) &
-                  rows$no_show_source != "crm_override" &
-                  rows$meeting_key %in% treffer$platzhalter_key)
-  if (length(ziel) == 0) return(rows)
-
-  je_key <- split(treffer, treffer$platzhalter_key)
-  neu <- lapply(ziel, function(j) {
-    leads <- je_key[[rows$meeting_key[j]]]
-    r <- rows[rep(j, nrow(leads)), , drop = FALSE]
-    r$lead_id     <- as.character(leads$lead_id)
-    r$meeting_key <- paste0("msgraph_", leads$call_event_mapping_id, "_", leads$lead_id)
-    r
-  })
-  ergebnis <- rbind(rows[-ziel, , drop = FALSE], do.call(rbind, neu))
+  ergebnis <- rbind(per_mapping, per_domain)
   rownames(ergebnis) <- NULL
   ergebnis
 }
@@ -530,19 +595,29 @@ update_sales_meetings_unified <- function(con) {
   # Meetings mit >=1 externem Teilnehmer (sonst internal-only -> raus).
   has_ext <- unique(participants$call_event_mapping_id[participants$is_external])
 
-  # Externe MAPPED Leads je Meeting, aus JEDEM Mail-Mapping (Begruendung an
-  # meeting_leads_aus_teilnehmern). Dieselbe Ableitung nutzt der CRM-Abgleich in
-  # update_crm_task_meeting_classification().
+  # Externe Leads je Meeting, aus JEDEM Mail-Mapping (Begruendung an
+  # meeting_leads_aus_teilnehmern), sonst ueber die eindeutige Domain. Beides vor
+  # dem CRM-Abgleich, damit die Ersatzregel nur den Rest sieht. Das Mapping
+  # allein nutzt auch der CRM-Abgleich in update_crm_task_meeting_classification().
   alle_mappings <- dplyr::tbl(con, I("mapping.crm_lead_msgraph_contact")) %>%
     dplyr::select(msgraph_contact_id, crm_lead_id) %>%
     dplyr::collect()
-  meeting_lead <- meeting_leads_aus_teilnehmern(participants, alle_mappings)
+  crm_mails <- dplyr::tbl(con, I("raw.crm_lead_mail_address")) %>%
+    dplyr::select(lead_id, mail_address_name, is_deleted) %>%
+    dplyr::collect()
+  meeting_lead <- meeting_leads_ableiten(participants, alle_mappings, crm_mails)
+  # character statt integer64: setdiff() rechnet auf integer64 falsch.
+  ml_id <- as.character(meeting_lead$call_event_mapping_id)
+  ohne_mapping <- setdiff(as.character(has_ext), ml_id[meeting_lead$quelle == "mapping"])
+  message(paste0("  ", length(unique(ml_id[meeting_lead$quelle == "domain"])), " von ",
+                 length(ohne_mapping), " Meetings ohne Mapping per Domain zugeordnet"))
 
   # internal-only Meetings raus, dann per (Meeting x externer Lead) expandieren.
-  # all.x = TRUE -> Meetings mit externem Teilnehmer aber ohne gemappten Lead
+  # all.x = TRUE -> Meetings mit externem Teilnehmer aber ohne ableitbaren Lead
   # behalten EINE Zeile mit lead_id = NA (Platzhalter).
   msgraph_meetings <- msgraph_meetings[msgraph_meetings$call_event_mapping_id %in% has_ext, , drop = FALSE]
-  msgraph_meetings <- merge(msgraph_meetings, meeting_lead, by = "call_event_mapping_id", all.x = TRUE)
+  msgraph_meetings <- merge(msgraph_meetings, meeting_lead[, c("call_event_mapping_id", "lead_id")],
+                            by = "call_event_mapping_id", all.x = TRUE)
 
   message("  leite CRM-VC-Termine aus Rohdaten ab ...")
   tasks <- dplyr::tbl(con, I("raw.crm_lead_tasks")) %>%
@@ -585,19 +660,6 @@ update_sales_meetings_unified <- function(con) {
     original_created_at = vc$task_created_at, stringsAsFactors = FALSE)
 
   rows <- assemble_unified_meetings(msgraph_meetings, crm_meetings)
-
-  message("  Domain-Fallback fuer Leadless meetings ...")
-  crm_mails <- dplyr::tbl(con, I("raw.crm_lead_mail_address")) %>%
-    dplyr::select(lead_id, mail_address_name, is_deleted) %>%
-    dplyr::collect()
-  ohne_lead_vorher <- sum(is.na(rows$lead_id) & rows$source == "msgraph")
-  rows <- apply_domain_fallback(
-    rows,
-    participants[participants$is_external, c("call_event_mapping_id", "contact_id", "email")],
-    as.character(unique(alle_mappings$msgraph_contact_id)),
-    domain_leads_aus_crm_mails(crm_mails))
-  message(paste0("  ", ohne_lead_vorher - sum(is.na(rows$lead_id) & rows$source == "msgraph"),
-                 " von ", ohne_lead_vorher, " MSGraph-Zeilen ohne Lead per Domain zugeordnet"))
 
   # ID-Spalten (im Assemble character) auf integer64 (=bigint) casten; NA -> NULL.
   rows$contact_id           <- bit64::as.integer64(rows$contact_id)

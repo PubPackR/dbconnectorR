@@ -32,13 +32,15 @@ Rep-Kontakt + naechste \code{event_start} disambiguiert, echte Rest-Mehrdeutigke
 (gleicher Rep, gleicher Zeitpunkt) wird verworfen.
 }
 \details{
-Findet der Match keinen Kandidaten, greift der \strong{Platzhalter-Fallback}: eine
-MSGraph-Zeile mit \code{lead_id = NA} (externer Teilnehmer ohne gemappten Lead)
-desselben Reps am selben Tag ist mit hoher Wahrscheinlichkeit derselbe Termin.
-Ohne ihn zaehlt der CRM-Task ein zweites Mal (Juni 2026: 76 von 178
-netto-neuen CRM-Terminen). Mehrere Platzhalter werden ueber \code{precise_time}
-aufgeloest; bleibt es mehrdeutig, wird die CRM-Zeile netto-neu geschrieben und
-nicht verworfen.
+Findet der Match keinen Kandidaten, greift die \strong{Ersatzregel}: eine
+MSGraph-Zeile mit \code{lead_id = NA} (kein Lead ableitbar, weder per Mapping noch
+per Domain) desselben Reps am selben Tag, deren Beginn hoechstens
+\link{ERSATZREGEL_MAX_MINUTEN} von \code{precise_time} abweicht, ist derselbe Termin.
+Die Zeile uebernimmt den Lead des Tasks (\verb{meeting_key = msgraph_<id>_<lead>}).
+Die Paare eines Rep-Tags werden nach Abstand vergeben, das naechste zuerst,
+bei Gleichstand die kleinere \code{crm_task_id}; das Ergebnis haengt nicht von der
+Reihenfolge der Tasks ab. Ohne Treffer wird die CRM-Zeile netto-neu
+geschrieben und nicht verworfen.
 
 \code{lead_id} und \code{contact_id} werden im CHARACTER-Raum gehalten (rbind-sicher
 gegen die integer64-Falle); der Caller castet vor dem Upsert auf bigint.

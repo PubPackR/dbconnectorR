@@ -27,7 +27,9 @@ _Avoid_: CRM appointment, task.
 **Meeting row**:
 One external lead's expected participation in one meeting — the grain of the
 unified dataset. A meeting with N mapped external leads yields N rows; a meeting
-with external attendees but no identifiable lead yields one placeholder row.
+with external attendees but no identifiable lead yields one placeholder row. A
+CRM VC-task of the same rep starting within 15 minutes of a placeholder row
+claims it, and the row takes that task's lead.
 
 **Leadless meeting**:
 A meeting with external (customer-side) attendees but none that map to a known
@@ -39,7 +41,7 @@ _Avoid_: Orphan meeting, unmatched meeting.
 A lead assigned to a meeting no attendee address maps to, because an external
 attendee's email domain belongs to exactly one CRM lead. Often a colleague of
 the attendee rather than the attendee. Never a freemail domain, never when any
-attendee address maps or a CRM VC-task already claimed the meeting.
+attendee address maps.
 _Avoid_: Fallback lead, guessed lead.
 
 **Session**:
