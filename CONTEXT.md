@@ -31,7 +31,7 @@ with external attendees but no identifiable lead yields one placeholder row.
 
 **Leadless meeting**:
 A meeting with external (customer-side) attendees but none that map to a known
-CRM lead, neither by address nor by unique domain — a mapping gap, not an
+CRM lead, neither by any of the lead's CRM addresses nor by unique domain — a mapping gap, not an
 internal meeting. Kept in the analysis with an unknown lead.
 _Avoid_: Orphan meeting, unmatched meeting.
 
