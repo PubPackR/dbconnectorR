@@ -240,7 +240,9 @@ test_that("MSGraph-Zeilen ohne CRM-Pendant behalten meeting_type NA", {
   expect_true(all(is.na(res$meeting_type)))
 })
 
-# --- Platzhalter-Fallback: MSGraph-Meeting ohne gemappten Lead ------------------
+# --- Ersatzregel: MSGraph-Meeting ohne ableitbaren Lead --------------------------
+# Spec docs/specs/2026-10-29-ersatzregel-nur-rest.md: nur bis 15 Minuten Abstand,
+# Vergabe nach Abstand, die Zeile uebernimmt den Lead des Tasks.
 ms_platzhalter <- function(rep = 500L, start = "2026-08-10 09:00") {
   ms <- mk_msgraph()
   rbind(ms, transform(ms[1, ], call_event_mapping_id = 50L, event_id = "e50",
@@ -248,19 +250,51 @@ ms_platzhalter <- function(rep = 500L, start = "2026-08-10 09:00") {
                       event_date = as.Date("2026-08-10"),
                       event_start = as.POSIXct(start, tz = "UTC")))
 }
+ph_task <- function(id, lead, ptime, rep = 500L, status = "no_show")
+  crm_row(id, lead, "2026-08-10", "teams", status, FALSE, rep = rep, ptime = ptime)
+sortiert <- function(res) {
+  res <- res[order(res$meeting_key), ]
+  rownames(res) <- NULL
+  res
+}
 
-test_that("eindeutige Platzhalter-Zeile desselben Reps wird gematcht statt verdoppelt", {
+test_that("Platzhalter desselben Reps bis 15 Minuten wird gematcht und uebernimmt den Task-Lead", {
   res <- assemble_unified_meetings(ms_platzhalter(),
-           mk_crm(list(crm_row(60, 42L, "2026-08-10", "teams", "no_show", FALSE, rep = 500L))))
+           mk_crm(list(ph_task(60, 42L, "2026-08-10 09:10"))))
   expect_false(any(res$meeting_key == "crm_60"))                       # keine zweite Zeile
-  r <- res[res$meeting_key == "msgraph_50_NA", ]
+  expect_false(any(res$meeting_key == "msgraph_50_NA"))
+  r <- res[res$meeting_key == "msgraph_50_42", ]
+  expect_equal(nrow(r), 1)
+  expect_equal(r$lead_id, "42")
   expect_true(r$is_no_show)
   expect_equal(r$no_show_source, "crm_override")
+  expect_equal(r$event_id, "e50")
+})
+
+test_that("genau 15 Minuten Abstand matcht noch", {
+  res <- assemble_unified_meetings(ms_platzhalter(),
+           mk_crm(list(ph_task(64, 42L, "2026-08-10 08:45"))))
+  expect_true(any(res$meeting_key == "msgraph_50_42"))
+  expect_false(any(res$meeting_key == "crm_64"))
+})
+
+test_that("Task mit 16 Minuten Abstand bleibt netto-neu, der Platzhalter unberuehrt", {
+  res <- assemble_unified_meetings(ms_platzhalter(),
+           mk_crm(list(ph_task(65, 42L, "2026-08-10 09:16"))))
+  expect_equal(res[res$meeting_key == "crm_65", ]$source, "crm_task")
+  expect_equal(res[res$meeting_key == "msgraph_50_NA", ]$no_show_source, "msgraph")
+})
+
+test_that("ohne precise_time greift die Ersatzregel nicht, auch bei nur einem Platzhalter", {
+  res <- assemble_unified_meetings(ms_platzhalter(),
+           mk_crm(list(ph_task(66, 42L, NA_character_))))
+  expect_equal(res[res$meeting_key == "crm_66", ]$source, "crm_task")
+  expect_equal(res[res$meeting_key == "msgraph_50_NA", ]$no_show_source, "msgraph")
 })
 
 test_that("Platzhalter eines anderen Reps wird nicht gematcht", {
   res <- assemble_unified_meetings(ms_platzhalter(rep = 600L),
-           mk_crm(list(crm_row(61, 42L, "2026-08-10", "teams", "no_show", FALSE, rep = 500L))))
+           mk_crm(list(ph_task(61, 42L, "2026-08-10 09:00"))))
   expect_equal(res[res$meeting_key == "crm_61", ]$source, "crm_task")   # netto-neu
   expect_equal(res[res$meeting_key == "msgraph_50_NA", ]$no_show_source, "msgraph")
 })
@@ -268,34 +302,82 @@ test_that("Platzhalter eines anderen Reps wird nicht gematcht", {
 test_that("mehrere Platzhalter: naechste event_start zur precise_time gewinnt", {
   ms <- ms_platzhalter(start = "2026-08-10 09:00")
   ms <- rbind(ms, transform(ms[nrow(ms), ], call_event_mapping_id = 51L, event_id = "e51",
-                            event_start = as.POSIXct("2026-08-10 15:00", tz = "UTC")))
-  res <- assemble_unified_meetings(ms,
-           mk_crm(list(crm_row(62, 42L, "2026-08-10", "teams", "no_show", FALSE,
-                               rep = 500L, ptime = "2026-08-10 14:30"))))
-  expect_equal(res[res$meeting_key == "msgraph_51_NA", ]$no_show_source, "crm_override")
+                            event_start = as.POSIXct("2026-08-10 09:20", tz = "UTC")))
+  res <- assemble_unified_meetings(ms, mk_crm(list(ph_task(62, 42L, "2026-08-10 09:12"))))
+  expect_equal(res[res$meeting_key == "msgraph_51_42", ]$no_show_source, "crm_override")
   expect_equal(res[res$meeting_key == "msgraph_50_NA", ]$no_show_source, "msgraph")
   expect_false(any(res$meeting_key == "crm_62"))
 })
 
-test_that("mehrere Platzhalter ohne precise_time: CRM-Zeile bleibt netto-neu statt zu verschwinden", {
+test_that("zwei Platzhalter im gleichen Abstand: CRM-Zeile bleibt netto-neu statt zu raten", {
   ms <- ms_platzhalter()
   ms <- rbind(ms, transform(ms[nrow(ms), ], call_event_mapping_id = 51L, event_id = "e51"))
-  res <- assemble_unified_meetings(ms,
-           mk_crm(list(crm_row(63, 42L, "2026-08-10", "teams", "no_show", FALSE, rep = 500L))))
+  res <- assemble_unified_meetings(ms, mk_crm(list(ph_task(63, 42L, "2026-08-10 09:05"))))
   expect_equal(res[res$meeting_key == "crm_63", ]$source, "crm_task")
+  expect_true(all(c("msgraph_50_NA", "msgraph_51_NA") %in% res$meeting_key))
 })
 
-test_that("ein Platzhalter nimmt hoechstens einen CRM-Termin auf", {
+test_that("ein Platzhalter nimmt hoechstens einen CRM-Termin auf, der naechste gewinnt", {
   # Zwei CRM-Termine desselben Reps am selben Tag, verschiedene Leads, aber nur
-  # eine Platzhalter-Zeile. Ohne Buchfuehrung ueberschreiben sie einander und
-  # keiner wird netto-neu -> aus zwei Meetings wird eines.
+  # eine Platzhalter-Zeile: aus zwei Meetings darf nicht eines werden.
   res <- assemble_unified_meetings(ms_platzhalter(),
-           mk_crm(list(
-             crm_row(70, 42L, "2026-08-10", "teams", "no_show", FALSE, rep = 500L),
-             crm_row(71, 43L, "2026-08-10", "teams", "no_show", FALSE, rep = 500L))))
-  expect_equal(res[res$meeting_key == "msgraph_50_NA", ]$no_show_source, "crm_override")
-  expect_equal(res[res$meeting_key == "crm_71", ]$source, "crm_task")   # zweiter bleibt erhalten
+           mk_crm(list(ph_task(70, 42L, "2026-08-10 09:10"),
+                       ph_task(71, 43L, "2026-08-10 09:03"))))
+  expect_equal(res[res$meeting_key == "msgraph_50_43", ]$no_show_source, "crm_override")
+  expect_equal(res[res$meeting_key == "crm_70", ]$source, "crm_task")   # fernerer bleibt erhalten
   expect_equal(sum(res$event_date == as.Date("2026-08-10")), 2L)        # zwei Meetings, zwei Zeilen
+})
+
+test_that("die Reihenfolge der Tasks aendert das Ergebnis nicht", {
+  # P1 09:00, P2 09:20. Task A 09:08 (8 / 12 min), Task B 09:05 (5 / 15 min).
+  # Das naechste Paar ist B-P1, danach bleibt A-P2. Wer A zuerst abarbeitet und
+  # ihm den naechsten Platzhalter gibt, schiebt B auf P2 und vertauscht die Leads.
+  ms <- ms_platzhalter(start = "2026-08-10 09:00")
+  ms <- rbind(ms, transform(ms[nrow(ms), ], call_event_mapping_id = 51L, event_id = "e51",
+                            event_start = as.POSIXct("2026-08-10 09:20", tz = "UTC")))
+  a <- ph_task(72, 42L, "2026-08-10 09:08")
+  b <- ph_task(73, 43L, "2026-08-10 09:05")
+  vor  <- assemble_unified_meetings(ms, mk_crm(list(a, b)))
+  nach <- assemble_unified_meetings(ms, mk_crm(list(b, a)))
+  expect_equal(sortiert(vor), sortiert(nach))
+  expect_true(all(c("msgraph_50_43", "msgraph_51_42") %in% vor$meeting_key))
+  expect_false(any(vor$source == "crm_task"))
+})
+
+test_that("gleicher Abstand zweier Tasks: die kleinere crm_task_id gewinnt, in jeder Reihenfolge", {
+  a <- ph_task(75, 42L, "2026-08-10 09:05")
+  b <- ph_task(74, 43L, "2026-08-10 08:55")
+  vor  <- assemble_unified_meetings(ms_platzhalter(), mk_crm(list(a, b)))
+  nach <- assemble_unified_meetings(ms_platzhalter(), mk_crm(list(b, a)))
+  expect_equal(sortiert(vor), sortiert(nach))
+  expect_true("msgraph_50_43" %in% vor$meeting_key)
+  expect_equal(vor[vor$meeting_key == "crm_75", ]$source, "crm_task")
+})
+
+test_that("ein Task mit Lead x Tag-Treffer verbraucht keinen Platzhalter", {
+  # Task 76 findet sein Meeting ueber den Lead; der Platzhalter bleibt fuer Task 77.
+  ms <- rbind(ms_platzhalter(),
+              transform(mk_msgraph()[1, ], call_event_mapping_id = 52L, event_id = "e52",
+                        lead_id = 44L, event_date = as.Date("2026-08-10"),
+                        event_start = as.POSIXct("2026-08-10 09:00", tz = "UTC")))
+  res <- assemble_unified_meetings(ms, mk_crm(list(ph_task(76, 44L, "2026-08-10 09:00"),
+                                                   ph_task(77, 45L, "2026-08-10 09:01"))))
+  expect_equal(res[res$meeting_key == "msgraph_52_44", ]$no_show_source, "crm_override")
+  expect_equal(res[res$meeting_key == "msgraph_50_45", ]$no_show_source, "crm_override")
+  expect_false(any(res$source == "crm_task"))
+})
+
+test_that("Ersatzregel traegt integer64-IDs aus der DB", {
+  ms <- ms_platzhalter()
+  ms$call_event_mapping_id <- bit64::as.integer64(c(10, 11, 12, 4000000001))
+  ms$contact_id <- bit64::as.integer64(ms$contact_id)
+  cm <- mk_crm(list(ph_task(60, 42L, "2026-08-10 09:10"), ph_task(61, 43L, "2026-08-10 09:12")))
+  cm$crm_task_id <- bit64::as.integer64(c(4000000061, 4000000060))
+  cm$lead_id     <- bit64::as.integer64(c(4000000042, 43))
+  cm$contact_id  <- bit64::as.integer64(cm$contact_id)
+  res <- assemble_unified_meetings(ms, cm)
+  expect_true("msgraph_4000000001_4000000042" %in% res$meeting_key)
+  expect_equal(res[res$meeting_key == "crm_4000000060", ]$source, "crm_task")
 })
 
 test_that("Organisator wird uebernommen und je Herkunft unterscheidbar gehalten", {
@@ -495,26 +577,20 @@ test_that("Netto-neue CRM-Zeile traegt den Grund nur wenn sie ausgeschlossen ist
 })
 
 # --- Domain-Fallback: Leadless meeting ueber eindeutige Domain -----------------
-# Spec docs/specs/2026-10-28-domain-fallback-lead.md. Der Fallback laeuft auf dem
-# Ergebnis von assemble_unified_meetings(), also nach dem CRM-Task-Abgleich.
-mk_leadless <- function() {
-  ms <- mk_msgraph()
-  rbind(ms,
-        transform(ms[1, ], call_event_mapping_id = 40L, event_id = "e40",
-                  lead_id = NA_integer_, event_date = as.Date("2026-08-10")),
-        transform(ms[1, ], call_event_mapping_id = 41L, event_id = "e41",
-                  lead_id = NA_integer_, event_date = as.Date("2026-08-11")))
-}
-ohne_crm <- function() crm_row(0, 1L, "2026-01-01", "teams", "unbekannt", FALSE)[0, ]
-mk_ext <- function(cemid, contact, email) data.frame(
-  call_event_mapping_id = cemid, contact_id = as.character(contact), email = email,
+# Spec docs/specs/2026-10-28-domain-fallback-lead.md, Reihenfolge seit
+# docs/specs/2026-10-29-ersatzregel-nur-rest.md: der Domain-Lead entsteht mit der
+# Lead-Ableitung, also vor dem CRM-Task-Abgleich.
+mk_tn <- function(cemid, contact, email) data.frame(
+  call_event_mapping_id = cemid, contact_id = contact, email = email,
   stringsAsFactors = FALSE)
+keine_maps <- function() data.frame(msgraph_contact_id = numeric(0), crm_lead_id = numeric(0))
 mk_mails <- function() data.frame(
   lead_id           = c(77L, 88L, 89L, 90L, 91L),
   mail_address_name = c(" Anna@Firma-A.de ", "x@firma-b.de", "y@firma-b.de",
                         "kunde@gmail.com", "z@firma-c.de"),
   is_deleted        = c(FALSE, FALSE, FALSE, FALSE, TRUE),
   stringsAsFactors  = FALSE)
+paare <- function(res) paste(res$call_event_mapping_id, res$lead_id, res$quelle)
 
 test_that("Domain-Leads: nur Domains mit genau einem Lead, ohne Freemail und Geloeschte", {
   dl <- domain_leads_aus_crm_mails(mk_mails())
@@ -522,76 +598,62 @@ test_that("Domain-Leads: nur Domains mit genau einem Lead, ohne Freemail und Gel
   expect_equal(as.character(dl$lead_id), "77")
 })
 
-test_that("Platzhalter ohne Mapping bekommt den Lead seiner eindeutigen Domain", {
-  rows <- assemble_unified_meetings(mk_leadless(), ohne_crm())
-  res <- apply_domain_fallback(rows, mk_ext(40L, 1, "max@FIRMA-A.de"), character(0),
-                               domain_leads_aus_crm_mails(mk_mails()))
-  expect_false(any(res$meeting_key == "msgraph_40_NA"))
-  r <- res[res$meeting_key == "msgraph_40_77", ]
-  expect_equal(nrow(r), 1)
-  expect_equal(r$lead_id, "77")
-  expect_equal(nrow(res), nrow(rows))
+test_that("Meeting ohne Mapping bekommt den Lead seiner eindeutigen Domain", {
+  res <- meeting_leads_ableiten(mk_tn(40, 1, "max@FIRMA-A.de"), keine_maps(), mk_mails())
+  expect_equal(paare(res), "40 77 domain")
 })
 
-test_that("Freemail und Domain mit mehreren Leads loesen nichts aus", {
-  rows <- assemble_unified_meetings(mk_leadless(), ohne_crm())
-  ext <- rbind(mk_ext(40L, 1, "max@gmail.com"), mk_ext(41L, 2, "q@firma-b.de"))
-  res <- apply_domain_fallback(rows, ext, character(0), domain_leads_aus_crm_mails(mk_mails()))
-  expect_equal(res, rows)
+test_that("Freemail, Domain mit mehreren Leads und interne Teilnehmer loesen nichts aus", {
+  tn <- rbind(mk_tn(40, 1, "max@gmail.com"), mk_tn(41, 2, "q@firma-b.de"),
+              mk_tn(42, 3, "chef@studyflix.de"))
+  res <- meeting_leads_ableiten(tn, keine_maps(), mk_mails())
+  expect_equal(nrow(res), 0)
 })
 
 test_that("ein Mapping eines Teilnehmers hat Vorrang, auch ein nicht-primaeres", {
-  rows <- assemble_unified_meetings(mk_leadless(), ohne_crm())
-  ext <- rbind(mk_ext(40L, 1, "max@firma-a.de"), mk_ext(40L, 2, "bekannt@irgendwo.de"))
-  res <- apply_domain_fallback(rows, ext, mapped_contact_ids = "2",
-                               domain_leads_aus_crm_mails(mk_mails()))
-  expect_true(any(res$meeting_key == "msgraph_40_NA"))
-  expect_false(any(res$meeting_key == "msgraph_40_77"))
+  tn <- rbind(mk_tn(40, 1, "max@firma-a.de"), mk_tn(40, 2, "bekannt@irgendwo.de"))
+  maps <- data.frame(msgraph_contact_id = 2, crm_lead_id = 500)
+  res <- meeting_leads_ableiten(tn, maps, mk_mails())
+  expect_equal(paare(res), "40 500 mapping")
 })
 
-test_that("ein per CRM-Task zugeordneter Platzhalter bleibt unberuehrt, kein CRM-Task wird netto-neu", {
-  cm <- mk_crm(list(crm_row(60, 555L, "2026-08-10", "teams", "show_up", FALSE)))
-  rows <- assemble_unified_meetings(mk_leadless(), cm)
-  expect_equal(rows[rows$meeting_key == "msgraph_40_NA", ]$no_show_source, "crm_override")
-  res <- apply_domain_fallback(rows, mk_ext(40L, 1, "max@firma-a.de"), character(0),
-                               domain_leads_aus_crm_mails(mk_mails()))
-  expect_equal(res, rows)
-  expect_equal(sum(res$source == "crm_task"), sum(rows$source == "crm_task"))
-})
-
-test_that("zwei eindeutige Domains in einem Meeting ergeben eine Zeile je Lead", {
+test_that("zwei eindeutige Domains in einem Meeting ergeben einen Lead je Domain", {
   mails <- rbind(mk_mails(), data.frame(lead_id = 95L, mail_address_name = "k@firma-d.de",
                                         is_deleted = FALSE, stringsAsFactors = FALSE))
-  rows <- assemble_unified_meetings(mk_leadless(), ohne_crm())
-  ext <- rbind(mk_ext(40L, 1, "max@firma-a.de"), mk_ext(40L, 3, "eva@firma-d.de"))
-  res <- apply_domain_fallback(rows, ext, character(0), domain_leads_aus_crm_mails(mails))
-  r <- res[grepl("^msgraph_40_", res$meeting_key), ]
-  expect_setequal(r$meeting_key, c("msgraph_40_77", "msgraph_40_95"))
-  expect_true(all(r$event_id == "e40"))
-  expect_equal(nrow(res), nrow(rows) + 1)
+  tn <- rbind(mk_tn(40, 1, "max@firma-a.de"), mk_tn(40, 3, "eva@firma-d.de"))
+  res <- meeting_leads_ableiten(tn, keine_maps(), mails)
+  expect_setequal(paare(res), c("40 77 domain", "40 95 domain"))
 })
 
-test_that("Zeilen mit Lead bleiben unveraendert, auch wenn die Domain passt", {
-  rows <- assemble_unified_meetings(mk_leadless(), ohne_crm())
-  res <- apply_domain_fallback(rows, mk_ext(10L, 1, "max@firma-a.de"), character(0),
-                               domain_leads_aus_crm_mails(mk_mails()))
-  expect_equal(res, rows)
+test_that("Domain-Lead vor dem Abgleich: der CRM-Task findet das Meeting ueber Lead x Tag", {
+  # Der Task des Domain-Leads matcht direkt, ohne Ersatzregel und auch ueber
+  # 15 Minuten Abstand hinweg. Vorher lief der Domain-Fallback erst nach dem
+  # Abgleich, und der Task war netto-neu.
+  ms <- transform(mk_msgraph()[1, ], call_event_mapping_id = 40L, event_id = "e40",
+                  event_date = as.Date("2026-08-10"),
+                  event_start = as.POSIXct("2026-08-10 09:00", tz = "UTC"))
+  ms$lead_id <- NULL
+  leads <- meeting_leads_ableiten(mk_tn(40L, 1, "max@firma-a.de"), keine_maps(), mk_mails())
+  ms <- merge(ms, leads[, c("call_event_mapping_id", "lead_id")],
+              by = "call_event_mapping_id", all.x = TRUE)
+  cm <- mk_crm(list(crm_row(60, 77L, "2026-08-10", "teams", "show_up", FALSE,
+                            ptime = "2026-08-10 11:00")))
+  res <- assemble_unified_meetings(ms, cm)
+  expect_equal(res$meeting_key, "msgraph_40_77")
+  expect_equal(res$no_show_source, "crm_override")
 })
 
-test_that("Domain-Fallback traegt integer64-IDs aus der DB und Teilnehmer ohne Mail", {
-  ms <- mk_leadless()
-  ms$call_event_mapping_id <- bit64::as.integer64(c(10, 11, 12, 100000, 4000000001))
-  ms$contact_id <- bit64::as.integer64(ms$contact_id)
-  rows <- assemble_unified_meetings(ms, ohne_crm())
-  expect_true("msgraph_100000_NA" %in% rows$meeting_key)   # keine 1e+05-Darstellung
-  ext <- data.frame(call_event_mapping_id = bit64::as.integer64(c(100000, 4000000001)),
-                    contact_id = bit64::as.integer64(c(7, 8)),
-                    email = c("max@firma-a.de", NA), stringsAsFactors = FALSE)
+test_that("Lead-Ableitung mit Domain traegt integer64-IDs aus der DB und Teilnehmer ohne Mail", {
+  tn <- data.frame(call_event_mapping_id = bit64::as.integer64(c(100000, 4000000001, 7)),
+                   contact_id = bit64::as.integer64(c(7, 8, 9)),
+                   email = c("max@firma-a.de", NA, "bekannt@irgendwo.de"),
+                   stringsAsFactors = FALSE)
+  maps  <- data.frame(msgraph_contact_id = bit64::as.integer64(9),
+                      crm_lead_id = bit64::as.integer64(4000000042))
   mails <- transform(mk_mails(), lead_id = bit64::as.integer64(lead_id))
-  res <- apply_domain_fallback(rows, ext, as.character(bit64::as.integer64(9)),
-                               domain_leads_aus_crm_mails(mails))
-  expect_true("msgraph_100000_77" %in% res$meeting_key)
-  expect_true("msgraph_4000000001_NA" %in% res$meeting_key)
+  res <- meeting_leads_ableiten(tn, maps, mails)
+  expect_setequal(paare(res), c("100000 77 domain", "7 4000000042 mapping"))
+  expect_type(res$lead_id, "character")
 })
 
 # ---- Leads je Meeting aus externen Teilnehmern (alle Mail-Mappings) ----------
