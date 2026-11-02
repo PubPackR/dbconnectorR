@@ -197,9 +197,14 @@ assemble_meeting_signals <- function(msgraph_meetings, event_signals, tasks, map
     m$lead_source[z] <- "ersatzregel"
   }
 
-  # Tasks je Zeile: gleiches Event, gleicher Lead.
+  # Tasks je Zeile: gleiches Event, gleicher Lead. Ein Task, dessen Zeile es in
+  # diesem Lauf nicht gibt (Mapping und Meeting-Zeilen werden getrennt geladen),
+  # geht nicht verloren, sondern wird unten eine CRM-Zeile.
   getroffen <- t[!is.na(t$msgraph_event_id), , drop = FALSE]
   zeile_key <- paste(m$event_id, m$lead_id)
+  ohne_zeile <- !(paste(getroffen$msgraph_event_id, getroffen$task_lead) %in% zeile_key)
+  verwaist  <- getroffen[ohne_zeile, , drop = FALSE]
+  getroffen <- getroffen[!ohne_zeile, , drop = FALSE]
   task_key  <- paste(getroffen$msgraph_event_id, getroffen$task_lead)
   getroffen <- getroffen[order(task_key, -getroffen$rang,
                                as.numeric(getroffen$crm_task_id)), , drop = FALSE]
@@ -246,8 +251,13 @@ assemble_meeting_signals <- function(msgraph_meetings, event_signals, tasks, map
     online_meeting_lookup    = es$online_meeting_lookup,
     stringsAsFactors         = FALSE)
 
-  # CRM-Zeilen: jeder Task ohne Event, auch mehrdeutige (Q3).
-  c0 <- t[is.na(t$msgraph_event_id), , drop = FALSE]
+  # CRM-Zeilen: jeder Task ohne Event, auch mehrdeutige (Q3), und Tasks, deren
+  # Meeting-Zeile in diesem Lauf fehlt.
+  if (nrow(verwaist) > 0) {
+    warning(nrow(verwaist), " Tasks zeigen auf eine Meeting-Zeile, die es nicht gibt; ",
+            "sie werden als CRM-Zeile geschrieben.", call. = FALSE)
+  }
+  c0 <- rbind(t[is.na(t$msgraph_event_id), , drop = FALSE], verwaist)
   crm_rows <- data.frame(
     meeting_key              = paste0("crm_", c0$crm_task_id, recycle0 = TRUE),
     msgraph_event_id         = rep(NA_character_, nrow(c0)),
@@ -302,6 +312,10 @@ update_crm_lead_task_msgraph_event <- function(con) {
   # delete_missing = TRUE leert die Tabelle bei einem leeren Ergebnis. Lieber
   # laut scheitern (Hausregel fuer do/main*.R).
   if (nrow(rows) == 0) stop("update_crm_lead_task_msgraph_event: keine CRM-VC-Tasks. Abbruch.")
+  # Grain: eine Zeile je Task (raw.crm_lead_tasks.id).
+  if (anyDuplicated(rows$crm_lead_task_id)) {
+    stop("update_crm_lead_task_msgraph_event: crm_lead_task_id doppelt. Bug in der Pipeline.")
+  }
   message(paste0("  ", nrow(rows), " Tasks, davon ", sum(!is.na(rows$msgraph_event_id)),
                  " mit Event -> mapping.crm_lead_task_msgraph_event"))
 
@@ -371,6 +385,14 @@ update_sales_meeting_signals <- function(con, tenant_id = NULL, now_utc = Sys.ti
   rows <- assemble_meeting_signals(msgraph_meetings, event_signals, tasks, mapping, outcomes)
 
   if (nrow(rows) == 0) stop("update_sales_meeting_signals: keine Termine. Abbruch.")
+  # Grain: eine Zeile je (Meeting x Lead) bzw. je CRM-Task ohne Meeting. Eine
+  # Dublette heisst Fan-out in der Lead-Expansion oder dieselbe crm_task_id an
+  # zwei Leads; beides soll laut scheitern statt im Upsert zu verschwinden.
+  dubletten <- unique(rows$meeting_key[duplicated(rows$meeting_key)])
+  if (length(dubletten) > 0) {
+    stop("update_sales_meeting_signals: ", length(dubletten), " meeting_keys doppelt, z.B. ",
+         paste(utils::head(dubletten, 5), collapse = ", "), ". Abbruch.")
+  }
   message(paste0("  ", nrow(rows), " Zeilen, davon ", sum(rows$crm_status_conflict),
                  " mit widerspruechlichem CRM-Status -> processed.sales_meeting_signals"))
 

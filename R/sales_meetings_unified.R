@@ -363,14 +363,10 @@ ERSATZREGEL_MAX_MINUTEN <- 15
 # ---- start ---- #
 ersatzregel_paare <- function(tasks, ohne_lead, event_date, rep_kontakt, start) {
   zeile <- rep(NA_integer_, nrow(tasks))
-  max_sek <- ERSATZREGEL_MAX_MINUTEN * 60
   kand <- list()
   for (t in seq_len(nrow(tasks))) {
-    if (is.na(tasks$precise_time[t])) next
-    p <- which(ohne_lead & event_date == tasks$event_date[t] &
-                 rep_kontakt == as.character(tasks$contact_id[t]) & !is.na(start))
-    d <- abs(as.numeric(start[p]) - as.numeric(tasks$precise_time[t]))
-    if (any(d <= max_sek)) kand[[length(kand)+1]] <- data.frame(t = t, j = p[d <= max_sek], d = d[d <= max_sek])
+    k <- ersatzregel_kandidaten(tasks[t, , drop = FALSE], ohne_lead, event_date, rep_kontakt, start)
+    if (nrow(k) > 0) kand[[length(kand)+1]] <- data.frame(t = t, j = k$j, d = k$d)
   }
   if (length(kand) == 0) return(zeile)
   kand <- do.call(rbind, kand)
@@ -390,6 +386,29 @@ ersatzregel_paare <- function(tasks, ohne_lead, event_date, rep_kontakt, start) 
     zeile[t] <- j
   }
   zeile
+}
+
+#' Kandidaten der Ersatzregel fuer einen Task
+#'
+#' Rein (kein DB-Zugriff). Zeilen ohne Lead desselben Reps am selben Tag, deren
+#' Beginn hoechstens [ERSATZREGEL_MAX_MINUTEN] von `precise_time` abweicht.
+#' Gemeinsame Bedingung fuer [ersatzregel_paare()] und den Beleg
+#' `candidate_count` in [match_crm_tasks()].
+#'
+#' @param task data.frame mit genau einer Zeile: event_date, precise_time,
+#'   contact_id.
+#' @inheritParams ersatzregel_paare
+#' @return data.frame mit `j` (Meeting-Zeile) und `d` (Abstand in Sekunden);
+#'   leer ohne `precise_time`.
+#' @keywords internal
+# ---- start ---- #
+ersatzregel_kandidaten <- function(task, ohne_lead, event_date, rep_kontakt, start) {
+  if (is.na(task$precise_time)) return(data.frame(j = integer(0), d = numeric(0)))
+  p <- which(ohne_lead & event_date == task$event_date &
+               rep_kontakt == as.character(task$contact_id) & !is.na(start))
+  d <- abs(as.numeric(start[p]) - as.numeric(task$precise_time))
+  im_fenster <- d <= ERSATZREGEL_MAX_MINUTEN * 60
+  data.frame(j = p[im_fenster], d = d[im_fenster])
 }
 
 #' CRM-VC-Tasks den Meeting-Zeilen zuordnen
@@ -475,11 +494,8 @@ match_crm_tasks <- function(crm_meetings, lead_id, event_date, rep_kontakt, star
     # Kandidaten der Ersatzregel: Zeilen ohne Lead, gleicher Rep, gleicher Tag,
     # im Zeitfenster. Auch wenn ein anderer Task die Zeile bekam, bleiben sie
     # als Beleg stehen.
-    p <- which(ohne_lead & event_date == crm_meetings$event_date[i] &
-                 rep_kontakt == as.character(crm_meetings$contact_id[i]) & !is.na(start))
-    d <- abs(as.numeric(start[p]) - as.numeric(crm_meetings$precise_time[i]))
-    n_cand[i] <- if (is.na(crm_meetings$precise_time[i])) 0L else
-      sum(d <= ERSATZREGEL_MAX_MINUTEN * 60)
+    n_cand[i] <- nrow(ersatzregel_kandidaten(crm_meetings[i, , drop = FALSE],
+                                             ohne_lead, event_date, rep_kontakt, start))
     match_rule[i] <- if (is.na(row[i])) "netto_neu" else "ersatzregel"
   }
 

@@ -204,3 +204,16 @@ test_that("meeting_keys stimmen mit assemble_unified_meetings ueberein, plus meh
   expect_setequal(s$meeting_key, c(uni$meeting_key, "crm_903"))
   expect_equal(nrow(s), length(unique(s$meeting_key)))
 })
+
+test_that("Task, dessen Meeting-Zeile fehlt, wird CRM-Zeile statt zu verschwinden", {
+  tasks <- mk_task(1, 901, 10L, "2026-07-01")
+  map <- data.frame(crm_lead_task_id = "1", msgraph_event_id = "999", match_rule = "lead_tag",
+                    stringsAsFactors = FALSE)
+  expect_warning(
+    s <- assemble_meeting_signals(mk_meetings(), mk_event_signals(), tasks, map,
+                                  crm_task_outcomes(1, mk_comment(1, 1, "hat stattgefunden"))),
+    "Meeting-Zeile, die es nicht gibt")
+  r <- s[s$meeting_key == "crm_901", ]
+  expect_equal(r$crm_status, "show_up")
+  expect_false(r$has_msgraph_event)
+})
