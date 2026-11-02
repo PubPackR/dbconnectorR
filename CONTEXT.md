@@ -108,3 +108,30 @@ A meeting for which Graph could never have produced an attendance report: it
 provably has no Teams link, or its link belongs to the previous tenant. Its
 "no call found" is an observation limit, not a no-show.
 _Avoid_: Unknown outcome (that is the CRM status), unobservable meeting.
+
+**Task mapping**:
+The stored decision which MSGraph meeting a CRM VC-task belongs to, together
+with the evidence for it (which match rule applied, how many candidates, how far
+apart in time). Every CRM VC-task has one, also when no meeting was found — then
+the evidence says why. Carries nothing about the meeting's outcome.
+_Avoid_: Classification, meeting status.
+
+**Signal**:
+What one source system says about a meeting, kept as the source says it: the
+CRM outcome note, the calendar state (active, moved, cancelled), the Teams
+attendance (external call, internal call, no call, unmeasurable). Signals of
+different systems may contradict each other; that is information, not an error.
+_Avoid_: Outcome, evaluation, no-show (those are judgements on signals).
+
+**Evaluation**:
+A judgement derived from the signals of a meeting: no-show, excluded, and why.
+Always downstream of the signals, never stored next to them.
+_Avoid_: Signal, status.
+
+**CRM outcome precedence**:
+How one CRM outcome is read from several notes. Within one task the latest note
+with a recognised outcome counts; a note without one is no signal. Across
+several tasks on the same meeting a written show-up beats no-show, no-show beats
+cancelled, and any recognised outcome beats none. Where tasks or notes disagree,
+the meeting is marked as conflicting.
+_Avoid_: Strongest status (the older reading, where cancelled won).
