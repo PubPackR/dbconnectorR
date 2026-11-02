@@ -242,51 +242,17 @@ assemble_unified_meetings <- function(msgraph_meetings, crm_meetings) {
       stringsAsFactors = FALSE)
   }
 
-  # Erster Durchgang: Abgleich Lead x Tag. Tasks ohne Kandidat sammelt `offen`
-  # fuer die Ersatzregel. Erst wenn alle Tasks durch sind, steht fest, welche
-  # Tasks um welchen Platzhalter konkurrieren; vorher gewann, wer zuerst geladen
-  # wurde.
-  # treffer[i] = Meeting-Zeile, die Task i ueberschreibt (NA = keine).
-  new_rows <- list()
-  treffer  <- rep(NA_integer_, nrow(crm_meetings))
-  offen    <- integer(0)
-  for (i in seq_len(nrow(crm_meetings))) {
-    cm <- crm_meetings[i, ]
-    cm_lead <- as.character(cm$lead_id)
-
-    # Externes Tool (kein MSGraph-Pendant) und Task ohne Lead -> immer netto-neu.
-    if (isTRUE(cm$is_external_tool)) { new_rows[[length(new_rows)+1]] <- netto_neu(cm); next }
-    if (is.na(cm$lead_id))          { new_rows[[length(new_rows)+1]] <- netto_neu(cm); next }
-
-    # Kandidaten gleicher (lead_id, event_date).
-    cand <- which(!is.na(base$lead_id) & base$lead_id == cm_lead &
-                    base$event_date == cm$event_date)
-    if (length(cand) == 0) { offen <- c(offen, i); next }
-    if (length(cand) > 1) {
-      # Tiebreak 1: gleicher Rep-Kontakt.
-      same_rep <- cand[base_rep[cand] == as.character(cm$contact_id)]
-      if (length(same_rep) == 1) {
-        cand <- same_rep
-      } else if (length(same_rep) > 1 && !is.na(cm$precise_time)) {
-        # Tiebreak 2: naechste event_start zur precise_time (Sekunden-Distanz).
-        d <- abs(as.numeric(base_start[same_rep]) - as.numeric(cm$precise_time))
-        if (sum(d == min(d, na.rm = TRUE), na.rm = TRUE) == 1) {
-          cand <- same_rep[which.min(d)]
-        } else next  # echte Rest-Mehrdeutigkeit -> verwerfen
-      } else next    # kein eindeutiger Rep -> verwerfen
-    }
-    treffer[i] <- cand[1]
-  }
-
-  # Zweiter Durchgang: Ersatzregel fuer die Tasks ohne Kandidat. Ein
-  # MSGraph-Meeting ohne ableitbaren Lead traegt lead_id = NA und kann per
-  # (Lead x Tag) nie gefunden werden; ohne Ersatzregel zaehlte der Task ein
-  # zweites Mal. Nur bis ERSATZREGEL_MAX_MINUTEN Abstand: gemessen 29.10.2026
-  # widersprechen bis 15 Minuten 36 von 928 Paaren dem Task-Lead, darueber 377
-  # von 409 (Spec 2026-10-29-ersatzregel-nur-rest).
-  treffer[offen] <- ersatzregel_paare(crm_meetings[offen, , drop = FALSE],
-                                      is.na(base$lead_id), base$event_date, base_rep, base_start)
-  for (i in offen[is.na(treffer[offen])]) new_rows[[length(new_rows)+1]] <- netto_neu(crm_meetings[i, ])
+  # Abgleich Task -> Meeting-Zeile (Lead x Tag, dann Ersatzregel), siehe
+  # match_crm_tasks(). treffer[i] = Meeting-Zeile, die Task i ueberschreibt
+  # (NA = keine). Mehrdeutige Tasks werden hier verworfen: weder Override noch
+  # netto-neu. Die Signaltabelle fuehrt sie dagegen als eigene Zeile (ADR 0003).
+  abgleich <- match_crm_tasks(crm_meetings, base$lead_id, base$event_date, base_rep, base_start)
+  treffer  <- abgleich$row
+  # Reihenfolge wie vor der Auslagerung: erst die sofort netto-neuen Tasks,
+  # dann die, fuer die auch die Ersatzregel nichts fand.
+  netto_idx <- c(which(abgleich$match_rule %in% c("externes_tool", "ohne_lead")),
+                 which(abgleich$match_rule == "netto_neu"))
+  new_rows <- lapply(netto_idx, function(i) netto_neu(crm_meetings[i, ]))
 
   # In Task-Reihenfolge, damit mehrere Tasks auf derselben Zeile wie bisher
   # nacheinander wirken (siehe Storno-Regel unten).
@@ -397,14 +363,10 @@ ERSATZREGEL_MAX_MINUTEN <- 15
 # ---- start ---- #
 ersatzregel_paare <- function(tasks, ohne_lead, event_date, rep_kontakt, start) {
   zeile <- rep(NA_integer_, nrow(tasks))
-  max_sek <- ERSATZREGEL_MAX_MINUTEN * 60
   kand <- list()
   for (t in seq_len(nrow(tasks))) {
-    if (is.na(tasks$precise_time[t])) next
-    p <- which(ohne_lead & event_date == tasks$event_date[t] &
-                 rep_kontakt == as.character(tasks$contact_id[t]) & !is.na(start))
-    d <- abs(as.numeric(start[p]) - as.numeric(tasks$precise_time[t]))
-    if (any(d <= max_sek)) kand[[length(kand)+1]] <- data.frame(t = t, j = p[d <= max_sek], d = d[d <= max_sek])
+    k <- ersatzregel_kandidaten(tasks[t, , drop = FALSE], ohne_lead, event_date, rep_kontakt, start)
+    if (nrow(k) > 0) kand[[length(kand)+1]] <- data.frame(t = t, j = k$j, d = k$d)
   }
   if (length(kand) == 0) return(zeile)
   kand <- do.call(rbind, kand)
@@ -424,6 +386,126 @@ ersatzregel_paare <- function(tasks, ohne_lead, event_date, rep_kontakt, start) 
     zeile[t] <- j
   }
   zeile
+}
+
+#' Kandidaten der Ersatzregel fuer einen Task
+#'
+#' Rein (kein DB-Zugriff). Zeilen ohne Lead desselben Reps am selben Tag, deren
+#' Beginn hoechstens [ERSATZREGEL_MAX_MINUTEN] von `precise_time` abweicht.
+#' Gemeinsame Bedingung fuer [ersatzregel_paare()] und den Beleg
+#' `candidate_count` in [match_crm_tasks()].
+#'
+#' @param task data.frame mit genau einer Zeile: event_date, precise_time,
+#'   contact_id.
+#' @inheritParams ersatzregel_paare
+#' @return data.frame mit `j` (Meeting-Zeile) und `d` (Abstand in Sekunden);
+#'   leer ohne `precise_time`.
+#' @keywords internal
+# ---- start ---- #
+ersatzregel_kandidaten <- function(task, ohne_lead, event_date, rep_kontakt, start) {
+  if (is.na(task$precise_time)) return(data.frame(j = integer(0), d = numeric(0)))
+  p <- which(ohne_lead & event_date == task$event_date &
+               rep_kontakt == as.character(task$contact_id) & !is.na(start))
+  d <- abs(as.numeric(start[p]) - as.numeric(task$precise_time))
+  im_fenster <- d <= ERSATZREGEL_MAX_MINUTEN * 60
+  data.frame(j = p[im_fenster], d = d[im_fenster])
+}
+
+#' CRM-VC-Tasks den Meeting-Zeilen zuordnen
+#'
+#' Rein (kein DB-Zugriff). Der Abgleich aus [assemble_unified_meetings()], als
+#' eigene Funktion, damit Termintabelle und Task-Mapping
+#' ([assemble_task_mapping()]) dieselbe Zuordnung sehen. Erste greifende Regel
+#' gewinnt:
+#'
+#' - `externes_tool`, `ohne_lead`: kein Abgleich.
+#' - `lead_tag`: genau eine Zeile mit gleichem Lead und gleichem Tag.
+#' - `lead_tag_rep`: mehrere, genau eine des gleichen Reps.
+#' - `lead_tag_naechste_zeit`: mehrere des gleichen Reps, eindeutig naechster
+#'   Beginn zu `precise_time`.
+#' - `mehrdeutig`: Rest-Mehrdeutigkeit, kein Treffer.
+#' - `ersatzregel`: kein Kandidat, Zeile ohne Lead per [ersatzregel_paare()].
+#' - `netto_neu`: nichts gefunden.
+#'
+#' Die Ersatzregel laeuft erst, wenn alle Tasks den ersten Abgleich hinter sich
+#' haben: erst dann steht fest, welche Tasks um welche Zeile ohne Lead
+#' konkurrieren.
+#'
+#' @param crm_meetings data.frame mit crm_task_id, lead_id, event_date,
+#'   precise_time, contact_id (Rep), is_external_tool.
+#' @param lead_id,event_date,rep_kontakt,start Lead (NA = ohne Lead), Datum,
+#'   Rep-Kontakt und Beginn je Meeting-Zeile, parallel zueinander.
+#' @return data.frame je Zeile in `crm_meetings`: `row` (zugeordnete
+#'   Meeting-Zeile, NA = keine), `match_rule`, `candidate_count` (Kandidaten der
+#'   entscheidenden Regel, NA bei `externes_tool`/`ohne_lead`) und
+#'   `start_diff_minutes` (Abstand Beginn zu `precise_time`, nur bei Treffer).
+#' @keywords internal
+# ---- start ---- #
+match_crm_tasks <- function(crm_meetings, lead_id, event_date, rep_kontakt, start) {
+  n <- nrow(crm_meetings)
+  lead_id     <- as.character(lead_id)
+  rep_kontakt <- as.character(rep_kontakt)
+  row        <- rep(NA_integer_, n)
+  match_rule <- rep(NA_character_, n)
+  n_cand     <- rep(NA_integer_, n)
+  offen      <- integer(0)
+  for (i in seq_len(n)) {
+    cm <- crm_meetings[i, ]
+
+    # Externes Tool (kein MSGraph-Pendant) und Task ohne Lead -> immer netto-neu.
+    if (isTRUE(cm$is_external_tool)) { match_rule[i] <- "externes_tool"; next }
+    if (is.na(cm$lead_id))          { match_rule[i] <- "ohne_lead"; next }
+
+    # Kandidaten gleicher (lead_id, event_date).
+    cand <- which(!is.na(lead_id) & lead_id == as.character(cm$lead_id) &
+                    event_date == cm$event_date)
+    n_cand[i] <- length(cand)
+    if (length(cand) == 0) { offen <- c(offen, i); next }
+    regel <- "lead_tag"
+    if (length(cand) > 1) {
+      # Tiebreak 1: gleicher Rep-Kontakt.
+      same_rep <- cand[rep_kontakt[cand] == as.character(cm$contact_id)]
+      if (length(same_rep) == 1) {
+        cand <- same_rep
+        regel <- "lead_tag_rep"
+      } else if (length(same_rep) > 1 && !is.na(cm$precise_time)) {
+        # Tiebreak 2: naechste event_start zur precise_time (Sekunden-Distanz).
+        d <- abs(as.numeric(start[same_rep]) - as.numeric(cm$precise_time))
+        if (sum(d == min(d, na.rm = TRUE), na.rm = TRUE) == 1) {
+          cand <- same_rep[which.min(d)]
+          regel <- "lead_tag_naechste_zeit"
+        } else { match_rule[i] <- "mehrdeutig"; next }  # echte Rest-Mehrdeutigkeit
+      } else { match_rule[i] <- "mehrdeutig"; next }    # kein eindeutiger Rep
+    }
+    row[i] <- cand[1]
+    match_rule[i] <- regel
+  }
+
+  # Zweiter Durchgang: Ersatzregel fuer die Tasks ohne Kandidat. Ein
+  # MSGraph-Meeting ohne ableitbaren Lead traegt lead_id = NA und kann per
+  # (Lead x Tag) nie gefunden werden; ohne Ersatzregel zaehlte der Task ein
+  # zweites Mal. Nur bis ERSATZREGEL_MAX_MINUTEN Abstand: gemessen 29.10.2026
+  # widersprechen bis 15 Minuten 36 von 928 Paaren dem Task-Lead, darueber 377
+  # von 409 (Spec 2026-10-29-ersatzregel-nur-rest).
+  ohne_lead <- is.na(lead_id)
+  row[offen] <- ersatzregel_paare(crm_meetings[offen, , drop = FALSE],
+                                  ohne_lead, event_date, rep_kontakt, start)
+  for (i in offen) {
+    # Kandidaten der Ersatzregel: Zeilen ohne Lead, gleicher Rep, gleicher Tag,
+    # im Zeitfenster. Auch wenn ein anderer Task die Zeile bekam, bleiben sie
+    # als Beleg stehen.
+    n_cand[i] <- nrow(ersatzregel_kandidaten(crm_meetings[i, , drop = FALSE],
+                                             ohne_lead, event_date, rep_kontakt, start))
+    match_rule[i] <- if (is.na(row[i])) "netto_neu" else "ersatzregel"
+  }
+
+  diff_min <- rep(NA_real_, n)
+  hit <- !is.na(row)
+  diff_min[hit] <- abs(as.numeric(start[row[hit]]) -
+                         as.numeric(crm_meetings$precise_time[hit])) / 60
+
+  data.frame(row = row, match_rule = match_rule, candidate_count = n_cand,
+             start_diff_minutes = diff_min, stringsAsFactors = FALSE)
 }
 
 #' Eindeutige Domain-Leads aus den CRM-Mailadressen
@@ -539,17 +621,24 @@ meeting_leads_aus_teilnehmern <- function(participants, mappings) {
     stringsAsFactors      = FALSE))
 }
 
-#' Rebuild processed.sales_meetings_unified (voll rueckwirkend)
+#' MSGraph-Meetings je (Meeting x externer Lead) laden
 #'
-#' Laeuft nach update_crm_task_meeting_classification. MSGraph-Meetings (extern-only
-#' Lead-Ableitung, per (Meeting x Lead) expandiert) + frisch aus Rohdaten
-#' abgeleitete CRM-VC-Termine werden via assemble_unified_meetings() vereinheitlicht
-#' und komplett neu geschrieben.
+#' Eine Zeile je verantwortlicher Klassifikationszeile (`source = 'msgraph'`),
+#' mit Organisator, nur Meetings mit mindestens einem externen Teilnehmer, per
+#' [meeting_leads_ableiten()] je Lead expandiert. Meetings ohne ableitbaren Lead
+#' behalten eine Zeile mit `lead_id = NA`. Gemeinsame Eingabe fuer
+#' [update_sales_meetings_unified()], [update_crm_lead_task_msgraph_event()] und
+#' [update_sales_meeting_signals()].
+#'
 #' @param con Pool/DBI-Connection.
-#' @return invisible(Anzahl geschriebener Zeilen).
-#' @export
-update_sales_meetings_unified <- function(con) {
-  message("update_sales_meetings_unified: lade MSGraph-Meetings ...")
+#' @return data.frame mit den Spalten der Klassifikation, event_id (character),
+#'   event_date, event_start, join_url, join_url_checked_at,
+#'   organizer_contact_id, lead_id und lead_source (`"mapping"`, `"domain"`
+#'   oder NA).
+#' @keywords internal
+# ---- start ---- #
+load_unified_msgraph_meetings <- function(con) {
+  message("  lade MSGraph-Meetings ...")
   msgraph_meetings <- dplyr::tbl(con, I("processed.msgraph_extern_event_classification")) %>%
     dplyr::filter(source == "msgraph", is_responsible == TRUE) %>%
     dplyr::select(call_event_mapping_id, contact_id, is_no_show, original_created_at,
@@ -616,18 +705,32 @@ update_sales_meetings_unified <- function(con) {
   # all.x = TRUE -> Meetings mit externem Teilnehmer aber ohne ableitbaren Lead
   # behalten EINE Zeile mit lead_id = NA (Platzhalter).
   msgraph_meetings <- msgraph_meetings[msgraph_meetings$call_event_mapping_id %in% has_ext, , drop = FALSE]
-  msgraph_meetings <- merge(msgraph_meetings, meeting_lead[, c("call_event_mapping_id", "lead_id")],
-                            by = "call_event_mapping_id", all.x = TRUE)
+  meeting_lead$lead_source <- meeting_lead$quelle
+  merge(msgraph_meetings, meeting_lead[, c("call_event_mapping_id", "lead_id", "lead_source")],
+        by = "call_event_mapping_id", all.x = TRUE)
+}
 
+#' CRM-VC-Termine aus den Rohdaten laden
+#'
+#' Nicht geloeschte Tasks, die [is_crm_vc_meeting()] als VC-Termin erkennt, mit
+#' Tool, Termin-Typ, Datum (Europe/Berlin) und Rep-Kontakt. Tasks ohne
+#' aufloesbaren Rep fallen weg. Ohne Status: den liest jeder Aufrufer nach
+#' eigener Regel aus [load_crm_task_comments()]. Gemeinsame Eingabe fuer
+#' [update_sales_meetings_unified()], [update_crm_lead_task_msgraph_event()] und
+#' [update_sales_meeting_signals()].
+#'
+#' @param con Pool/DBI-Connection.
+#' @return data.frame mit id (Surrogat), crm_task_id, lead_id, precise_time
+#'   (UTC), task_created_at, task_name, meeting_tool, is_external_tool,
+#'   meeting_type, event_date und contact_id.
+#' @keywords internal
+# ---- start ---- #
+load_crm_vc_tasks <- function(con) {
   message("  leite CRM-VC-Termine aus Rohdaten ab ...")
   tasks <- dplyr::tbl(con, I("raw.crm_lead_tasks")) %>%
     dplyr::filter(is_deleted == FALSE) %>%
     dplyr::select(id, crm_task_id, lead_id, user_id, assigned_to_user_id,
                   precise_time, task_created_at, task_name, task_badge) %>%
-    dplyr::collect()
-  comments <- dplyr::tbl(con, I("raw.crm_lead_task_comments")) %>%
-    dplyr::filter(is_deleted == FALSE) %>%
-    dplyr::select(task_id, comment_name) %>%
     dplyr::collect()
   ruc <- resolve_crm_user_contact(con)
 
@@ -636,6 +739,47 @@ update_sales_meetings_unified <- function(con) {
   vc$meeting_tool     <- extract_meeting_tool(vc$task_name)
   vc$is_external_tool <- is_external_tool(vc$meeting_tool)
   vc$meeting_type     <- extract_meeting_type(vc$task_name)
+  vc$precise_time <- as.POSIXct(vc$precise_time, tz = "UTC")
+  vc$event_date   <- as.Date(vc$precise_time, tz = "Europe/Berlin")
+  # Rep-Kontakt (coalesce assigned_to_user_id/user_id im Character-Raum -> integer64-sicher)
+  uid <- ifelse(!is.na(vc$assigned_to_user_id), as.character(vc$assigned_to_user_id),
+                as.character(vc$user_id))
+  vc$contact_id <- ruc$contact_id[match(uid, as.character(ruc$user_id))]
+  vc[!is.na(vc$contact_id), , drop = FALSE]
+}
+
+#' Nicht geloeschte CRM-Task-Kommentare laden
+#'
+#' `task_id` referenziert die Surrogat-PK `raw.crm_lead_tasks.id`, nicht
+#' `crm_task_id`.
+#'
+#' @param con Pool/DBI-Connection.
+#' @return data.frame mit task_id, crm_comment_id, comment_name,
+#'   comment_created_at und created_at.
+#' @keywords internal
+# ---- start ---- #
+load_crm_task_comments <- function(con) {
+  dplyr::tbl(con, I("raw.crm_lead_task_comments")) %>%
+    dplyr::filter(is_deleted == FALSE) %>%
+    dplyr::select(task_id, crm_comment_id, comment_name, comment_created_at, created_at) %>%
+    dplyr::collect()
+}
+
+#' Rebuild processed.sales_meetings_unified (voll rueckwirkend)
+#'
+#' Laeuft nach update_crm_task_meeting_classification. MSGraph-Meetings (extern-only
+#' Lead-Ableitung, per (Meeting x Lead) expandiert) + frisch aus Rohdaten
+#' abgeleitete CRM-VC-Termine werden via assemble_unified_meetings() vereinheitlicht
+#' und komplett neu geschrieben.
+#' @param con Pool/DBI-Connection.
+#' @return invisible(Anzahl geschriebener Zeilen).
+#' @export
+update_sales_meetings_unified <- function(con) {
+  message("update_sales_meetings_unified ...")
+  msgraph_meetings <- load_unified_msgraph_meetings(con)
+  vc       <- load_crm_vc_tasks(con)
+  comments <- load_crm_task_comments(con)
+
   # staerkster Status je Task (Surrogat-id-Join, wie in Phase 2)
   rank <- c(storniert = 3L, no_show = 2L, show_up = 1L, unbekannt = 0L)
   comments$status <- classify_meeting_status(comments$comment_name)
@@ -644,13 +788,6 @@ update_sales_meetings_unified <- function(con) {
   agg$meeting_status <- names(rank)[match(agg$rank, rank)]
   vc$meeting_status <- agg$meeting_status[match(as.character(vc$id), as.character(agg$task_id))]
   vc$meeting_status[is.na(vc$meeting_status)] <- "unbekannt"
-  vc$precise_time <- as.POSIXct(vc$precise_time, tz = "UTC")
-  vc$event_date   <- as.Date(vc$precise_time, tz = "Europe/Berlin")
-  # Rep-Kontakt (coalesce assigned_to_user_id/user_id im Character-Raum -> integer64-sicher)
-  uid <- ifelse(!is.na(vc$assigned_to_user_id), as.character(vc$assigned_to_user_id),
-                as.character(vc$user_id))
-  vc$contact_id <- ruc$contact_id[match(uid, as.character(ruc$user_id))]
-  vc <- vc[!is.na(vc$contact_id), , drop = FALSE]
 
   crm_meetings <- data.frame(
     crm_task_id = vc$crm_task_id, lead_id = vc$lead_id, event_date = vc$event_date,
