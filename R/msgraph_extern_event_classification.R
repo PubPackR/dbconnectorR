@@ -111,6 +111,23 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
   # wandert ihre Terminierung rueckwirkend in den Migrationsmonat.
   original_created_lookup <- compute_original_created_at(all_events)
 
+  # Umzugskopien mit neuer ical_uid erben das Anlagedatum ihres Alt-Termins,
+  # siehe inherit_moved_copy_created_at(). Gepaart wird nur ueber externe
+  # Teilnehmende.
+  externe_teilnehmende_alle <- dplyr::tbl(con, I("raw.msgraph_event_participants")) %>%
+    dplyr::select(event_id, contact_id) %>%
+    dplyr::inner_join(
+      dplyr::tbl(con, I("raw.msgraph_contacts")) %>% dplyr::select(id, email),
+      by = c("contact_id" = "id")
+    ) %>%
+    dplyr::collect() %>%
+    dplyr::filter(!is.na(email), !is_internal_email(email), !is_synthetic_email(email)) %>%
+    dplyr::select(event_id, contact_id)
+
+  original_created_lookup <- inherit_moved_copy_created_at(
+    original_created_lookup, all_events, externe_teilnehmende_alle
+  )
+
   # Events mit original_created_at anreichern
   events_all <- all_events %>%
     dplyr::filter(id %in% unique(events_classified$event_id)) %>%
@@ -740,6 +757,79 @@ compute_original_created_at <- function(events) {
       original_created_at = min(.effektiv, na.rm = TRUE),
       .groups = "drop"
     )
+}
+
+#' Let a mailbox-move copy inherit the creation date of its original meeting
+#'
+#' When the mailboxes moved to the new tenant (end of August to September 2026,
+#' a different day per person), Exchange re-created many meetings as copies with
+#' a NEW `msgraph_ical_uid`. Graph's `createdDateTime` and our first insert both
+#' fall on the move day, so [compute_original_created_at()], which works per
+#' ical_uid, dates the copy to that day and the meeting counts as scheduled
+#' then -- also when it already lay in the past.
+#'
+#' This step pairs every ical_uid with other ical_uids of the same slot (equal
+#' `event_start`) that share at least one external participant, and takes over
+#' their earlier `original_created_at`. Same rule as
+#' base-62-msgraph-scoped `analytics/2026-09-01-umzugspaare-ohne-absage.sql`,
+#' but without its fixed date bound: the original only has to be older. Two
+#' invitations for the same slot and the same external person outside the move
+#' therefore also lead to the earlier creation date. That is intended, the
+#' meeting was scheduled from then on.
+#'
+#' Participants are compared by `contact_id`: `msgraph_contacts.email_normalized`
+#' is `lower(email)` and UNIQUE, so one contact is one normalized address.
+#' Internal and synthetic addresses must already be filtered out by the caller;
+#' a colleague invited to two different customer meetings at the same time
+#' would otherwise pair them.
+#'
+#' @param original_created_lookup Result of [compute_original_created_at()]: one
+#'   row per `msgraph_ical_uid` with `original_created_at`.
+#' @param events Data frame with `id`, `msgraph_ical_uid` and `event_start`.
+#' @param external_participants Data frame with `event_id` and `contact_id` of
+#'   the external participants of each event.
+#' @return `original_created_lookup` with the same rows; `original_created_at`
+#'   moved earlier where an older original exists.
+#' @keywords internal
+# ---- start ---- #
+inherit_moved_copy_created_at <- function(original_created_lookup, events,
+                                          external_participants) {
+  if (nrow(external_participants) == 0 || nrow(events) == 0) {
+    return(original_created_lookup)
+  }
+
+  # Ein Slot-Schluessel je ical_uid und externer Person
+  slots <- events %>%
+    dplyr::select(event_id = id, msgraph_ical_uid, event_start) %>%
+    dplyr::inner_join(
+      external_participants %>% dplyr::distinct(event_id, contact_id),
+      by = "event_id"
+    ) %>%
+    dplyr::filter(!is.na(event_start), !is.na(contact_id)) %>%
+    dplyr::distinct(msgraph_ical_uid, event_start, contact_id) %>%
+    dplyr::inner_join(original_created_lookup, by = "msgraph_ical_uid")
+
+  # Gleicher Slot, gleiche Person, andere ical_uid, frueher angelegt
+  paare <- slots %>%
+    dplyr::inner_join(slots, by = c("event_start", "contact_id"),
+                      suffix = c("", "_alt"), relationship = "many-to-many") %>%
+    dplyr::filter(msgraph_ical_uid != msgraph_ical_uid_alt,
+                  original_created_at_alt < original_created_at)
+
+  # Ohne Paar sofort zurueck: summarise() wertet min() sonst einmal auf der
+  # leeren Gruppe aus und warnt.
+  if (nrow(paare) == 0) return(original_created_lookup)
+
+  geerbt <- paare %>%
+    dplyr::group_by(msgraph_ical_uid) %>%
+    dplyr::summarise(original_created_at_alt = min(original_created_at_alt),
+                     .groups = "drop")
+
+  original_created_lookup %>%
+    dplyr::left_join(geerbt, by = "msgraph_ical_uid") %>%
+    dplyr::mutate(original_created_at = dplyr::coalesce(original_created_at_alt,
+                                                        original_created_at)) %>%
+    dplyr::select(-original_created_at_alt)
 }
 
 # Ausgaenge der Online-Meeting-Suche (raw.msgraph_events.online_meeting_lookup),

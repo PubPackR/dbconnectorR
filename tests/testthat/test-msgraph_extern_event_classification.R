@@ -392,3 +392,130 @@ test_that("Abstand zur Absage bleibt nach der Korrektur berechenbar", {
   # 09.06. 02:00 (Ingest gewinnt) bis 11.06. 11:30 = 57,5 h, deutlich ueber 24.
   expect_equal(stunden, 57.5)
 })
+
+# Tests fuer inherit_moved_copy_created_at().
+#
+# Hintergrund: Beim Postfach-Umzug in den neuen Tenant (Ende August bis
+# September 2026) legte Exchange viele Termine als Kopie mit NEUER ical_uid an.
+# Graph-Anlagedatum und Ingest liegen beide am Umzugstag, die Kopie zaehlte
+# dort als gelegt. Abfrage F3 vom 03.11.2026: Termin 13.08. mit erstellt_am
+# 07.09., Graph-Anlage 07.09., eingelesen 08.09.
+
+lookup <- function(uid, datum) {
+  data.frame(msgraph_ical_uid = uid, original_created_at = utc(datum),
+             stringsAsFactors = FALSE)
+}
+
+termine <- function(id, uid, start) {
+  data.frame(id = id, msgraph_ical_uid = uid, event_start = utc(start),
+             stringsAsFactors = FALSE)
+}
+
+test_that("Umzugskopie erbt das Anlagedatum des Alt-Termins", {
+  result <- inherit_moved_copy_created_at(
+    lookup(c("uid-alt", "uid-kopie"), c("2026-07-10 09:00:00", "2026-09-07 08:00:00")),
+    termine(c(1, 2), c("uid-alt", "uid-kopie"), c("2026-08-13 10:00:00", "2026-08-13 10:00:00")),
+    data.frame(event_id = c(1, 2), contact_id = c(501, 501))
+  )
+
+  expect_equal(result$original_created_at[result$msgraph_ical_uid == "uid-kopie"],
+               utc("2026-07-10 09:00:00"))
+  expect_equal(result$original_created_at[result$msgraph_ical_uid == "uid-alt"],
+               utc("2026-07-10 09:00:00"))
+})
+
+test_that("nur die spaetere Zeile erbt, die fruehere bleibt", {
+  result <- inherit_moved_copy_created_at(
+    lookup(c("uid-a", "uid-b"), c("2026-09-07 08:00:00", "2026-07-10 09:00:00")),
+    termine(c(1, 2), c("uid-a", "uid-b"), c("2026-08-13 10:00:00", "2026-08-13 10:00:00")),
+    data.frame(event_id = c(1, 2), contact_id = c(501, 501))
+  )
+
+  expect_equal(result$original_created_at[result$msgraph_ical_uid == "uid-b"],
+               utc("2026-07-10 09:00:00"))
+  expect_equal(result$original_created_at[result$msgraph_ical_uid == "uid-a"],
+               utc("2026-07-10 09:00:00"))
+})
+
+test_that("Folgetermin mit derselben Person an einem anderen Slot erbt nichts", {
+  result <- inherit_moved_copy_created_at(
+    lookup(c("uid-erst", "uid-folge"), c("2026-07-10 09:00:00", "2026-08-20 08:00:00")),
+    termine(c(1, 2), c("uid-erst", "uid-folge"), c("2026-08-13 10:00:00", "2026-09-03 10:00:00")),
+    data.frame(event_id = c(1, 2), contact_id = c(501, 501))
+  )
+
+  expect_equal(result$original_created_at[result$msgraph_ical_uid == "uid-folge"],
+               utc("2026-08-20 08:00:00"))
+})
+
+test_that("gleicher Slot mit anderer externer Person erbt nichts", {
+  # Zwei Kundentermine verschiedener Reps um 10 Uhr. Interne Adressen filtert
+  # der Aufrufer heraus, hier bleibt also keine gemeinsame Person.
+  result <- inherit_moved_copy_created_at(
+    lookup(c("uid-kunde-1", "uid-kunde-2"), c("2026-07-10 09:00:00", "2026-08-20 08:00:00")),
+    termine(c(1, 2), c("uid-kunde-1", "uid-kunde-2"), c("2026-09-03 10:00:00", "2026-09-03 10:00:00")),
+    data.frame(event_id = c(1, 2), contact_id = c(501, 502))
+  )
+
+  expect_equal(result$original_created_at[result$msgraph_ical_uid == "uid-kunde-2"],
+               utc("2026-08-20 08:00:00"))
+})
+
+test_that("mehrere Zeilen derselben ical_uid paaren sich nicht mit sich selbst", {
+  result <- inherit_moved_copy_created_at(
+    lookup("uid-serie", "2026-08-20 08:00:00"),
+    termine(c(1, 2), c("uid-serie", "uid-serie"), c("2026-09-03 10:00:00", "2026-09-03 10:00:00")),
+    data.frame(event_id = c(1, 2), contact_id = c(501, 501))
+  )
+
+  expect_equal(nrow(result), 1)
+  expect_equal(result$original_created_at, utc("2026-08-20 08:00:00"))
+})
+
+test_that("bei mehreren Alt-Terminen gewinnt der frueheste", {
+  result <- inherit_moved_copy_created_at(
+    lookup(c("uid-1", "uid-2", "uid-3"),
+           c("2026-06-01 09:00:00", "2026-07-15 09:00:00", "2026-09-10 08:00:00")),
+    termine(c(1, 2, 3), c("uid-1", "uid-2", "uid-3"), rep("2026-09-24 14:00:00", 3)),
+    data.frame(event_id = c(1, 2, 3), contact_id = c(501, 501, 501))
+  )
+
+  expect_equal(result$original_created_at[result$msgraph_ical_uid == "uid-3"],
+               utc("2026-06-01 09:00:00"))
+  expect_equal(result$original_created_at[result$msgraph_ical_uid == "uid-2"],
+               utc("2026-06-01 09:00:00"))
+})
+
+test_that("ohne externe Teilnehmende bleibt das Lookup unveraendert", {
+  eingabe <- lookup(c("uid-a", "uid-b"), c("2026-07-10 09:00:00", "2026-09-07 08:00:00"))
+
+  result <- inherit_moved_copy_created_at(
+    eingabe,
+    termine(c(1, 2), c("uid-a", "uid-b"), c("2026-08-13 10:00:00", "2026-08-13 10:00:00")),
+    data.frame(event_id = numeric(0), contact_id = numeric(0))
+  )
+
+  expect_equal(result, eingabe)
+})
+
+test_that("das tz-Attribut von original_created_at bleibt erhalten", {
+  # Wie bei compute_original_created_at(): die Aufrufer rechnen mit rohen
+  # Treiber-Werten weiter, ein anderes tz-Attribut verschoebe den Monat.
+  eingabe <- data.frame(
+    msgraph_ical_uid    = c("uid-alt", "uid-kopie"),
+    original_created_at = as.POSIXct(c("2026-07-10 09:00:00", "2026-09-07 08:00:00"),
+                                     tz = "Europe/Berlin"),
+    stringsAsFactors    = FALSE
+  )
+
+  result <- inherit_moved_copy_created_at(
+    eingabe,
+    termine(c(1, 2), c("uid-alt", "uid-kopie"), c("2026-08-13 10:00:00", "2026-08-13 10:00:00")),
+    data.frame(event_id = c(1, 2), contact_id = c(501, 501))
+  )
+
+  expect_equal(attr(result$original_created_at, "tzone"), "Europe/Berlin")
+  expect_equal(format(result$original_created_at[result$msgraph_ical_uid == "uid-kopie"],
+                      "%Y-%m-%d %H:%M:%S"),
+               "2026-07-10 09:00:00")
+})
