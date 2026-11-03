@@ -4,11 +4,7 @@
 \alias{inherit_moved_copy_created_at}
 \title{Let a mailbox-move copy inherit the creation date of its original meeting}
 \usage{
-inherit_moved_copy_created_at(
-  original_created_lookup,
-  events,
-  external_participants
-)
+inherit_moved_copy_created_at(original_created_lookup, events, participants)
 }
 \arguments{
 \item{original_created_lookup}{Result of \code{\link[=compute_original_created_at]{compute_original_created_at()}}: one
@@ -16,8 +12,8 @@ row per \code{msgraph_ical_uid} with \code{original_created_at}.}
 
 \item{events}{Data frame with \code{id}, \code{msgraph_ical_uid} and \code{event_start}.}
 
-\item{external_participants}{Data frame with \code{event_id} and \code{contact_id} of
-the external participants of each event.}
+\item{participants}{Data frame with \code{event_id}, \code{contact_id} and \code{email} of
+the participants of each event.}
 }
 \value{
 \code{original_created_lookup} with the same rows; \code{original_created_at}
@@ -42,9 +38,9 @@ therefore also lead to the earlier creation date. That is intended, the
 meeting was scheduled from then on.
 
 Participants are compared by \code{contact_id}: \code{msgraph_contacts.email_normalized}
-is \code{lower(email)} and UNIQUE, so one contact is one normalized address.
-Internal and synthetic addresses must already be filtered out by the caller;
-a colleague invited to two different customer meetings at the same time
-would otherwise pair them.
+is \code{lower(email)} and UNIQUE, so one contact is one normalized address. Only
+external participants pair, internal and synthetic addresses are dropped
+here; a colleague invited to two different customer meetings at the same
+time would otherwise link them.
 }
 \keyword{internal}
