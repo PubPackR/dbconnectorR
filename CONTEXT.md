@@ -118,10 +118,34 @@ _Avoid_: Classification, meeting status.
 
 **Signal**:
 What one source system says about a meeting, kept as the source says it: the
-CRM outcome note, the calendar state (active, moved, cancelled), the Teams
+CRM outcome note, the calendar state (active, rescheduled, cancelled), the Teams
 attendance (external call, internal call, no call, unmeasurable). Signals of
 different systems may contradict each other; that is information, not an error.
 _Avoid_: Outcome, evaluation, no-show (those are judgements on signals).
+
+**Vanished meeting**:
+A calendar row that disappeared from a loaded calendar without Outlook reporting
+a cancellation, and has no successor. A signal that the meeting is gone, not
+proof that it was called off.
+_Avoid_: Deleted meeting, cancelled meeting.
+
+**Cancelled meeting**:
+A calendar row Outlook itself reports as cancelled, with no successor.
+_Avoid_: Vanished meeting, no-show.
+
+**Rescheduled meeting**:
+A cancelled or vanished calendar row that has a successor.
+_Avoid_: Moved meeting.
+
+**Stale copy**:
+A one-off calendar row still active although a newer version of the same
+calendar item exists, typically held by another invitee's calendar.
+_Avoid_: Mailbox-move copy (a different item carrying the same meeting).
+
+**Successor**:
+The calendar row that replaces another one: the active row of the same calendar
+item, or else the replacement found by same external contact and nearby start.
+_Avoid_: Follow-up meeting, next meeting.
 
 **Evaluation**:
 A judgement derived from the signals of a meeting: no-show, excluded, and why.

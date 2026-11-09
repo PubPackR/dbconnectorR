@@ -89,12 +89,49 @@ scoped_cancellation_rows_sql <- function(rs, tmp_seen, tmp_scope, source = c("ca
        AND %s", tmp_seen, rs, rs, rs, tmp_scope, quelle)
 }
 
+#' UPDATE-Statement fuer verschwundene Events
+#'
+#' Eigene Funktion, damit ohne Datenbank pruefbar ist, dass Absage und Zeitpunkt
+#' zusammen geschrieben werden. `vanished_at` ist ein `timestamp` in UTC. Ein
+#' blosses `now()` liefe still ueber die Session-Zeitzone.
+#'
+#' @param rs Ziel-Schema.
+#'
+#' @return SQL-Statement als character, Parameter $1 = kommagetrennte Event-IDs.
+#'
+#' @keywords internal
+mark_vanished_sql <- function(rs) {
+  # ---- start ---- #
+  sprintf(
+    "UPDATE %s.msgraph_events SET is_canceled = TRUE, vanished_at = timezone('UTC', now()) WHERE id = ANY(string_to_array($1, ',')::bigint[])",
+    rs)
+}
+
+#' Verschwunden-Marke fuer die Zeilen eines Downloads leeren
+#'
+#' Eine Zeile im Download ist nicht verschwunden, auch wenn ein frueherer Lauf das
+#' festgestellt hat. Der Upsert schreibt die Spalte so auf NULL. Das leere Feld
+#' muss ein POSIXct sein: Ein character-NA wird in der Temp-Tabelle des Upserts zu
+#' `text` und laesst sich nicht in die `timestamp`-Spalte einfuegen.
+#'
+#' @param events Download-Zeilen fuer `Billomatics::postgres_upsert_data()`.
+#'
+#' @return `events` mit der Spalte `vanished_at`.
+#'
+#' @keywords internal
+clear_vanished_at <- function(events) {
+  # ---- start ---- #
+  events$vanished_at <- rep(as.POSIXct(NA_character_, tz = "UTC"), nrow(events))
+  events
+}
+
 #' Verschwundene Events eines delegierten Laufs als abgesagt markieren
 #'
 #' Laeuft NACH dem Upsert des Laufs. Liest die Bestands-Events im Scope, plant
-#' mit `scoped_cancellation_plan()` und setzt `is_canceled = TRUE` fuer die
-#' geplanten IDs. Temp-Tabellen und UPDATE laufen in EINER Transaktion auf einer
-#' Verbindung - eine Temp-Tabelle ueberlebt keinen Pool-Checkout.
+#' mit `scoped_cancellation_plan()` und setzt `is_canceled = TRUE` und
+#' `vanished_at` fuer die geplanten IDs. Temp-Tabellen und UPDATE laufen in EINER
+#' Transaktion auf einer Verbindung - eine Temp-Tabelle ueberlebt keinen
+#' Pool-Checkout.
 #'
 #' Bewusst log-and-degrade statt stop(), wenn ein Scope den Abdeckungsschutz
 #' nicht besteht: der Rest des Laufs soll weiterlaufen, der Vorfall steht im Log.
@@ -144,9 +181,7 @@ mark_vanished_events_canceled <- function(con, rs, seen, scope_map, window_start
       message(msg)
     }
     if (length(plan$ids) == 0) return(0L)
-    DBI::dbExecute(conn, sprintf(
-      "UPDATE %s.msgraph_events SET is_canceled = TRUE WHERE id = ANY(string_to_array($1, ',')::bigint[])", rs),
-      params = list(paste(plan$ids, collapse = ",")))
+    DBI::dbExecute(conn, mark_vanished_sql(rs), params = list(paste(plan$ids, collapse = ",")))
   }
   n <- if (inherits(con, "Pool")) {
     pool::poolWithTransaction(con, absagen)

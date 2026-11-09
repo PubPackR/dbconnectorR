@@ -86,6 +86,115 @@ test_that("mark_vanished_events_canceled: Download-Schluessel gehen als UTC-Text
   expect_equal(executed, "11")
 })
 
+test_that("mark_vanished_sql: setzt Absage und UTC-Zeitpunkt in einem UPDATE", {
+  sql <- mark_vanished_sql("raw")
+  expect_match(sql, "UPDATE raw.msgraph_events", fixed = TRUE)
+  expect_match(sql, "is_canceled = TRUE", fixed = TRUE)
+  expect_match(sql, "vanished_at = timezone('UTC', now())", fixed = TRUE)
+})
+
+test_that("clear_vanished_at: jede Download-Zeile traegt ein leeres POSIXct", {
+  ev <- clear_vanished_at(tibble::tibble(msgraph_ical_uid = c("U1", "U2")))
+  expect_s3_class(ev$vanished_at, "POSIXct")
+  expect_true(all(is.na(ev$vanished_at)))
+  expect_equal(nrow(ev), 2)
+})
+
+test_that("vanished_at: Verschwinden, Wiederauftauchen und erneutes Verschwinden", {
+  # Eine Zeile als Tabelle. Die Stubs tun, was Upsert und UPDATE auf der DB tun.
+  zeile <- list(is_canceled = FALSE, vanished_at = as.POSIXct(NA_character_, tz = "UTC"))
+  gesetzt <- as.POSIXct("2026-10-03 02:50:00", tz = "UTC")
+  upsert <- function(events) {
+    ev <- clear_vanished_at(events)
+    zeile$is_canceled <<- ev$is_canceled
+    zeile$vanished_at <<- ev$vanished_at
+  }
+  lauf_ohne_zeile <- function() {
+    mockery::stub(mark_vanished_events_canceled, "pool::poolWithTransaction", function(con, f) f("conn"))
+    mockery::stub(mark_vanished_events_canceled, "DBI::dbWriteTable", function(...) TRUE)
+    # Die Bestands-Abfrage liefert nur nicht abgesagte Zeilen, siehe scoped_cancellation_rows_sql()
+    mockery::stub(mark_vanished_events_canceled, "DBI::dbGetQuery", function(conn, sql, params) {
+      if (zeile$is_canceled) return(data.frame(id = character(0), scope = character(0), fehlt = logical(0)))
+      data.frame(id = c("1", "2", "3"), scope = "rep.a", fehlt = c(TRUE, FALSE, FALSE))
+    })
+    mockery::stub(mark_vanished_events_canceled, "DBI::dbExecute", function(conn, sql, params) {
+      expect_identical(sql, mark_vanished_sql("raw"))
+      zeile$is_canceled <<- TRUE
+      zeile$vanished_at <<- gesetzt
+      1L
+    })
+    mark_vanished_events_canceled(structure(list(), class = "Pool"), "raw",
+                                  tibble::tibble(msgraph_ical_uid = "U2",
+                                                 event_start = as.POSIXct("2026-10-01 10:00:00", tz = "UTC")),
+                                  tibble::tibble(email = "rep.a@studyflix.de", scope = "rep.a"),
+                                  as.POSIXct("2026-09-08", tz = "UTC"), as.POSIXct("2027-10-28", tz = "UTC"))
+  }
+  download <- tibble::tibble(msgraph_ical_uid = "U1", is_canceled = FALSE)
+
+  upsert(download)
+  expect_false(zeile$is_canceled)
+
+  lauf_ohne_zeile()                                   # verschwindet
+  expect_true(zeile$is_canceled)
+  expect_equal(zeile$vanished_at, gesetzt)
+
+  upsert(download)                                    # taucht wieder auf
+  expect_false(zeile$is_canceled)
+  expect_true(is.na(zeile$vanished_at))
+
+  lauf_ohne_zeile()                                   # verschwindet erneut
+  expect_true(zeile$is_canceled)
+  expect_equal(zeile$vanished_at, gesetzt)
+})
+
+test_that("msgraph_scoped_update_events: der Upsert leert vanished_at fuer jede Download-Zeile", {
+  cals <- list(status = 200, value = list(list(id = "C1", owner = list(address = "rep.a@studyflix.de"))))
+  ev <- list(iCalUId = "U1", type = "singleInstance", subject = "Termin",
+             start = list(dateTime = "2026-10-01T10:00:00.0000000"),
+             end = list(dateTime = "2026-10-01T10:30:00.0000000"),
+             organizer = list(emailAddress = list(address = "rep.a@studyflix.de", name = "Rep A")),
+             attendees = list())
+  upsert <- mockery::mock(NULL, cycle = TRUE)
+  mockery::stub(msgraph_scoped_update_events, "graph_collect",
+                function(url, token, query = NULL) if (grepl("/calendarView", url)) list(status = 200, value = list(ev)) else cals)
+  mockery::stub(msgraph_scoped_update_events, "dsgvo_suppress_participants", function(p, con, pepper) p)
+  mockery::stub(msgraph_scoped_update_events, "Billomatics::postgres_upsert_data", upsert)
+  mockery::stub(msgraph_scoped_update_events, "mark_join_url_checked", function(...) 0L)
+  mockery::stub(msgraph_scoped_update_events, "mark_vanished_events_canceled", function(...) 0L)
+  mockery::stub(msgraph_scoped_update_events, "dplyr::tbl", function(...) stop("stop nach Absage"))
+  cfg <- list(service_account_upn = "sa@studyflix.de", raw_schema = "raw",
+              processed_schema = "processed", events_days_back = 50, events_days_forward = 365)
+  expect_error(msgraph_scoped_update_events(con = NULL, del_token = "t", cfg = cfg),
+               "stop nach Absage", fixed = TRUE)
+  geschrieben <- mockery::mock_args(upsert)[[1]][[4]]
+  expect_s3_class(geschrieben$vanished_at, "POSIXct")
+  expect_true(all(is.na(geschrieben$vanished_at)))
+})
+
+test_that("msgraph_scoped_update_bookings: der Upsert leert vanished_at fuer jede Download-Zeile", {
+  biz <- list(status = 200, value = list(list(id = "B1")))
+  appt <- list(id = "A1", start = list(dateTime = "2026-10-01T10:00:00.0000000"),
+               end = list(dateTime = "2026-10-01T10:30:00.0000000"), staffMemberIds = list("S1"),
+               customers = list())
+  upsert <- mockery::mock(NULL, cycle = TRUE)
+  mockery::stub(msgraph_scoped_update_bookings, "graph_collect", function(url, token, query = NULL) {
+    if (grepl("/staffMembers", url)) list(status = 200, value = list(list(id = "S1", emailAddress = "x@studyflix.de")))
+    else if (grepl("/calendarView", url)) list(status = 200, value = list(appt))
+    else biz
+  })
+  mockery::stub(msgraph_scoped_update_bookings, "dsgvo_suppress_participants", function(p, con, pepper) p)
+  mockery::stub(msgraph_scoped_update_bookings, "Billomatics::postgres_upsert_data", upsert)
+  mockery::stub(msgraph_scoped_update_bookings, "mark_vanished_events_canceled", function(...) 0L)
+  mockery::stub(msgraph_scoped_update_bookings, "dplyr::tbl", function(...) stop("stop nach Absage"))
+  cfg <- list(raw_schema = "raw", processed_schema = "processed",
+              events_days_back = 50, events_days_forward = 365)
+  expect_error(msgraph_scoped_update_bookings(con = NULL, del_token = "t", cfg = cfg),
+               "stop nach Absage", fixed = TRUE)
+  geschrieben <- mockery::mock_args(upsert)[[1]][[4]]
+  expect_s3_class(geschrieben$vanished_at, "POSIXct")
+  expect_true(all(is.na(geschrieben$vanished_at)))
+})
+
 test_that("msgraph_scoped_update_events: nur vollstaendig geladene Owner kommen in den Absage-Scope", {
   # rep.b: Kalender schlaegt fehl. rep.c: ein Kalender laedt, ein zweiter nicht.
   cals <- list(status = 200, value = list(
