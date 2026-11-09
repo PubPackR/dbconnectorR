@@ -1,5 +1,8 @@
 -- Backfill raw.msgraph_events.vanished_at fuer abgesagte Kalenderzeilen.
 -- NACH 2026-11-09-msgraph-events-vanished-at.sql in DBeaver ausfuehren, Block fuer Block.
+-- Backfill und Paket-Installation am selben Tag, ohne Nachtlauf (02:48) dazwischen: Sonst
+-- bekommen Zeilen, die in dieser Nacht verschwinden, nie ein vanished_at.
+-- Der Kandidaten-Filter steht dreimal (Block 1 zweimal, Block 2). Eine Aenderung gilt fuer alle.
 -- Asana: https://app.asana.com/0/0/1220117253528426/f
 -- Spec: docs/specs/2026-11-09-vanished-at-und-kalenderzustand.md (Q3, Q4)
 --

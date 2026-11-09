@@ -118,7 +118,7 @@ _Avoid_: Classification, meeting status.
 
 **Signal**:
 What one source system says about a meeting, kept as the source says it: the
-CRM outcome note, the calendar state (active, moved, cancelled), the Teams
+CRM outcome note, the calendar state (active, rescheduled, cancelled), the Teams
 attendance (external call, internal call, no call, unmeasurable). Signals of
 different systems may contradict each other; that is information, not an error.
 _Avoid_: Outcome, evaluation, no-show (those are judgements on signals).
