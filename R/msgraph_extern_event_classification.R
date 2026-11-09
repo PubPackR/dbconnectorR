@@ -155,10 +155,9 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
   # zurueck.
   events_all <- events_all %>%
     dplyr::mutate(
-      time_to_cancellation_hours = as.numeric(
-        difftime(event_updated_at, original_created_at, units = "hours")
-      ),
-      is_short_lived_event = is_canceled & time_to_cancellation_hours < 24
+      is_short_lived_event = detect_short_lived_events(
+        is_canceled, event_updated_at, original_created_at
+      )
     )
 
   short_lived_count <- sum(events_all$is_short_lived_event, na.rm = TRUE)
@@ -175,9 +174,10 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
     dplyr::pull(msgraph_ical_uid)
 
   # Verschoben = is_canceled UND es gibt ein aktives Event mit derselben ical_uid
-  verschobene_ids <- events_all %>%
-    dplyr::filter(is_canceled & msgraph_ical_uid %in% uids_with_active_event) %>%
-    dplyr::pull(id)
+  verschobene_ids <- events_all$id[
+    derive_outlook_status(events_all$is_canceled, events_all$msgraph_ical_uid,
+                          uids_with_active_event) == "verschoben"
+  ]
 
   message(paste0("  ", length(verschobene_ids), " verschobene Events"))
 
@@ -196,14 +196,7 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
       by = c("contact_id" = "id")
     ) %>%
     dplyr::collect() %>%
-    dplyr::mutate(is_internal = is_internal_email(email)) %>%
-    dplyr::group_by(event_id) %>%
-    dplyr::summarise(
-      participant_count = dplyr::n(),
-      internal_count = sum(is_internal, na.rm = TRUE),
-      external_count = sum(!is_internal, na.rm = TRUE),
-      .groups = "drop"
-    )
+    count_event_participants()
 
   internal_meeting_ids <- participant_counts %>%
     dplyr::filter(internal_count >= 7) %>%
@@ -244,24 +237,7 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
     dplyr::mutate(is_no_show_class = grepl("no_call|intern_call", event_class, ignore.case = TRUE))
 
   # Paarweise Duplikate: gleiche externe Email, event_start <=15 Min
-  duplikat_ids <- c()
-  if (nrow(events_mit_zeit) > 1) {
-    events_sorted <- events_mit_zeit %>% dplyr::arrange(email_lower, event_start)
-    for (i in seq_len(nrow(events_sorted) - 1)) {
-      curr <- events_sorted[i, ]
-      next_row <- events_sorted[i + 1, ]
-      if (curr$email_lower == next_row$email_lower &&
-          !is.na(curr$event_start) && !is.na(next_row$event_start) &&
-          abs(as.numeric(difftime(curr$event_start, next_row$event_start, units = "mins"))) <= 15) {
-        if (curr$is_no_show_class && !next_row$is_no_show_class) {
-          duplikat_ids <- c(duplikat_ids, as.integer(curr$event_id))
-        } else {
-          duplikat_ids <- c(duplikat_ids, as.integer(next_row$event_id))
-        }
-      }
-    }
-  }
-  duplikat_ids <- unique(duplikat_ids)
+  duplikat_ids <- detect_duplicate_events(events_mit_zeit)
 
   message(paste0("  ", length(duplikat_ids), " Duplikat-Events"))
 
@@ -272,7 +248,6 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
   # Heuristik: Gleicher Lead (externe Email), < 2 Tage Abstand, unterschiedliche ical_uid
   # Nur unter aktiven Events (keine bereits als verschoben markierten)
   # Zusaetzlich: original_created_at des gecancelten Events auf Ersatz-Event uebertragen
-  rescheduled_without_mid_ids <- c()
   rescheduled_mapping <- data.frame(
     canceled_event_id = integer(0),
     replacement_event_id = integer(0),
@@ -288,40 +263,17 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
         suffix = c("", "_evt")
       ) %>%
       dplyr::filter(is_canceled) %>%
-      dplyr::select(canceled_id = event_id, canceled_email = email_lower,
-                    canceled_start = event_start_evt, canceled_ical_uid = msgraph_ical_uid)
+      dplyr::select(event_id, email_lower, event_start = event_start_evt, msgraph_ical_uid)
 
     # Aktive Events mit Lead-Info
     active_events <- events_all %>%
       dplyr::filter(!is_canceled, id %in% active_event_ids) %>%
-      dplyr::select(replacement_id = id, replacement_start = event_start,
-                    replacement_ical_uid = msgraph_ical_uid) %>%
-      dplyr::inner_join(externe_teilnehmer_pro_event, by = c("replacement_id" = "event_id")) %>%
-      dplyr::rename(replacement_email = email_lower)
+      dplyr::select(event_id = id, event_start, msgraph_ical_uid) %>%
+      dplyr::inner_join(externe_teilnehmer_pro_event, by = "event_id")
 
-    # Vektorisierter Join: gleicher Lead, andere ical_uid, < 2 Tage
-    if (nrow(canceled_events) > 0 && nrow(active_events) > 0) {
-      rescheduled_pairs <- canceled_events %>%
-        dplyr::inner_join(active_events, by = c("canceled_email" = "replacement_email"),
-                         relationship = "many-to-many") %>%
-        dplyr::filter(
-          canceled_ical_uid != replacement_ical_uid,
-          !is.na(canceled_start), !is.na(replacement_start)
-        ) %>%
-        dplyr::mutate(
-          time_diff_days = abs(as.numeric(difftime(replacement_start, canceled_start, units = "days")))
-        ) %>%
-        dplyr::filter(time_diff_days < 2) %>%
-        dplyr::group_by(canceled_id) %>%
-        dplyr::slice_min(time_diff_days, n = 1, with_ties = FALSE) %>%
-        dplyr::ungroup()
-
-      rescheduled_without_mid_ids <- unique(rescheduled_pairs$canceled_id)
-      rescheduled_mapping <- rescheduled_pairs %>%
-        dplyr::select(canceled_event_id = canceled_id, replacement_event_id = replacement_id) %>%
-        as.data.frame()
-    }
+    rescheduled_mapping <- detect_replaced_events(canceled_events, active_events)
   }
+  rescheduled_without_mid_ids <- unique(rescheduled_mapping$canceled_event_id)
   message(paste0("  ", length(rescheduled_without_mid_ids), " rescheduled ohne meeting_id"))
 
   # original_created_at des Ersatz-Events anpassen:
