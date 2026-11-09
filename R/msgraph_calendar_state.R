@@ -24,8 +24,8 @@
 #'
 #' @return
 #'   data.frame je Event mit `event_id` (character), `calendar_status`,
-#'   `calendar_changed_at_utc` (`vanished_at`, sonst `event_updated_at`) und
-#'   `successor_event_id` (character).
+#'   `calendar_changed_at_utc` (`vanished_at`, sonst `event_updated_at`, bei
+#'   Bookings ohne `vanished_at` leer) und `successor_event_id` (character).
 #'
 #' @keywords internal
 derive_calendar_state <- function(events, replacements = NULL) {
@@ -77,9 +77,14 @@ derive_calendar_state <- function(events, replacements = NULL) {
     ifelse(!is.na(nachfolger), "rescheduled",
            ifelse(!is.na(vanished), "vanished", "cancelled")))
 
+  # Bei Bookings steht in event_updated_at der Terminstart, keine Aenderung
+  # (parse_scoped_bookings). Ohne vanished_at bleibt der Zeitpunkt deshalb leer.
+  letzte_aenderung <- aenderung
+  letzte_aenderung[startsWith(uid, "booking:")] <- NA
+
   data.frame(event_id = event_id,
              calendar_status = status,
-             calendar_changed_at_utc = dplyr::coalesce(vanished, aenderung),
+             calendar_changed_at_utc = dplyr::coalesce(vanished, letzte_aenderung),
              successor_event_id = nachfolger,
              stringsAsFactors = FALSE)
 }

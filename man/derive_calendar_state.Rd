@@ -14,8 +14,8 @@ derive_calendar_state(events, replacements = NULL)
 }
 \value{
 data.frame je Event mit \code{event_id} (character), \code{calendar_status},
-\code{calendar_changed_at_utc} (\code{vanished_at}, sonst \code{event_updated_at}) und
-\code{successor_event_id} (character).
+\code{calendar_changed_at_utc} (\code{vanished_at}, sonst \code{event_updated_at}, bei
+Bookings ohne \code{vanished_at} leer) und \code{successor_event_id} (character).
 }
 \description{
 Eine Zeile von \code{raw.msgraph_events} ist ein Termin zu einer Startzeit. Wird er

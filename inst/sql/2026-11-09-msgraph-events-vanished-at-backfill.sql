@@ -12,7 +12,9 @@
 --   2. Sonst updated_at der Zeile. Das kann spaeter liegen als das Verschwinden: Die
 --      Korrektur vom 29.10.2026 und die Online-Meeting-Suche haben updated_at bewegt.
 --
--- Bookings bleiben aussen vor (Q4). Eine Graph-Absage ohne Betreff-Praefix laesst sich
+-- Bookings bleiben aussen vor (Q4). Ausgenommen ist jeder Betreff, in dem Canceled:,
+-- canceled: oder Abgesagt: vorkommt, auch mitten im Text (Q10): Das haben der alte und der
+-- neue Abruf als Absage gewertet. Eine Graph-Absage ohne dieses Kennzeichen laesst sich
 -- rueckwirkend nicht erkennen und bekommt ebenfalls einen Wert.
 --
 -- created_at und updated_at sind timestamptz, vanished_at ist timestamp in UTC:
@@ -31,7 +33,7 @@ WITH kandidaten AS (
       AND e.vanished_at IS NULL
       AND e.msgraph_ical_uid NOT LIKE 'booking:%'
       AND (e.event_start AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin') >= TIMESTAMP '2025-05-01 00:00:00'
-      AND coalesce(e.subject, '') !~ '^(Canceled:|Abgesagt:)'
+      AND coalesce(e.subject, '') !~ '(Canceled:|canceled:|Abgesagt:)'
 ),
 nachfolger AS (
     SELECT k.id, min(n.created_at) AS erster_nachfolger
@@ -57,7 +59,7 @@ WHERE e.is_canceled
   AND e.vanished_at IS NULL
   AND e.msgraph_ical_uid NOT LIKE 'booking:%'
   AND (e.event_start AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin') >= TIMESTAMP '2025-05-01 00:00:00'
-  AND coalesce(e.subject, '') !~ '^(Canceled:|Abgesagt:)'
+  AND coalesce(e.subject, '') !~ '(Canceled:|canceled:|Abgesagt:)'
 GROUP BY 1
 ORDER BY 2 DESC
 LIMIT 30;
@@ -73,7 +75,7 @@ WITH kandidaten AS (
       AND e.vanished_at IS NULL
       AND e.msgraph_ical_uid NOT LIKE 'booking:%'
       AND (e.event_start AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin') >= TIMESTAMP '2025-05-01 00:00:00'
-      AND coalesce(e.subject, '') !~ '^(Canceled:|Abgesagt:)'
+      AND coalesce(e.subject, '') !~ '(Canceled:|canceled:|Abgesagt:)'
 ),
 nachfolger AS (
     SELECT k.id, min(n.created_at) AS erster_nachfolger

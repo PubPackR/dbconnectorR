@@ -27,8 +27,12 @@ einen Änderungszeitpunkt und einen Nachfolger.
 | abgesagt | kein Nachfolger, `vanished_at` gesetzt | `vanished` | keiner |
 | abgesagt | kein Nachfolger, `vanished_at` leer | `cancelled` | keiner |
 
-Reihenfolge beim Livegang: DDL, Backfill, dann die neue `dbconnectorR`-Version auf dem Server. Das
-UPDATE im Ingest schlägt ohne die Spalte fehl.
+Der Änderungszeitpunkt ist `coalesce(vanished_at, event_updated_at)`, bei Bookings ohne
+`vanished_at` leer.
+
+Reihenfolge beim Livegang: DDL, Backfill, dann die neue `dbconnectorR`-Version auf dem Server,
+Backfill und Installation am selben Tag ohne Nachtlauf dazwischen. Das UPDATE im Ingest schlägt
+ohne die Spalte fehl.
 
 ## Entscheidungen
 
@@ -50,6 +54,11 @@ UPDATE im Ingest schlägt ohne die Spalte fehl.
   ergänzt auch `raw_scoped_test.msgraph_events`.
 - **Q8 Ablage:** „passt“. `R/msgraph_calendar_state.R`, DDL und Backfill als zwei Dateien unter
   `inst/sql/`.
+- **Q9 Änderungszeitpunkt bei Bookings:** „Beide passen“. Bei Bookings ohne `vanished_at` bleibt der
+  Änderungszeitpunkt leer, weil `event_updated_at` dort der Terminstart ist. Schränkt Q5 für
+  Bookings ein.
+- **Q10 `Abgesagt:` mitten im Betreff:** „Beide passen“. Der Backfill schließt jeden Betreff aus, in
+  dem `Canceled:`, `canceled:` oder `Abgesagt:` vorkommt.
 
 ## Betroffen
 

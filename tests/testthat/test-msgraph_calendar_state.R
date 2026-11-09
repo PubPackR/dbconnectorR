@@ -107,6 +107,18 @@ test_that("Q5: Aenderungszeitpunkt ist vanished_at, sonst event_updated_at", {
                ts(c("2026-10-03 02:50:00", "2026-10-02 08:00:00", "2026-10-04 08:00:00")))
 })
 
+test_that("Q9: Bookings ohne vanished_at haben keinen Aenderungszeitpunkt", {
+  res <- derive_calendar_state(events_of(
+    1, "booking:A", TRUE,  TRUE, "2026-10-20 10:00:00", "2026-10-20 10:00:00", NA_character_,
+    2, "booking:B", TRUE,  TRUE, "2026-10-21 10:00:00", "2026-10-21 10:00:00", "2026-10-03 02:50:00",
+    3, "booking:C", FALSE, TRUE, "2026-10-22 10:00:00", "2026-10-22 10:00:00", NA_character_,
+    4, "U4",        TRUE,  TRUE, "2026-10-23 10:00:00", "2026-10-02 08:00:00", NA_character_))
+  expect_true(is.na(state_of(res, "1")$calendar_changed_at_utc))
+  expect_equal(state_of(res, "2")$calendar_changed_at_utc, ts("2026-10-03 02:50:00"))
+  expect_true(is.na(state_of(res, "3")$calendar_changed_at_utc))
+  expect_equal(state_of(res, "4")$calendar_changed_at_utc, ts("2026-10-02 08:00:00"))
+})
+
 test_that("Spalte vanished_at ohne einen einzigen Wert bricht nichts", {
   ev <- events_of(1, "U1", TRUE, TRUE, "2026-10-05 10:00:00", "2026-10-01 08:00:00", NA_character_)
   ev$vanished_at <- NA
