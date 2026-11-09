@@ -161,7 +161,7 @@ msgraph_scoped_update_bookings <- function(con, del_token, cfg, suppression_pepp
     return(invisible(nrow(all_events)))
   }
 
-  Billomatics::postgres_upsert_data(con, rs, "msgraph_events", all_events,
+  Billomatics::postgres_upsert_data(con, rs, "msgraph_events", clear_vanished_at(all_events),
                                     match_cols = c("msgraph_ical_uid", "event_start"))
 
   # Verschwundene Buchungen als abgesagt markieren. bookingAppointment liefert

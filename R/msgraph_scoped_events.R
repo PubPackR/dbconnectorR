@@ -340,7 +340,7 @@ msgraph_scoped_update_events <- function(con, del_token, cfg, suppression_pepper
   }
 
   # 2) Events upserten
-  Billomatics::postgres_upsert_data(con, rs, "msgraph_events", parsed$events,
+  Billomatics::postgres_upsert_data(con, rs, "msgraph_events", clear_vanished_at(parsed$events),
                                     match_cols = c("msgraph_ical_uid", "event_start"))
 
   # 2b) Geprueft-Marke nachtragen. Muss NACH dem Upsert laufen: Zeilen, die
