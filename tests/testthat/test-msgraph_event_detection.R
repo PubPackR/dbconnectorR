@@ -107,6 +107,12 @@ test_that("detect_duplicate_events: fehlende Startzeit vergleicht nicht", {
   expect_equal(detect_duplicate_events(dplyr::bind_rows(zeile(1, "a", 0), ohne_start)), integer(0))
 })
 
+test_that("detect_duplicate_events: Zeilen ohne E-Mail brechen nichts und zaehlen nicht", {
+  eingabe <- dplyr::bind_rows(zeile(1, "a", 0), zeile(2, NA_character_, 1), zeile(3, NA_character_, 2))
+  expect_equal(detect_duplicate_events(eingabe), integer(0))
+  expect_equal(detect_duplicate_events(zeile(1, NA_character_, 0)), integer(0))
+})
+
 test_that("detect_duplicate_events: ein Event mit zwei Personen zaehlt einmal", {
   eingabe <- dplyr::bind_rows(zeile(1, "a", 0), zeile(1, "b", 0), zeile(2, "a", 5), zeile(2, "b", 5))
   expect_equal(detect_duplicate_events(eingabe), 2L)

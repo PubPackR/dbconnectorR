@@ -96,7 +96,11 @@ klassifikations_tabellen <- function() {
     # dem verschobenen Event 28 und ist trotzdem kein Duplikat.
     ereignis(28, "U28", tag(28), canceled = TRUE),
     ereignis(29, "U28", tag(29)),
-    ereignis(30, "U30", tag(28) + 300)
+    ereignis(30, "U30", tag(28) + 300),
+    # Fehlendes is_canceled: nicht verschoben trotz aktiver Zeile derselben
+    # ical_uid, und kurzlebig bleibt offen.
+    ereignis(31, "U31", tag(30), canceled = NA, stunden_bis_aenderung = 5),
+    ereignis(32, "U31", tag(31))
   )
 
   list(
@@ -137,7 +141,9 @@ klassifikations_tabellen <- function() {
       mapping(27, KLASSE_NO_CALL),
       mapping(28, KLASSE_NO_CALL),
       mapping(29, KLASSE_NO_CALL),
-      mapping(30, KLASSE_NO_CALL)
+      mapping(30, KLASSE_NO_CALL),
+      mapping(31, KLASSE_NO_CALL),
+      mapping(32, KLASSE_NO_CALL)
     ),
     "raw.msgraph_events" = events,
     "raw.msgraph_event_participants" = dplyr::bind_rows(
@@ -172,15 +178,17 @@ klassifikations_tabellen <- function() {
       teilnehmer(27, 126),
       teilnehmer(28, 128),
       teilnehmer(29, 128),
-      teilnehmer(30, 128)
+      teilnehmer(30, 128),
+      teilnehmer(31, 131),
+      teilnehmer(32, 131)
     ),
     "raw.msgraph_contacts" = tibble::tibble(
       id = c(1:7, 101L, 102L, 103L, 105L, 107L, 109L, 111L, 113L, 116L, 118L, 119L,
-             120L, 121L, 122L, 124L, 128L, 126L),
+             120L, 121L, 122L, 124L, 128L, 131L, 126L),
       ms_name = "Name",
       email = c(paste0("kollege", 1:7, "@studyflix.de"),
                 paste0("lead", c(101, 102, 103, 105, 107, 109, 111, 113, 116, 118, 119,
-                                 120, 121, 122, 124, 128), "@kunde.de"),
+                                 120, 121, 122, 124, 128, 131), "@kunde.de"),
                 "gast@external.guest")
     ),
     "raw.msgraph_call_participants" = tibble::tibble(
@@ -256,7 +264,9 @@ test_that("Hauptablauf: jedes Event bekommt den erwarteten Ausschlussgrund", {
     128L,                   "verschoben",                     TRUE,      TRUE,        FALSE,
     129L,                   NA,                               FALSE,     TRUE,        FALSE,
     130L,                   NA,                               FALSE,     TRUE,        FALSE,
-    1002L,                 NA,                               FALSE,     FALSE,       FALSE
+    131L,                   NA,                               FALSE,     TRUE,        NA,
+    132L,                   NA,                               FALSE,     TRUE,        FALSE,
+    1002L,                NA,                               FALSE,     FALSE,       FALSE
   ) %>%
     dplyr::mutate(exclusion_reason = as.character(exclusion_reason))
 

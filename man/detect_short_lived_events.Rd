@@ -9,7 +9,9 @@ detect_short_lived_events(is_canceled, canceled_at, created_at, max_hours = 24)
 \arguments{
 \item{is_canceled}{Logical vector.}
 
-\item{canceled_at}{POSIXct vector: when the event was cancelled.}
+\item{canceled_at}{POSIXct vector: when the event was cancelled. Must use the
+same timezone representation as \code{created_at}, see
+\code{\link[=compute_original_created_at]{compute_original_created_at()}}.}
 
 \item{created_at}{POSIXct vector: when the event was created.}
 

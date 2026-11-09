@@ -24,6 +24,6 @@ event.
 }
 \details{
 Applies this rule to the given rows only. Which events take part is up to the
-caller.
+caller. Rows without an email are ignored.
 }
 \keyword{internal}

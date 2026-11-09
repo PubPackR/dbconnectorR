@@ -4,7 +4,9 @@
 #' means a mistaken or immediately withdrawn invitation.
 #'
 #' @param is_canceled Logical vector.
-#' @param canceled_at POSIXct vector: when the event was cancelled.
+#' @param canceled_at POSIXct vector: when the event was cancelled. Must use the
+#'   same timezone representation as `created_at`, see
+#'   [compute_original_created_at()].
 #' @param created_at POSIXct vector: when the event was created.
 #' @param max_hours Numeric. An event cancelled within fewer hours than this
 #'   counts as short-lived. Default 24.
@@ -51,7 +53,7 @@ count_event_participants <- function(participants) {
 #' event.
 #'
 #' Applies this rule to the given rows only. Which events take part is up to the
-#' caller.
+#' caller. Rows without an email are ignored.
 #'
 #' @param event_contacts Data frame with one row per event and external person:
 #'   `event_id`, `email_lower`, `event_start` (POSIXct) and `is_no_show_class`
@@ -62,11 +64,13 @@ count_event_participants <- function(participants) {
 detect_duplicate_events <- function(event_contacts, max_minutes = 15) {
   # ---- start ---- #
   duplicate_ids <- integer(0)
-  if (nrow(event_contacts) < 2) {
+  sorted <- event_contacts %>%
+    dplyr::filter(!is.na(email_lower)) %>%
+    dplyr::arrange(email_lower, event_start)
+  if (nrow(sorted) < 2) {
     return(duplicate_ids)
   }
 
-  sorted <- event_contacts %>% dplyr::arrange(email_lower, event_start)
   for (i in seq_len(nrow(sorted) - 1)) {
     curr <- sorted[i, ]
     next_row <- sorted[i + 1, ]
