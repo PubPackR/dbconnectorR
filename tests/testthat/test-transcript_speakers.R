@@ -60,12 +60,3 @@ test_that("count_external_speakers zaehlt externe Sprecher ab min_lines Zeilen",
   expect_equal(count_external_speakers(tr, min_lines = 1L), c(1L, 0L, 1L, 1L, 0L))
   expect_equal(count_external_speakers(character(0)), integer(0))
 })
-
-test_that("derive_event_class_call: Transkript macht nur aus einem internen Call einen externen", {
-  expect_equal(
-    derive_event_class_call(
-      extern_participating_users = c(1, 0, 0, 0, 0),
-      participating_users        = c(2, 1, 1, 0, 1),
-      has_external_speaker       = c(FALSE, TRUE, FALSE, FALSE, NA)),
-    c("extern", "extern", "intern", "no", "intern"))
-})

@@ -101,6 +101,27 @@ test_that("die Transkript-Spalte landet nicht in der Zieltabelle", {
   expect_true(ergebnis$args$delete_missing)
 })
 
+test_that("derive_event_class_call: Transkript macht nur aus einem internen Call einen externen", {
+  expect_equal(
+    derive_event_class_call(
+      extern_participating_users = c(1, 0, 0, 0, 0),
+      participating_users        = c(2, 1, 1, 0, 1),
+      has_external_speaker       = c(FALSE, TRUE, FALSE, FALSE, NA)),
+    c("extern", "extern", "intern", "no", "intern"))
+})
+
+test_that("bigint-IDs als integer64 (wie aus RPostgres) treffen das Transkript", {
+  tabellen <- zuordnungs_tabellen()
+  tabellen[["raw.msgraph_calls"]]$id <- bit64::as.integer64(tabellen[["raw.msgraph_calls"]]$id)
+  tabellen[["raw.msgraph_call_participants"]]$call_id <-
+    bit64::as.integer64(tabellen[["raw.msgraph_call_participants"]]$call_id)
+  tabellen[["processed.msgraph_call_transcripts"]]$call_id <-
+    bit64::as.integer64(tabellen[["processed.msgraph_call_transcripts"]]$call_id)
+  klasse <- zuordnung_ausfuehren(tabellen)$data
+  expect_equal(klasse$event_class[klasse$event_id == 1L], "extern_planned_extern_call")
+  expect_equal(klasse$event_class[klasse$event_id == 2L], "extern_planned_intern_call")
+})
+
 test_that("ohne Transkripte bleibt die Zuordnung wie bisher", {
   tabellen <- zuordnungs_tabellen()
   tabellen[["processed.msgraph_call_transcripts"]] <-
