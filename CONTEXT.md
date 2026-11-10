@@ -77,6 +77,13 @@ _Avoid_: Employee, colleague.
 A placeholder participant Graph creates for an unresolved external attendee
 (`@external.guest` / `@external.msgraph`). Not an identifiable lead.
 
+**External speaker**:
+A speaker in a session's transcript whose name does not carry the Studyflix
+company suffix, and who speaks at least twice. Evidence that an external person
+attended the session, even when its attendance report lists only internal
+contacts. An unnamed speaker (`@1`) counts.
+_Avoid_: External participant (that is the attendance report's view), guest.
+
 ### Outcomes & matching
 
 **No-show**:
