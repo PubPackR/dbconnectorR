@@ -2,6 +2,11 @@
 #'
 #' This function matches MSGraph call and event records, classifies events, and updates the mapping.msgraph_call_event table.
 #'
+#' A call counts as external when its attendance report lists an external
+#' participant or when a transcript of the same meeting and day has an external
+#' speaker ([count_external_speakers()]). Teams leaves some external attendees
+#' out of the attendance report although they speak in the transcript.
+#'
 #' @param con A PostgreSQL connection object.
 #'
 #' @returns No return value. Updates the database table.
@@ -49,6 +54,21 @@ msgraph_map_calls_events <- function(con) {
     dplyr::filter(!(is_canceled & is_internal & is.na(call_start))) %>%
     dplyr::filter(!(is_canceled & intern_participating_users == 0))
 
+  # Externer Sprecher im Transkript zaehlt wie ein externer Teilnehmer im
+  # Bericht: Teams fuehrt manche Externe nicht im Anwesenheitsbericht, obwohl sie
+  # im Transkript sprechen (Asana 1220382115257832). Nur Gruppen ohne Externen im
+  # Bericht brauchen das Transkript; die Markierung gilt je (meeting_id, Tag) wie
+  # die Teilnehmerzaehlung.
+  kandidaten <- call_event_mapping$call_id[
+    call_event_mapping$participating_users > 0 &
+      call_event_mapping$extern_participating_users <= 0]
+  calls_mit_externem_sprecher <- load_external_speaker_call_ids(con, kandidaten)
+  call_event_mapping <- call_event_mapping %>%
+    dplyr::group_by(meeting_id, date) %>%
+    dplyr::mutate(has_external_speaker =
+                    any(as.character(call_id) %in% calls_mit_externem_sprecher)) %>%
+    dplyr::ungroup()
+
   all_events <- call_event_mapping %>%
     dplyr::select(-contact_id) %>%
     dplyr::mutate(event_class_planed = dplyr::case_when(
@@ -56,10 +76,8 @@ msgraph_map_calls_events <- function(con) {
       intern_invited_users > 0 ~ "intern",
       TRUE ~ "not"
     )) %>%
-    dplyr::mutate(event_class_call = dplyr::case_when(
-      extern_participating_users > 0 ~ "extern",
-      participating_users > 0 ~ "intern",
-      TRUE ~ "no"
+    dplyr::mutate(event_class_call = derive_event_class_call(
+      extern_participating_users, participating_users, has_external_speaker
     )) %>%
     dplyr::mutate(event_class = paste0(event_class_planed, "_planned", "_", event_class_call, "_call")) %>%
     dplyr::filter(!is.na(event_class)) %>%

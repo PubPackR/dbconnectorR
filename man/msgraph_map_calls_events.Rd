@@ -15,6 +15,12 @@ No return value. Updates the database table.
 \description{
 This function matches MSGraph call and event records, classifies events, and updates the mapping.msgraph_call_event table.
 }
+\details{
+A call counts as external when its attendance report lists an external
+participant or when a transcript of the same meeting and day has an external
+speaker (\code{\link[=count_external_speakers]{count_external_speakers()}}). Teams leaves some external attendees
+out of the attendance report although they speak in the transcript.
+}
 \examples{
 msgraph_map_calls_events(con)
 }
