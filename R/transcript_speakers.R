@@ -146,3 +146,41 @@ load_external_speaker_call_ids <- function(con, call_ids, min_lines = 2L) {
   n <- count_external_speakers(transkripte$transcript_content, min_lines = min_lines)
   unique(as.character(transkripte$call_id[n > 0]))
 }
+
+#' Zahl der externen Sprecher je Call laden
+#'
+#' Wie [load_external_speaker_call_ids()], liefert aber die Zahl: je Call das
+#' Maximum von [count_external_speakers()] ueber seine Transkripte mit Inhalt.
+#' Ein Call ohne solches Transkript fehlt im Ergebnis, einer mit Transkript ohne
+#' externen Sprecher hat 0. Signal fuer `processed.sales_meetings`
+#' (`external_speaker_count`).
+#'
+#' @param con Pool/DBI-Connection.
+#' @param call_ids IDs aus `raw.msgraph_calls`, fuer die gezaehlt wird.
+#' @param min_lines Siehe [count_external_speakers()].
+#' @return data.frame mit call_id (character) und external_speaker_count
+#'   (integer), eine Zeile je Call mit Transkript.
+#' @keywords internal
+load_external_speaker_counts <- function(con, call_ids, min_lines = 2L) {
+  # ---- start ---- #
+  leer <- data.frame(call_id = character(0), external_speaker_count = integer(0),
+                     stringsAsFactors = FALSE)
+  call_ids <- unique(as.character(call_ids[!is.na(call_ids)]))
+  if (length(call_ids) == 0) return(leer)
+
+  mit_transkript <- dplyr::tbl(con, I("processed.msgraph_call_transcripts")) %>%
+    dplyr::filter(!is.na(call_id), !is.na(transcript_content)) %>%
+    dplyr::distinct(call_id) %>%
+    dplyr::collect()
+  ids <- intersect(call_ids, as.character(mit_transkript$call_id))
+  if (length(ids) == 0) return(leer)
+
+  transkripte <- dplyr::tbl(con, I("processed.msgraph_call_transcripts")) %>%
+    dplyr::filter(call_id %in% !!ids, !is.na(transcript_content)) %>%
+    dplyr::select(call_id, transcript_content) %>%
+    dplyr::collect()
+  n <- count_external_speakers(transkripte$transcript_content, min_lines = min_lines)
+  je_call <- tapply(n, as.character(transkripte$call_id), max)
+  data.frame(call_id = names(je_call), external_speaker_count = as.integer(je_call),
+             stringsAsFactors = FALSE)
+}
