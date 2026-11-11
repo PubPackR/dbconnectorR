@@ -516,7 +516,12 @@ update_sales_meetings <- function(con, person_roles, tenant_id = NULL, now_utc =
     dplyr::left_join(dplyr::tbl(con, I("raw.msgraph_contacts")) %>% dplyr::select(id, email),
                      by = c("contact_id" = "id")) %>%
     dplyr::collect()
-  speaker_counts <- load_external_speaker_counts(con, call_event$call_id)
+  # Transkripte nur fuer Calls von Events mit Externem, nicht fuer interne Meetings.
+  mit_extern <- unique(as.character(participants$event_id[
+    !is.na(participants$email) & !(is_internal_email(participants$email) %in% TRUE) &
+      !is_synthetic_email(participants$email)]))
+  speaker_counts <- load_external_speaker_counts(
+    con, call_event$call_id[as.character(call_event$event_id) %in% mit_extern])
 
   message("  lade Lead-Zuordnung und CRM-Tasks ...")
   lead_mappings <- dplyr::tbl(con, I("mapping.crm_lead_msgraph_contact")) %>%
@@ -541,6 +546,15 @@ update_sales_meetings <- function(con, person_roles, tenant_id = NULL, now_utc =
   # delete_missing = TRUE leert die Tabellen bei einem leeren Ergebnis. Lieber
   # laut scheitern (Hausregel fuer do/main*.R).
   if (nrow(meetings) == 0) stop("update_sales_meetings: keine Meeting records. Abbruch.")
+  # delete_missing loescht hart. Schrumpft das Ergebnis auf unter die Haelfte des
+  # Bestands, deutet das auf einen Fehler beim Laden hin (wie in
+  # update_extern_event_classification()).
+  bestand <- dplyr::tbl(con, I("processed.sales_meetings")) %>% dplyr::count() %>% dplyr::pull(n)
+  if (as.numeric(bestand) > 0 && nrow(meetings) < 0.5 * as.numeric(bestand)) {
+    stop(sprintf(paste0("update_sales_meetings: %d Records, Bestand ist %.0f. delete_missing ",
+                        "wuerde mehr als die Haelfte loeschen. Abbruch."),
+                 nrow(meetings), as.numeric(bestand)))
+  }
   dubletten <- unique(meetings$meeting_key[duplicated(meetings$meeting_key)])
   if (length(dubletten) > 0) {
     stop("update_sales_meetings: ", length(dubletten), " meeting_keys doppelt, z.B. ",
