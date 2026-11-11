@@ -333,50 +333,20 @@ update_extern_event_classification <- function(con, min_date = Sys.Date() - 90, 
     dplyr::collect() %>%
     dplyr::mutate(is_internal = is_internal_email(email))
 
-  # Pro Event+Call: War der Organisator im Call?
-  event_call_map <- events_classified %>%
-    dplyr::filter(!is.na(call_id)) %>%
-    dplyr::select(event_id, call_id)
-
-  org_in_call_events <- event_call_map %>%
-    dplyr::inner_join(organizer_per_event, by = "event_id") %>%
-    dplyr::semi_join(
-      call_participants_df,
-      by = c("call_id" = "call_id", "organizer_contact_id" = "contact_id")
-    ) %>%
-    dplyr::distinct(event_id) %>%
-    dplyr::pull(event_id)
-
-  # Pro Call: Alle internen Teilnehmer (fuer Fallback)
-  internal_per_call <- call_participants_df %>%
-    dplyr::filter(is_internal) %>%
-    dplyr::group_by(call_id) %>%
-    dplyr::slice(1) %>%
-    dplyr::ungroup() %>%
-    dplyr::select(call_id, fallback_contact_id = contact_id)
-
   # Pro Event: Alle internen Teilnehmer (Organizer + weitere interne)
   internal_contacts_per_event <- all_event_participants %>%
     dplyr::left_join(contacts %>% dplyr::select(id, email), by = c("contact_id" = "id")) %>%
     dplyr::filter(is_internal_email(email)) %>%
     dplyr::select(event_id, contact_id, is_organizer)
 
-  # Zusammenbauen: Verantwortlicher pro Event (fuer is_responsible flag)
-  verantwortliche_contact <- events_classified %>%
-    dplyr::select(event_id, call_id) %>%
-    dplyr::left_join(organizer_per_event, by = "event_id") %>%
-    dplyr::left_join(internal_per_call, by = "call_id") %>%
-    dplyr::mutate(
-      has_call = !is.na(call_id),
-      org_was_in_call = event_id %in% org_in_call_events,
-      responsible_contact_id = dplyr::case_when(
-        !has_call ~ organizer_contact_id,
-        org_was_in_call ~ organizer_contact_id,
-        !is.na(fallback_contact_id) ~ fallback_contact_id,
-        TRUE ~ organizer_contact_id
-      )
-    ) %>%
-    dplyr::select(event_id, responsible_contact_id)
+  # Verantwortlicher pro Event (fuer is_responsible flag): dieselbe Regel wie in
+  # processed.sales_meetings, deshalb als Hilfsfunktion.
+  verantwortliche_contact <- derive_responsible_contact(
+    event_calls       = events_classified %>% dplyr::select(event_id, call_id),
+    organizers        = organizer_per_event,
+    call_participants = call_participants_df
+  ) %>%
+    tibble::as_tibble()
 
   message(paste0("  ", sum(!is.na(verantwortliche_contact$responsible_contact_id)),
                  " / ", nrow(verantwortliche_contact), " Events mit Verantwortlichem"))

@@ -184,3 +184,26 @@ test_that("detect_replaced_events: das Ergebnis passt zu derive_calendar_state",
   expect_equal(ergebnis$calendar_status, c("rescheduled", "active"))
   expect_equal(ergebnis$successor_event_id, c("2", NA))
 })
+
+# ---- derive_responsible_contact ----------------------------------------------------
+
+test_that("derive_responsible_contact: Organisator ohne Call oder wenn er im Call war, sonst erster Interner", {
+  event_calls <- data.frame(event_id = c(1, 2, 3, 4), call_id = c(NA, 10, 20, 30))
+  organizers <- data.frame(event_id = c(1, 2, 3, 4), organizer_contact_id = c(500, 500, 500, 500))
+  call_participants <- data.frame(
+    call_id     = c(10, 10, 20, 20, 30),
+    contact_id  = c(900, 500, 900, 600, 900),
+    is_internal = c(FALSE, TRUE, FALSE, TRUE, FALSE))
+  r <- derive_responsible_contact(event_calls, organizers, call_participants)
+  expect_equal(r$event_id, c(1, 2, 3, 4))
+  # 1 ohne Call, 2 Organisator im Call, 3 erster Interner, 4 kein Interner im Call
+  expect_equal(r$responsible_contact_id, c(500, 500, 600, 500))
+})
+
+test_that("derive_responsible_contact: ohne Organisator und ohne Call bleibt es leer", {
+  r <- derive_responsible_contact(
+    data.frame(event_id = 1, call_id = NA_real_),
+    data.frame(event_id = numeric(0), organizer_contact_id = numeric(0)),
+    data.frame(call_id = numeric(0), contact_id = numeric(0), is_internal = logical(0)))
+  expect_true(is.na(r$responsible_contact_id))
+})

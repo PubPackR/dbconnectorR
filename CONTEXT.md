@@ -31,6 +31,13 @@ with external attendees but no identifiable lead yields one placeholder row. A
 CRM VC-task of the same rep starting within 15 minutes of a placeholder row
 claims it, and the row takes that task's lead.
 
+**Meeting record**:
+One calendar row with at least one external participant, or one CRM VC-task
+that belongs to no calendar row. A meeting can have several records: the
+Bookings entry, its calendar copy and the own invite, or each step of a
+reschedule chain.
+_Avoid_: Meeting, Termin, event (each names the whole appointment or one source).
+
 **Leadless meeting**:
 A meeting with external (customer-side) attendees but none that map to a known
 CRM lead, neither by any of the lead's CRM addresses nor by unique domain — a mapping gap, not an

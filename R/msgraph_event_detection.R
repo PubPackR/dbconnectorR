@@ -87,6 +87,68 @@ detect_duplicate_events <- function(event_contacts, max_minutes = 15) {
   unique(duplicate_ids)
 }
 
+#' Derive the Responsible Contact of Each Event
+#'
+#' The responsible contact is the internal person who holds the meeting:
+#'
+#' - without a call, the organizer;
+#' - when the organizer joined the call, the organizer;
+#' - otherwise the first internal call participant;
+#' - without any internal call participant, the organizer again.
+#'
+#' Applies the rule to the given events only. Which call counts for an event
+#' is up to the caller ([update_extern_event_classification()] takes the call
+#' with an external participant first, then the longest).
+#'
+#' @param event_calls Data frame with one row per event: `event_id` and
+#'   `call_id` (`NA` without call).
+#' @param organizers Data frame with at most one row per event: `event_id` and
+#'   `organizer_contact_id` (the internal organizer).
+#' @param call_participants Data frame with one row per call participant:
+#'   `call_id`, `contact_id` and `is_internal` (logical). The first internal
+#'   row of a call, in the given order, is its fallback.
+#' @return Data frame with one row per row of `event_calls`: `event_id` and
+#'   `responsible_contact_id` (`NA` when neither organizer nor internal
+#'   participant is known).
+#' @keywords internal
+derive_responsible_contact <- function(event_calls, organizers, call_participants) {
+  # ---- start ---- #
+  org_in_call_events <- event_calls %>%
+    dplyr::filter(!is.na(call_id)) %>%
+    dplyr::select(event_id, call_id) %>%
+    dplyr::inner_join(organizers, by = "event_id") %>%
+    dplyr::semi_join(
+      call_participants,
+      by = c("call_id" = "call_id", "organizer_contact_id" = "contact_id")
+    ) %>%
+    dplyr::distinct(event_id) %>%
+    dplyr::pull(event_id)
+
+  internal_per_call <- call_participants %>%
+    dplyr::filter(is_internal) %>%
+    dplyr::group_by(call_id) %>%
+    dplyr::slice(1) %>%
+    dplyr::ungroup() %>%
+    dplyr::select(call_id, fallback_contact_id = contact_id)
+
+  event_calls %>%
+    dplyr::select(event_id, call_id) %>%
+    dplyr::left_join(organizers, by = "event_id") %>%
+    dplyr::left_join(internal_per_call, by = "call_id") %>%
+    dplyr::mutate(
+      has_call = !is.na(call_id),
+      org_was_in_call = event_id %in% org_in_call_events,
+      responsible_contact_id = dplyr::case_when(
+        !has_call ~ organizer_contact_id,
+        org_was_in_call ~ organizer_contact_id,
+        !is.na(fallback_contact_id) ~ fallback_contact_id,
+        TRUE ~ organizer_contact_id
+      )
+    ) %>%
+    dplyr::select(event_id, responsible_contact_id) %>%
+    as.data.frame()
+}
+
 #' Detect Cancelled Events Replaced by Another Calendar Item
 #'
 #' A rescheduled meeting sometimes comes back as a new calendar item with a new
