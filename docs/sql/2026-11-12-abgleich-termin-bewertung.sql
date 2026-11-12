@@ -7,11 +7,12 @@
 -- docs/sql/2026-11-12-referenz-termin-bewertung.sql ab "WITH heute". Nach einer Aenderung
 -- dort neu kopieren.
 --
--- Ein Ergebnis mit zwei Sichten:
+-- Ein Ergebnis mit drei Sichten:
 --   A  je befund: Zeilen und Kennzahlen beider Seiten nebeneinander. Jede Zeile der
 --      Referenz-SQL wird ihrem Gegenstueck in unified zugeordnet: Kalenderzeilen ueber
 --      Event und Lead, CRM-Zeilen von heute ueber ihren Task.
 --   B  je Monat (Termintag): dieselben Kennzahlen, ohne Zuordnung.
+--   C  Grain: Die Referenz-SQL hat je (meeting_id, lead_id) genau eine Zeile.
 -- Kennzahlen je Zeile (Meeting record x Lead, auf beiden Seiten dieselbe Ebene):
 --   gelegt         eigener_termin
 --   bewertbar      bewertbar und eigener_termin
@@ -366,10 +367,21 @@ sicht_b AS (
          count(*) FILTER (WHERE alt = 1 AND no_show)               AS no_show_alt
   FROM monat
   GROUP BY 2
+),
+
+-- C: Grain der Referenz-SQL. Erwartet: zeilen_ref = zeilen_alt.
+sicht_c AS (
+  SELECT 'C' AS sicht,
+         'Grain: zeilen_ref = Zeilen, zeilen_alt = Paare (meeting_id, lead_id)' AS schluessel,
+         count(*) AS zeilen_ref,
+         count(DISTINCT (meeting_id, coalesce(lead_id, -1))) AS zeilen_alt,
+         NULL::bigint, NULL::bigint, NULL::bigint, NULL::bigint,
+         NULL::bigint, NULL::bigint, NULL::bigint, NULL::bigint
+  FROM ref
 )
 
 SELECT *
-FROM (SELECT * FROM sicht_a UNION ALL SELECT * FROM sicht_b) x
+FROM (SELECT * FROM sicht_a UNION ALL SELECT * FROM sicht_b UNION ALL SELECT * FROM sicht_c) x
 ORDER BY sicht,
          CASE WHEN sicht = 'A' THEN -(zeilen_ref + zeilen_alt) END,
          CASE WHEN sicht = 'B' THEN schluessel END DESC;
