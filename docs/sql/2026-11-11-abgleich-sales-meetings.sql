@@ -250,9 +250,9 @@ ORDER BY abfrage, anzahl DESC;
 
 -- H: Tasks, die in sales_meeting_signals an einem Event hingen und jetzt woanders stehen,
 -- mit den Kandidaten, die match_crm_tasks() fuer sie sieht (gleicher Lead, gleicher
--- Berliner Tag, ohne Bookings-Zeilen und veraltete Kopien). Erwartet nach Q21: keine Zeile
--- mit status_alt_event = 'active', aktive_kandidaten = 1 und wo 'jetzt CRM-Zeile' oder
--- 'jetzt an anderem Event'.
+-- Berliner Tag, ohne Bookings-Zeilen und veraltete Kopien). Erwartet nach Q21 und Q25: bei
+-- status_alt_event = 'active' und aktive_kandidaten = 1 keine Zeile mit wo 'jetzt CRM-Zeile'
+-- und keine mit wo 'jetzt an anderem Event' und ketten = 1.
 WITH betroffen AS (
   SELECT DISTINCT s.crm_lead_task_id AS task_id, s.msgraph_event_id AS event_alt
   FROM processed.sales_meeting_signals s
@@ -272,6 +272,7 @@ WITH betroffen AS (
   SELECT k.task_id,
          count(DISTINCT m.id)                                              AS kandidaten,
          count(DISTINCT m.id) FILTER (WHERE m.calendar_status = 'active')  AS aktive_kandidaten,
+         count(DISTINCT m.meeting_chain_id)                                AS ketten,
          string_agg(DISTINCT m.calendar_status, ',')                       AS stati,
          count(DISTINCT m.starts_at_utc)                                   AS startzeiten,
          bool_or(m.msgraph_event_id = k.event_alt)                         AS alt_event_kandidat
@@ -303,6 +304,7 @@ SELECT v.wo,
        me.calendar_status                     AS status_alt_event,
        ka.kandidaten,
        ka.aktive_kandidaten,
+       ka.ketten,
        ka.stati,
        ka.startzeiten,
        coalesce(ka.alt_event_kandidat, false) AS alt_event_kandidat,
@@ -311,5 +313,5 @@ FROM task k
 JOIN verbleib v ON v.task_id = k.task_id
 JOIN kand ka ON ka.task_id = k.task_id
 JOIN processed.sales_meetings me ON me.msgraph_event_id = k.event_alt
-GROUP BY 1, 2, 3, 4, 5, 6, 7
+GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
 ORDER BY tasks DESC;

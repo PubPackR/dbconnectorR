@@ -301,10 +301,15 @@ build_sales_meetings <- function(events, participants, call_event, calls, call_p
               ev_leads[, c("event_id", "lead_id")], by = "event_id", all.x = TRUE, sort = TRUE)
   km <- match(kz$event_id, rec$event_id)
   tk <- as.data.frame(tasks)
-  # Unter mehreren Kandidaten gewinnt die einzige aktive Zeile (Q21).
+  # Unter mehreren Kandidaten gewinnt die einzige aktive Zeile: sofort, wenn alle
+  # Kandidaten in einer Kette liegen, sonst nur statt einer Mehrdeutigkeit (Q21, Q25).
+  # Die Kette steht schon hier fest, sie haengt nur an den Nachfolgern aus Schritt 2.
+  kal_kette <- derive_meeting_chains(paste0("msgraph_", rec$event_id), rec$successor_key,
+                                     as.numeric(rec$event_id))
   abgleich <- match_crm_tasks(tk, kz$lead_id, as.Date(rec$start_utc[km], tz = "Europe/Berlin"),
                               rec$responsible_contact_id[km], rec$start_utc[km],
-                              aktiv = rec$calendar_status[km] %in% "active")
+                              aktiv = rec$calendar_status[km] %in% "active",
+                              kette = kal_kette[km])
   tk$task_id     <- as.character(tk$id)
   tk$crm_task    <- as.character(tk$crm_task_id)
   tk$lead_chr    <- as.character(tk$lead_id)

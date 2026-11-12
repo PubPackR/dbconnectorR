@@ -10,7 +10,8 @@ match_crm_tasks(
   event_date,
   rep_kontakt,
   start,
-  aktiv = NULL
+  aktiv = NULL,
+  kette = NULL
 )
 }
 \arguments{
@@ -21,9 +22,13 @@ precise_time, contact_id (Rep), is_external_tool.}
 Rep-Kontakt und Beginn je Meeting-Zeile, parallel zueinander.}
 
 \item{aktiv}{logical je Meeting-Zeile, parallel zu \code{lead_id}: ob die Zeile im
-Kalender aktiv ist. Mit \code{NULL} (Standard) gilt die Regel \code{lead_tag_aktiv}
-nicht. Gesetzt gewinnt unter mehreren Kandidaten die einzige aktive Zeile
-vor Rep und Startzeit (Spec 2026-11-11-sales-meetings, Q21).}
+Kalender aktiv ist. Mit \code{NULL} (Standard) gelten \code{lead_tag_aktiv} und
+\code{mehrdeutig_aktiv} nicht (Spec 2026-11-11-sales-meetings, Q21, Q25).}
+
+\item{kette}{Kettenschluessel je Meeting-Zeile, parallel zu \code{lead_id}: Zeilen
+mit gleichem Wert sind Fassungen desselben Termins. Nur mit ihm gewinnt die
+einzige aktive Zeile schon vor Rep und Startzeit (\code{lead_tag_aktiv}). \code{NULL}
+(Standard) oder \code{NA}: jede Zeile gilt als eigener Termin.}
 }
 \value{
 data.frame je Zeile in \code{crm_meetings}: \code{row} (zugeordnete
@@ -41,10 +46,13 @@ gewinnt:
 \itemize{
 \item \code{externes_tool}, \code{ohne_lead}: kein Abgleich.
 \item \code{lead_tag}: genau eine Zeile mit gleichem Lead und gleichem Tag.
-\item \code{lead_tag_aktiv}: nur mit \code{aktiv}: mehrere, genau eine davon aktiv.
+\item \code{lead_tag_aktiv}: nur mit \code{aktiv} und \code{kette}: mehrere, alle in derselben
+Kette, genau eine davon aktiv.
 \item \code{lead_tag_rep}: mehrere, genau eine des gleichen Reps.
 \item \code{lead_tag_naechste_zeit}: mehrere des gleichen Reps, eindeutig naechster
 Beginn zu \code{precise_time}.
+\item \code{mehrdeutig_aktiv}: nur mit \code{aktiv}: Rest-Mehrdeutigkeit, genau eine
+Kandidatin aktiv, sie gewinnt.
 \item \code{mehrdeutig}: Rest-Mehrdeutigkeit, kein Treffer.
 \item \code{ersatzregel}: kein Kandidat, Zeile ohne Lead per \code{\link[=ersatzregel_paare]{ersatzregel_paare()}}.
 \item \code{netto_neu}: nichts gefunden.

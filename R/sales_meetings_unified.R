@@ -420,10 +420,13 @@ ersatzregel_kandidaten <- function(task, ohne_lead, event_date, rep_kontakt, sta
 #'
 #' - `externes_tool`, `ohne_lead`: kein Abgleich.
 #' - `lead_tag`: genau eine Zeile mit gleichem Lead und gleichem Tag.
-#' - `lead_tag_aktiv`: nur mit `aktiv`: mehrere, genau eine davon aktiv.
+#' - `lead_tag_aktiv`: nur mit `aktiv` und `kette`: mehrere, alle in derselben
+#'   Kette, genau eine davon aktiv.
 #' - `lead_tag_rep`: mehrere, genau eine des gleichen Reps.
 #' - `lead_tag_naechste_zeit`: mehrere des gleichen Reps, eindeutig naechster
 #'   Beginn zu `precise_time`.
+#' - `mehrdeutig_aktiv`: nur mit `aktiv`: Rest-Mehrdeutigkeit, genau eine
+#'   Kandidatin aktiv, sie gewinnt.
 #' - `mehrdeutig`: Rest-Mehrdeutigkeit, kein Treffer.
 #' - `ersatzregel`: kein Kandidat, Zeile ohne Lead per [ersatzregel_paare()].
 #' - `netto_neu`: nichts gefunden.
@@ -437,9 +440,12 @@ ersatzregel_kandidaten <- function(task, ohne_lead, event_date, rep_kontakt, sta
 #' @param lead_id,event_date,rep_kontakt,start Lead (NA = ohne Lead), Datum,
 #'   Rep-Kontakt und Beginn je Meeting-Zeile, parallel zueinander.
 #' @param aktiv logical je Meeting-Zeile, parallel zu `lead_id`: ob die Zeile im
-#'   Kalender aktiv ist. Mit `NULL` (Standard) gilt die Regel `lead_tag_aktiv`
-#'   nicht. Gesetzt gewinnt unter mehreren Kandidaten die einzige aktive Zeile
-#'   vor Rep und Startzeit (Spec 2026-11-11-sales-meetings, Q21).
+#'   Kalender aktiv ist. Mit `NULL` (Standard) gelten `lead_tag_aktiv` und
+#'   `mehrdeutig_aktiv` nicht (Spec 2026-11-11-sales-meetings, Q21, Q25).
+#' @param kette Kettenschluessel je Meeting-Zeile, parallel zu `lead_id`: Zeilen
+#'   mit gleichem Wert sind Fassungen desselben Termins. Nur mit ihm gewinnt die
+#'   einzige aktive Zeile schon vor Rep und Startzeit (`lead_tag_aktiv`). `NULL`
+#'   (Standard) oder `NA`: jede Zeile gilt als eigener Termin.
 #' @return data.frame je Zeile in `crm_meetings`: `row` (zugeordnete
 #'   Meeting-Zeile, NA = keine), `match_rule`, `candidate_count` (Kandidaten der
 #'   entscheidenden Regel, NA bei `externes_tool`/`ohne_lead`) und
@@ -447,9 +453,12 @@ ersatzregel_kandidaten <- function(task, ohne_lead, event_date, rep_kontakt, sta
 #' @keywords internal
 # ---- start ---- #
 match_crm_tasks <- function(crm_meetings, lead_id, event_date, rep_kontakt, start,
-                            aktiv = NULL) {
+                            aktiv = NULL, kette = NULL) {
   if (!is.null(aktiv) && (!is.logical(aktiv) || length(aktiv) != length(lead_id))) {
     stop("match_crm_tasks: aktiv muss NULL oder logical mit einer Stelle je Meeting-Zeile sein.")
+  }
+  if (!is.null(kette) && length(kette) != length(lead_id)) {
+    stop("match_crm_tasks: kette muss NULL sein oder eine Stelle je Meeting-Zeile haben.")
   }
   n <- nrow(crm_meetings)
   lead_id     <- as.character(lead_id)
@@ -471,27 +480,43 @@ match_crm_tasks <- function(crm_meetings, lead_id, event_date, rep_kontakt, star
     n_cand[i] <- length(cand)
     if (length(cand) == 0) { offen <- c(offen, i); next }
     regel <- "lead_tag"
-    # Tiebreak 0, nur mit `aktiv`: neben der aktiven Zeile stehen am selben Tag
-    # oft fruehere Fassungen desselben Termins (verlegt, abgesagt, verschwunden).
-    # Genau eine aktive Zeile gewinnt, sonst greifen Rep und Startzeit wie bisher.
-    aktive <- if (is.null(aktiv) || length(cand) < 2) integer(0) else cand[aktiv[cand] %in% TRUE]
-    if (length(aktive) == 1) {
-      cand <- aktive
-      regel <- "lead_tag_aktiv"
-    } else if (length(cand) > 1) {
-      # Tiebreak 1: gleicher Rep-Kontakt.
-      same_rep <- cand[rep_kontakt[cand] == as.character(cm$contact_id)]
-      if (length(same_rep) == 1) {
-        cand <- same_rep
-        regel <- "lead_tag_rep"
-      } else if (length(same_rep) > 1 && !is.na(cm$precise_time)) {
-        # Tiebreak 2: naechste event_start zur precise_time (Sekunden-Distanz).
-        d <- abs(as.numeric(start[same_rep]) - as.numeric(cm$precise_time))
-        if (sum(d == min(d, na.rm = TRUE), na.rm = TRUE) == 1) {
-          cand <- same_rep[which.min(d)]
-          regel <- "lead_tag_naechste_zeit"
-        } else { match_rule[i] <- "mehrdeutig"; next }  # echte Rest-Mehrdeutigkeit
-      } else { match_rule[i] <- "mehrdeutig"; next }    # kein eindeutiger Rep
+    if (length(cand) > 1) {
+      # Mit `aktiv` und `kette` (Spec 2026-11-11-sales-meetings, Q21, Q25): neben
+      # der aktiven Zeile stehen am selben Tag oft fruehere Fassungen desselben
+      # Termins (verlegt, abgesagt, verschwunden).
+      aktive <- if (is.null(aktiv)) integer(0) else cand[aktiv[cand] %in% TRUE]
+      eine_kette <- !is.null(kette) && !anyNA(kette[cand]) && length(unique(kette[cand])) == 1
+      entschieden <- FALSE
+      if (length(aktive) == 1 && eine_kette) {
+        # Tiebreak 0: alle Kandidaten sind Fassungen eines Termins, die aktive gewinnt.
+        cand <- aktive
+        regel <- "lead_tag_aktiv"
+        entschieden <- TRUE
+      }
+      if (!entschieden) {
+        # Tiebreak 1: gleicher Rep-Kontakt.
+        same_rep <- cand[rep_kontakt[cand] == as.character(cm$contact_id)]
+        if (length(same_rep) == 1) {
+          cand <- same_rep
+          regel <- "lead_tag_rep"
+          entschieden <- TRUE
+        } else if (length(same_rep) > 1 && !is.na(cm$precise_time)) {
+          # Tiebreak 2: naechste event_start zur precise_time (Sekunden-Distanz).
+          d <- abs(as.numeric(start[same_rep]) - as.numeric(cm$precise_time))
+          if (sum(d == min(d, na.rm = TRUE), na.rm = TRUE) == 1) {
+            cand <- same_rep[which.min(d)]
+            regel <- "lead_tag_naechste_zeit"
+            entschieden <- TRUE
+          }
+        }
+      }
+      if (!entschieden) {
+        # Rest-Mehrdeutigkeit. Mit `aktiv` gewinnt die einzige aktive Zeile statt
+        # einer eigenen CRM-Zeile (Q25), sonst kein Treffer.
+        if (length(aktive) != 1) { match_rule[i] <- "mehrdeutig"; next }
+        cand <- aktive
+        regel <- "mehrdeutig_aktiv"
+      }
     }
     row[i] <- cand[1]
     match_rule[i] <- regel
