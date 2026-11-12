@@ -173,3 +173,17 @@ several tasks on the same meeting a written show-up beats no-show, no-show beats
 cancelled, and any recognised outcome beats none. Where tasks or notes disagree,
 the meeting is marked as conflicting.
 _Avoid_: Strongest status (the older reading, where cancelled won).
+
+**Meeting without Teams meeting**:
+A calendar row that never had a Teams online meeting, for example a phone call
+or an on-site visit. Teams can say nothing about its attendance; only a CRM
+VC-task can.
+_Avoid_: Unmeasurable attendance (that also covers old-tenant and unreachable
+links), offline meeting.
+
+**Own meeting**:
+A meeting record that stands for an appointment of its own and therefore counts
+as booked. Not own are the cancelled half of a rescheduled meeting, a duplicate,
+an internal meeting, a calendar row cancelled without any session, and a meeting
+without Teams meeting that no CRM VC-task vouches for.
+_Avoid_: Valid meeting, real meeting.
