@@ -112,6 +112,12 @@ generate_and_save_transcript_summaries <- function(con, openrouter_model, openro
     return(invisible(NULL))
   }
 
+  # Einzelne Fehler werden uebersprungen und im naechsten Lauf erneut versucht.
+  # Gelingt in einem Lauf aber keine einzige Zusammenfassung (z. B. weil der
+  # einzige erlaubte OpenRouter-Endpunkt ausfaellt), bricht die Funktion am
+  # Ende ab, damit FlowForce den Lauf als fehlgeschlagen meldet.
+  n_saved <- 0L
+
   for (i in seq_len(nrow(transcripts_with_date))) {
     row <- transcripts_with_date[i, ]
 
@@ -140,6 +146,7 @@ generate_and_save_transcript_summaries <- function(con, openrouter_model, openro
          WHERE transcript_id = $2",
         params = list(summary_text, row$transcript_id)
       )
+      n_saved <- n_saved + 1L
 
     }, error = function(e) {
       cat("❌ Failed to summarize transcript ID:", row$transcript_id, "\n")
@@ -150,7 +157,34 @@ generate_and_save_transcript_summaries <- function(con, openrouter_model, openro
     Sys.sleep(1.2)  # Respect API limits
   }
 
-  message("Transcript summaries successfully saved to the database.")
+  stop_if_no_summary_saved(nrow(transcripts_with_date), n_saved)
+  message(sprintf("Transcript summaries saved to the database: %d of %d.",
+                  n_saved, nrow(transcripts_with_date)))
+}
+
+
+#' Bricht ab, wenn in einem Lauf keine einzige Zusammenfassung gespeichert wurde
+#'
+#' Der Zusammenfassungs-Schritt ueberspringt einzelne Fehler, damit ein kaputtes
+#' Transkript die anderen nicht aufhaelt. Scheitern aber alle, liegt der Fehler
+#' fast immer ausserhalb des einzelnen Transkripts: das Modell ist nicht mehr
+#' verfuegbar oder der einzige erlaubte OpenRouter-Endpunkt verweigert die
+#' Anfrage. Ohne Abbruch endete der Lauf erfolgreich und niemand merkte, dass
+#' keine Protokolle mehr ins CRM gehen (Hausregel: FlowForce braucht den Absturz).
+#'
+#' @param n_attempted Zahl der Transkripte, die der Lauf versucht hat.
+#' @param n_saved Zahl der gespeicherten Zusammenfassungen.
+#' @return `invisible(NULL)`, oder ein Fehler.
+#' @keywords internal
+# ---- start ---- #
+stop_if_no_summary_saved <- function(n_attempted, n_saved) {
+  if (n_attempted > 0 && n_saved == 0) {
+    stop(sprintf(paste0(
+      "No transcript summary could be saved in this run (%d attempted). ",
+      "Check that the OpenRouter model is available and that its allowed provider ",
+      "endpoints accept the request."), n_attempted), call. = FALSE)
+  }
+  invisible(NULL)
 }
 
 
