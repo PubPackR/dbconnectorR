@@ -17,7 +17,7 @@ Ablauf:
 4. **Teams.** Je Event alle Zeilen von `mapping.msgraph_call_event`. Eine Sitzung mit `extern_call` macht den Termin zu `external_joined`, sonst eine mit `intern_call` zu `internal_only`. Ein Event ohne Mapping-Zeile hat keinen Call. Die Rangfolge mit Zukunft, Alt-Tenant, nicht abrufbar und ohne Link kommt unverändert aus `derive_call_status()` und wird ins Englische übersetzt (Q9). Beginn und Dauer kommen vom längsten Call, `external_speaker_count` ist das Maximum von `count_external_speakers()` über alle Transkripte der Calls des Events (Q16).
 5. **Personen.** Die verantwortliche Person bestimmt die neue reine Funktion `derive_responsible_contact()` in `R/msgraph_event_detection.R`, die auch die Klassifikation aufruft (Q5). Je Event zählt dabei der Call, den die Klassifikation wählt: zuerst einer mit externem Teilnehmer, dann der längste. Der Aufrufer übergibt `person_roles`, eine Funktion, die Kontakte in Personen übersetzt (Q8). Eine Person-ID, die es in `raw.personio_persons` nicht mehr gibt, wird leer geschrieben, damit der Fremdschlüssel den Lauf nicht abbricht.
 6. **Duplikate.** `detect_duplicate_events()` sieht nur Zeilen nach Q2.
-7. **CRM-Zuordnung.** `match_crm_tasks()` auf der Startmenge (Q1). Kandidaten sind die Kalenderzeilen je Lead, ohne `booking:`-Einträge, Kalenderkopien und veraltete Kopien. Ein Task über die Ersatzregel gibt einer Zeile ohne Lead seinen Lead.
+7. **CRM-Zuordnung.** `match_crm_tasks()` auf der Startmenge (Q1). Kandidaten sind die Kalenderzeilen je Lead, ohne `booking:`-Einträge, Kalenderkopien und veraltete Kopien. Unter mehreren Kandidaten gewinnt die einzige aktive Zeile, erst danach greifen Rep und nächste Startzeit (Q21). Ein Task über die Ersatzregel gibt einer Zeile ohne Lead seinen Lead.
 8. **Leads.** Je Kalenderzeile jeder Lead aus `meeting_leads_ableiten()` (Mapping, sonst eindeutige Domain), dazu der Lead aus der Ersatzregel; je CRM-Zeile die Leads ihrer Task-Zeilen. Je Zeile und Lead zählt der Task mit dem stärksten Ausgang nach `CRM_STATUS_RANG`, bei Gleichstand die kleinere `crm_task_id`.
 9. **Schreiben**, in einer Transaktion: Upsert von `sales_meetings` über `meeting_key` mit `delete_missing`, danach Nachfolger und Ketten-ID per UPDATE über `meeting_key`, weil die IDs erst die Datenbank vergibt, zuletzt Upsert von `sales_meeting_leads` über `(meeting_id, lead_id)` mit `delete_missing`.
 
@@ -57,9 +57,16 @@ Die Empfehlungen zu Q1 bis Q16 hat der Nutzer am 10.11.2026 mit „passt alles�
 - **Q19 `meeting_chain_id` bei mehreren Anfängen:** passt (11.11.2026). Erste Zeile ist die zuerst gespeicherte, also die kleinste `msgraph_event_id`, nicht der früheste Beginn.
 - **Q20 `is_duplicate` für nicht geprüfte Zeilen:** passt (11.11.2026). FALSE für alle Kalenderzeilen außerhalb der Prüfung, NULL nur für CRM-Zeilen.
 
+Die Empfehlungen zu Q21 bis Q24 hat der Nutzer am 12.11.2026 nach dem ersten Handlauf mit „passt alles“ bestätigt.
+
+- **Q21 Wer unter mehreren Kandidaten gewinnt:** passt alles. a) Ist genau ein Kandidat aktiv, gewinnt er. Erst danach greifen Rep und nächste Startzeit. Anlass: Durch die größere Startmenge steht am selben Tag neben der aktiven Zeile oft eine frühere Fassung desselben Termins (verlegt, abgesagt, verschwunden). Im Handlauf blieben deshalb 21 Tasks mehrdeutig und standen zusätzlich als CRM-Zeile in `sales_meetings`, 20 landeten an der früheren Fassung.
+- **Q22 Fix in diesem Ticket:** passt alles. Eigener Subtask mit eigenem PR, danach dieselbe Image-Kette wie bei 0.0.0.9043.
+- **Q23 Tasks ohne Kandidat:** passt alles. Bekannter Rest, ohne weitere Ursachensuche (siehe Validierung).
+- **Q24 Ort der Regel:** passt alles. Optionales Argument `aktiv` von `match_crm_tasks()`, ohne Wert gilt das alte Verhalten. Nur `update_sales_meetings()` übergibt es, `sales_meeting_signals` und das Task-Mapping bleiben unverändert (Q7).
+
 ## Betroffen
 
-- dbconnectorR: `R/sales_meetings.R` (neu), `R/msgraph_event_detection.R` (`derive_responsible_contact()`), `R/msgraph_extern_event_classification.R` (ruft sie auf), `R/transcript_speakers.R` (Lader für die Sprecherzahl je Call), `inst/sql/2026-11-11-sales-meetings.sql`, `docs/sql/2026-11-11-abgleich-sales-meetings.sql`, `CONTEXT.md`, Tests.
+- dbconnectorR: `R/sales_meetings.R` (neu), `R/sales_meetings_unified.R` (`match_crm_tasks()`, Argument `aktiv`, Q24), `R/msgraph_event_detection.R` (`derive_responsible_contact()`), `R/msgraph_extern_event_classification.R` (ruft sie auf), `R/transcript_speakers.R` (Lader für die Sprecherzahl je Call), `inst/sql/2026-11-11-sales-meetings.sql`, `docs/sql/2026-11-11-abgleich-sales-meetings.sql`, `CONTEXT.md`, Tests.
 - studyflix-apps: `base-apps/msgraph-ingestion/do/main.R`, `images/r/kpir.ref`.
 - Neue Tabellen `processed.sales_meetings`, `processed.sales_meeting_leads`. Gelesen werden `raw.msgraph_events`, `raw.msgraph_event_participants`, `raw.msgraph_contacts`, `raw.msgraph_calls`, `raw.msgraph_call_participants`, `mapping.msgraph_call_event`, `processed.msgraph_call_transcripts`, `mapping.crm_lead_msgraph_contact`, `raw.crm_lead_mail_address`, `raw.crm_lead_tasks`, `raw.crm_lead_task_comments`, `raw.personio_persons`.
 
@@ -78,3 +85,12 @@ Nach dem ersten Nachtlauf mit dem neuen Job, alle Abfragen in `docs/sql/2026-11-
 - `meeting_key` ist eindeutig, je Kalenderzeile mit externem Teilnehmer steht genau eine Zeile in `sales_meetings`.
 - `(meeting_id, lead_id)` ist eindeutig in `sales_meeting_leads`.
 - Abgleich gegen `sales_meeting_signals` über die Event-ID: jede Event-ID dort steht auch in `sales_meetings`, und die Abweichungen bei Ausgang, Teams-Status und Legedatum sind nach Grund gezählt.
+
+Erster Lauf, Handlauf am 12.11.2026 mit 0.0.0.9043 (Abfragen A bis F, Gründe aus G und H):
+
+- A bis C erfüllt: 54.345 Records bei 54.345 Keys, 50.119 Kalenderzeilen je einmal, 4.226 CRM-Zeilen; 51.293 Lead-Zeilen bei 51.293 Paaren. B ohne fehlende oder zusätzliche Kalenderzeile.
+- D: alle 34.471 Events aus `sales_meeting_signals` stehen in `sales_meetings`. Teams-Status ohne Abweichung. 59 Abweichungen beim Legedatum: 48 Ersatztermine erben ohne Schwelle das frühere Datum (Q2, Q4), 11 `booking:`-Einträge tragen den Tag ihres Beginns (Q10).
+- E und F: 1.524 Tasks, die bisher CRM-Zeile waren, hängen jetzt an einer Kalenderzeile (größere Startmenge, Q1). 34 weitere sind an keinem Paar Sieger; Annahme: sie haben gegen einen Task mit stärkerem Ausgang verloren. 10 Tasks an veralteten Kopien sind jetzt CRM-Zeile (Q1). 41 Tasks hatten mehrere Kandidaten mit dem alten Event darunter: bei 37 ist genau einer aktiv, das löst Q21; 4 bleiben beim alten Tiebreak (3 mit zwei aktiven Zeilen, 1 mit zwei verlegten).
+- Bekannter Rest (Q23): 4 Tasks, deren altes Event den Lead des Tasks nicht mehr trägt, haben keinen Kandidaten und sind CRM-Zeile. Annahme: früher kam ihr Lead über die Ersatzregel.
+
+Nach Q21 zeigt H keine Zeile mehr mit `status_alt_event = 'active'`, `aktive_kandidaten = 1` und `wo` gleich „jetzt CRM-Zeile“ oder „jetzt an anderem Event“.

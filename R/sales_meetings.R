@@ -301,8 +301,10 @@ build_sales_meetings <- function(events, participants, call_event, calls, call_p
               ev_leads[, c("event_id", "lead_id")], by = "event_id", all.x = TRUE, sort = TRUE)
   km <- match(kz$event_id, rec$event_id)
   tk <- as.data.frame(tasks)
+  # Unter mehreren Kandidaten gewinnt die einzige aktive Zeile (Q21).
   abgleich <- match_crm_tasks(tk, kz$lead_id, as.Date(rec$start_utc[km], tz = "Europe/Berlin"),
-                              rec$responsible_contact_id[km], rec$start_utc[km])
+                              rec$responsible_contact_id[km], rec$start_utc[km],
+                              aktiv = rec$calendar_status[km] %in% "active")
   tk$task_id     <- as.character(tk$id)
   tk$crm_task    <- as.character(tk$crm_task_id)
   tk$lead_chr    <- as.character(tk$lead_id)

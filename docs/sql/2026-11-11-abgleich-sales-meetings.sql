@@ -117,9 +117,10 @@ GROUP BY 1, 2
 ORDER BY 3 DESC;
 
 
--- F: CRM-only-Zeilen. "nur neu" sind vor allem Tasks, deren Kalenderzeile Bookings-Eintrag
--- oder Kalenderkopie ist (Q1); "nur alt" Tasks, die jetzt eine Kalenderzeile finden, weil die
--- Startmenge groesser ist.
+-- F: CRM-only-Zeilen. "nur alt" sind Tasks, die jetzt eine Kalenderzeile finden, weil die
+-- Startmenge groesser ist (Q1). "nur neu" waren im Handlauf vom 12.11.2026 Tasks an
+-- veralteten Kopien (Q1) und Tasks, die mit einer frueheren Fassung desselben Termins
+-- konkurrierten (Q21). Gruende je Zeile: G und H.
 SELECT CASE WHEN s.meeting_key IS NULL THEN 'nur neu'
             WHEN m.meeting_key IS NULL THEN 'nur alt'
             ELSE 'beide' END AS befund,
@@ -130,3 +131,185 @@ FULL JOIN (SELECT meeting_key FROM processed.sales_meetings
            WHERE meeting_key LIKE 'crm\_%') m ON m.meeting_key = s.meeting_key
 GROUP BY 1
 ORDER BY 2 DESC;
+
+
+-- G: Gruende der Abweichungen aus D, E und F, ein Ergebnis: abfrage | befund | anzahl.
+-- Erwartbar: D "hat Vorgaenger | neu frueher" (Q2, Q4) und "bookings_start" (Q10);
+-- E und F "Task ... jetzt an anderem Event" oder "jetzt CRM-Zeile" an veralteten Kopien (Q1).
+WITH sig_ev AS (
+  SELECT DISTINCT ON (msgraph_event_id) msgraph_event_id, original_created_at
+  FROM processed.sales_meeting_signals
+  WHERE msgraph_event_id IS NOT NULL
+  ORDER BY msgraph_event_id, id
+), vorgaenger AS (
+  SELECT DISTINCT successor_meeting_id AS id
+  FROM processed.sales_meetings
+  WHERE successor_meeting_id IS NOT NULL
+), d AS (
+  SELECT 'D booked_date'::text AS abfrage,
+         concat_ws(' | ', m.booked_date_source,
+                   coalesce(m.booking_role, 'ohne booking_role'),
+                   m.calendar_status,
+                   CASE WHEN v.id IS NOT NULL THEN 'hat Vorgaenger' ELSE 'ohne Vorgaenger' END,
+                   CASE WHEN m.booked_date IS NULL THEN 'neu leer'
+                        WHEN s.original_created_at IS NULL THEN 'alt leer'
+                        WHEN m.booked_date < (s.original_created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin')::date
+                          THEN 'neu frueher' ELSE 'neu spaeter' END) AS befund
+  FROM sig_ev s
+  JOIN processed.sales_meetings m ON m.msgraph_event_id = s.msgraph_event_id
+  LEFT JOIN vorgaenger v ON v.id = m.id
+  WHERE (s.original_created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin')::date
+        IS DISTINCT FROM m.booked_date
+), neu_paar AS (
+  SELECT m.msgraph_event_id, l.lead_id, l.crm_outcome, l.crm_lead_task_id
+  FROM processed.sales_meeting_leads l
+  JOIN processed.sales_meetings m ON m.id = l.meeting_id
+  WHERE m.msgraph_event_id IS NOT NULL
+), e_abw AS (
+  SELECT a.msgraph_event_id, a.crm_lead_task_id AS task_alt,
+         CASE a.crm_status WHEN 'show_up' THEN 'held' WHEN 'storniert' THEN 'cancelled'
+                           WHEN 'ohne_ausgang' THEN 'no_outcome' WHEN 'kein_task' THEN 'no_task'
+                           ELSE a.crm_status END AS crm_alt,
+         n.crm_outcome AS crm_neu, n.crm_lead_task_id AS task_neu
+  FROM processed.sales_meeting_signals a
+  LEFT JOIN neu_paar n ON n.msgraph_event_id = a.msgraph_event_id AND n.lead_id = a.lead_id
+  WHERE a.msgraph_event_id IS NOT NULL AND a.lead_id IS NOT NULL
+), e AS (
+  SELECT 'E crm_outcome'::text AS abfrage,
+         concat_ws(' | ', x.crm_alt || ' -> ' || coalesce(x.crm_neu, 'keine Lead-Zeile'),
+                   coalesce(me.booking_role, 'ohne booking_role'),
+                   me.calendar_status,
+                   CASE
+                     WHEN x.task_alt IS NOT NULL AND x.task_alt IS DISTINCT FROM x.task_neu THEN
+                       CASE WHEN EXISTS (SELECT 1 FROM raw.crm_lead_tasks t
+                                         JOIN processed.sales_meetings c ON c.meeting_key = 'crm_' || t.crm_task_id
+                                         WHERE t.id = x.task_alt)
+                              THEN 'Task alt jetzt CRM-Zeile'
+                            WHEN EXISTS (SELECT 1 FROM neu_paar n2
+                                         WHERE n2.crm_lead_task_id = x.task_alt
+                                           AND n2.msgraph_event_id <> x.msgraph_event_id)
+                              THEN 'Task alt jetzt an anderem Event'
+                            ELSE 'Task alt nirgends Sieger' END
+                     WHEN x.task_alt IS NULL AND x.task_neu IS NOT NULL THEN
+                       CASE WHEN EXISTS (SELECT 1 FROM processed.sales_meeting_signals s2
+                                         WHERE s2.crm_lead_task_id = x.task_neu AND s2.msgraph_event_id IS NULL)
+                              THEN 'Task neu war alt CRM-Zeile'
+                            WHEN EXISTS (SELECT 1 FROM processed.sales_meeting_signals s2
+                                         WHERE s2.crm_lead_task_id = x.task_neu
+                                           AND s2.msgraph_event_id <> x.msgraph_event_id)
+                              THEN 'Task neu war alt an anderem Event'
+                            ELSE 'Task neu war alt nirgends' END
+                     ELSE 'gleicher Task' END) AS befund
+  FROM e_abw x
+  JOIN processed.sales_meetings me ON me.msgraph_event_id = x.msgraph_event_id
+  WHERE x.crm_alt IS DISTINCT FROM x.crm_neu
+), f_alt AS (
+  SELECT DISTINCT meeting_key FROM processed.sales_meeting_signals WHERE meeting_key LIKE 'crm\_%'
+), f_neu AS (
+  SELECT meeting_key FROM processed.sales_meetings WHERE meeting_key LIKE 'crm\_%'
+), f_alt_ziel AS (
+  SELECT a.meeting_key,
+         bool_or(t.id IS NULL)   AS task_fehlt,
+         bool_and(t.is_deleted)  AS task_geloescht,
+         min(m.calendar_status)  AS status_neu
+  FROM f_alt a
+  LEFT JOIN f_neu n USING (meeting_key)
+  LEFT JOIN raw.crm_lead_tasks t ON t.crm_task_id::text = substr(a.meeting_key, 5)
+  LEFT JOIN processed.sales_meeting_leads l ON l.crm_lead_task_id = t.id
+  LEFT JOIN processed.sales_meetings m ON m.id = l.meeting_id AND m.msgraph_event_id IS NOT NULL
+  WHERE n.meeting_key IS NULL
+  GROUP BY a.meeting_key
+), f AS (
+  SELECT 'F nur alt'::text AS abfrage,
+         CASE WHEN status_neu IS NOT NULL THEN 'Task jetzt an Kalenderzeile, ' || status_neu
+              WHEN task_fehlt THEN 'Task fehlt in raw.crm_lead_tasks'
+              WHEN task_geloescht THEN 'Task geloescht'
+              ELSE 'Task nirgends Sieger' END AS befund
+  FROM f_alt_ziel
+  UNION ALL
+  SELECT 'F nur neu'::text,
+         CASE WHEN min(m2.calendar_status) IS NOT NULL
+                THEN 'Task alt an Kalenderzeile, ' || coalesce(min(m2.booking_role), 'ohne booking_role')
+                     || ', ' || min(m2.calendar_status)
+              ELSE 'Task alt nirgends' END
+  FROM f_neu n
+  LEFT JOIN f_alt a USING (meeting_key)
+  JOIN raw.crm_lead_tasks t ON t.crm_task_id::text = substr(n.meeting_key, 5)
+  LEFT JOIN processed.sales_meeting_signals s ON s.crm_lead_task_id = t.id
+  LEFT JOIN processed.sales_meetings m2 ON m2.msgraph_event_id = s.msgraph_event_id
+  WHERE a.meeting_key IS NULL
+  GROUP BY n.meeting_key
+)
+SELECT abfrage, befund, count(*) AS anzahl FROM d GROUP BY 1, 2
+UNION ALL
+SELECT abfrage, befund, count(*) FROM e GROUP BY 1, 2
+UNION ALL
+SELECT abfrage, befund, count(*) FROM f GROUP BY 1, 2
+ORDER BY abfrage, anzahl DESC;
+
+
+-- H: Tasks, die in sales_meeting_signals an einem Event hingen und jetzt woanders stehen,
+-- mit den Kandidaten, die match_crm_tasks() fuer sie sieht (gleicher Lead, gleicher
+-- Berliner Tag, ohne Bookings-Zeilen und veraltete Kopien). Erwartet nach Q21: keine Zeile
+-- mit status_alt_event = 'active', aktive_kandidaten = 1 und wo 'jetzt CRM-Zeile' oder
+-- 'jetzt an anderem Event'.
+WITH betroffen AS (
+  SELECT DISTINCT s.crm_lead_task_id AS task_id, s.msgraph_event_id AS event_alt
+  FROM processed.sales_meeting_signals s
+  WHERE s.msgraph_event_id IS NOT NULL
+    AND s.crm_lead_task_id IS NOT NULL
+    AND NOT EXISTS (SELECT 1
+                    FROM processed.sales_meeting_leads l
+                    JOIN processed.sales_meetings m ON m.id = l.meeting_id
+                    WHERE l.crm_lead_task_id = s.crm_lead_task_id
+                      AND m.msgraph_event_id = s.msgraph_event_id)
+), task AS (
+  SELECT b.task_id, b.event_alt, t.crm_task_id, t.lead_id,
+         (t.precise_time AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Berlin')::date AS task_tag
+  FROM betroffen b
+  JOIN raw.crm_lead_tasks t ON t.id = b.task_id
+), kand AS (
+  SELECT k.task_id,
+         count(DISTINCT m.id)                                              AS kandidaten,
+         count(DISTINCT m.id) FILTER (WHERE m.calendar_status = 'active')  AS aktive_kandidaten,
+         string_agg(DISTINCT m.calendar_status, ',')                       AS stati,
+         count(DISTINCT m.starts_at_utc)                                   AS startzeiten,
+         bool_or(m.msgraph_event_id = k.event_alt)                         AS alt_event_kandidat
+  FROM task k
+  LEFT JOIN processed.sales_meeting_leads l
+         ON l.lead_id = k.lead_id AND l.lead_match_source IN ('mapping', 'domain')
+  LEFT JOIN processed.sales_meetings m
+         ON m.id = l.meeting_id
+        AND m.msgraph_event_id IS NOT NULL
+        AND m.meeting_date = k.task_tag
+        AND m.booking_role IS NULL
+        AND m.calendar_status <> 'stale_copy'
+  GROUP BY k.task_id
+), verbleib AS (
+  SELECT k.task_id,
+         CASE
+           WHEN EXISTS (SELECT 1 FROM processed.sales_meetings c
+                        WHERE c.meeting_key = 'crm_' || k.crm_task_id)
+             THEN 'jetzt CRM-Zeile'
+           WHEN EXISTS (SELECT 1 FROM processed.sales_meeting_leads l2
+                        JOIN processed.sales_meetings m2 ON m2.id = l2.meeting_id
+                        WHERE l2.crm_lead_task_id = k.task_id AND m2.msgraph_event_id IS NOT NULL)
+             THEN 'jetzt an anderem Event'
+           ELSE 'kein Sieger'
+         END AS wo
+  FROM task k
+)
+SELECT v.wo,
+       me.calendar_status                     AS status_alt_event,
+       ka.kandidaten,
+       ka.aktive_kandidaten,
+       ka.stati,
+       ka.startzeiten,
+       coalesce(ka.alt_event_kandidat, false) AS alt_event_kandidat,
+       count(*)                               AS tasks
+FROM task k
+JOIN verbleib v ON v.task_id = k.task_id
+JOIN kand ka ON ka.task_id = k.task_id
+JOIN processed.sales_meetings me ON me.msgraph_event_id = k.event_alt
+GROUP BY 1, 2, 3, 4, 5, 6, 7
+ORDER BY tasks DESC;

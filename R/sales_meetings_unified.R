@@ -420,6 +420,7 @@ ersatzregel_kandidaten <- function(task, ohne_lead, event_date, rep_kontakt, sta
 #'
 #' - `externes_tool`, `ohne_lead`: kein Abgleich.
 #' - `lead_tag`: genau eine Zeile mit gleichem Lead und gleichem Tag.
+#' - `lead_tag_aktiv`: nur mit `aktiv`: mehrere, genau eine davon aktiv.
 #' - `lead_tag_rep`: mehrere, genau eine des gleichen Reps.
 #' - `lead_tag_naechste_zeit`: mehrere des gleichen Reps, eindeutig naechster
 #'   Beginn zu `precise_time`.
@@ -435,13 +436,21 @@ ersatzregel_kandidaten <- function(task, ohne_lead, event_date, rep_kontakt, sta
 #'   precise_time, contact_id (Rep), is_external_tool.
 #' @param lead_id,event_date,rep_kontakt,start Lead (NA = ohne Lead), Datum,
 #'   Rep-Kontakt und Beginn je Meeting-Zeile, parallel zueinander.
+#' @param aktiv logical je Meeting-Zeile, parallel zu `lead_id`: ob die Zeile im
+#'   Kalender aktiv ist. Mit `NULL` (Standard) gilt die Regel `lead_tag_aktiv`
+#'   nicht. Gesetzt gewinnt unter mehreren Kandidaten die einzige aktive Zeile
+#'   vor Rep und Startzeit (Spec 2026-11-11-sales-meetings, Q21).
 #' @return data.frame je Zeile in `crm_meetings`: `row` (zugeordnete
 #'   Meeting-Zeile, NA = keine), `match_rule`, `candidate_count` (Kandidaten der
 #'   entscheidenden Regel, NA bei `externes_tool`/`ohne_lead`) und
 #'   `start_diff_minutes` (Abstand Beginn zu `precise_time`, nur bei Treffer).
 #' @keywords internal
 # ---- start ---- #
-match_crm_tasks <- function(crm_meetings, lead_id, event_date, rep_kontakt, start) {
+match_crm_tasks <- function(crm_meetings, lead_id, event_date, rep_kontakt, start,
+                            aktiv = NULL) {
+  if (!is.null(aktiv) && (!is.logical(aktiv) || length(aktiv) != length(lead_id))) {
+    stop("match_crm_tasks: aktiv muss NULL oder logical mit einer Stelle je Meeting-Zeile sein.")
+  }
   n <- nrow(crm_meetings)
   lead_id     <- as.character(lead_id)
   rep_kontakt <- as.character(rep_kontakt)
@@ -462,7 +471,14 @@ match_crm_tasks <- function(crm_meetings, lead_id, event_date, rep_kontakt, star
     n_cand[i] <- length(cand)
     if (length(cand) == 0) { offen <- c(offen, i); next }
     regel <- "lead_tag"
-    if (length(cand) > 1) {
+    # Tiebreak 0, nur mit `aktiv`: neben der aktiven Zeile stehen am selben Tag
+    # oft fruehere Fassungen desselben Termins (verlegt, abgesagt, verschwunden).
+    # Genau eine aktive Zeile gewinnt, sonst greifen Rep und Startzeit wie bisher.
+    aktive <- if (is.null(aktiv) || length(cand) < 2) integer(0) else cand[aktiv[cand] %in% TRUE]
+    if (length(aktive) == 1) {
+      cand <- aktive
+      regel <- "lead_tag_aktiv"
+    } else if (length(cand) > 1) {
       # Tiebreak 1: gleicher Rep-Kontakt.
       same_rep <- cand[rep_kontakt[cand] == as.character(cm$contact_id)]
       if (length(same_rep) == 1) {
