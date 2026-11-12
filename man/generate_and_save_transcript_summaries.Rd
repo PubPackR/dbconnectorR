@@ -8,7 +8,8 @@ generate_and_save_transcript_summaries(
   con,
   openrouter_model,
   openrouter_key,
-  prompt_base_path = "../../base-data/msgraph/text_for_summary_prompt/"
+  prompt_base_path = "../../base-data/msgraph/text_for_summary_prompt/",
+  openrouter_provider = NULL
 )
 }
 \arguments{
@@ -19,6 +20,9 @@ generate_and_save_transcript_summaries(
 \item{openrouter_key}{The OpenRouter API key}
 
 \item{prompt_base_path}{Base path for prompt template files}
+
+\item{openrouter_provider}{Optional OpenRouter provider routing, passed on to
+\code{\link[=summarize_ts]{summarize_ts()}}. Default \code{NULL}: no routing.}
 }
 \description{
 Generates and saves transcript summaries for multiple transcripts (DB version)

@@ -9,7 +9,8 @@ msgraph_summarize_transcripts(
   openrouter_model = "openai/gpt-5-chat",
   openrouter_keys,
   prompt_base_path = "../../base-data/msgraph/text_for_summary_prompt/",
-  logger = function(msg, level = "INFO") cat(msg, "\\n")
+  logger = function(msg, level = "INFO") cat(msg, "\\n"),
+  openrouter_provider = NULL
 )
 }
 \arguments{
@@ -23,6 +24,10 @@ msgraph_summarize_transcripts(
 Default: "../../base-data/msgraph/text_for_summary_prompt/"}
 
 \item{logger}{Logger function for output messages}
+
+\item{openrouter_provider}{Optional OpenRouter provider routing, sent as the
+\code{provider} object of every request (see \code{\link[=build_openrouter_api_args]{build_openrouter_api_args()}}).
+Default \code{NULL}: no routing, OpenRouter picks any provider of the model.}
 }
 \value{
 Invisible NULL (updates database)
@@ -36,7 +41,9 @@ This is step 3 of the transcript processing pipeline.
 msgraph_summarize_transcripts(
   con = con,
   openrouter_keys = keys$openrouter,
-  openrouter_model = "openai/gpt-5-chat"
+  openrouter_model = "openai/gpt-5.6-luna",
+  openrouter_provider = list(zdr = TRUE, data_collection = "deny",
+                             only = "azure/eu", allow_fallbacks = FALSE)
 )
 }
 
