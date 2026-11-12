@@ -276,10 +276,27 @@ build_openrouter_api_args <- function(openrouter_provider = NULL) {
          "e.g. list(zdr = TRUE, only = \"azure/eu\").", call. = FALSE)
   }
 
+  for (flag in intersect(c("zdr", "allow_fallbacks", "require_parameters"),
+                         names(openrouter_provider))) {
+    value <- openrouter_provider[[flag]]
+    if (!is.logical(value) || length(value) != 1 || is.na(value)) {
+      stop("openrouter_provider$", flag, " must be TRUE or FALSE.", call. = FALSE)
+    }
+  }
+  if ("data_collection" %in% names(openrouter_provider) &&
+      !identical(openrouter_provider$data_collection, "deny") &&
+      !identical(openrouter_provider$data_collection, "allow")) {
+    stop("openrouter_provider$data_collection must be \"deny\" or \"allow\".", call. = FALSE)
+  }
+
   array_fields <- intersect(c("only", "order", "ignore", "quantizations"),
                             names(openrouter_provider))
   for (field in array_fields) {
-    openrouter_provider[[field]] <- as.list(unlist(openrouter_provider[[field]]))
+    values <- unlist(openrouter_provider[[field]])
+    if (!is.character(values) || length(values) == 0 || anyNA(values) || any(values == "")) {
+      stop("openrouter_provider$", field, " must name at least one provider slug.", call. = FALSE)
+    }
+    openrouter_provider[[field]] <- as.list(values)
   }
 
   list(provider = openrouter_provider)

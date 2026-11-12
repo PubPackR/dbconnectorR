@@ -26,6 +26,49 @@ test_that("Ein Routing ohne Namen bricht laut ab", {
   expect_error(build_openrouter_api_args(list()), "named list")
 })
 
+test_that("Eine leere Endpunktliste oder falsche Typen brechen laut ab", {
+  expect_error(build_openrouter_api_args(list(zdr = TRUE, only = character(0))), "at least one")
+  expect_error(build_openrouter_api_args(list(zdr = TRUE, only = list())), "at least one")
+  expect_error(build_openrouter_api_args(list(zdr = TRUE, only = "")), "at least one")
+  expect_error(build_openrouter_api_args(list(zdr = "true")), "TRUE or FALSE")
+  expect_error(build_openrouter_api_args(list(allow_fallbacks = NA)), "TRUE or FALSE")
+  expect_error(build_openrouter_api_args(list(data_collection = "nein")), "deny")
+})
+
+test_that("msgraph_update_transcripts reicht das Routing bis zum Zusammenfassen durch", {
+  seen <- new.env()
+  routing <- list(zdr = TRUE, only = "azure/eu")
+  local_mocked_bindings(
+    msgraph_summarize_transcripts = function(...) {
+      seen$args <- list(...)
+      invisible(NULL)
+    }
+  )
+
+  msgraph_update_transcripts(con = NULL, msgraph_keys = NULL, openrouter_keys = "key",
+                             crm_keys = "crm", openrouter_model = "openai/gpt-5.6-luna",
+                             steps = "summarize", log_level = "ERROR",
+                             openrouter_provider = routing)
+  expect_identical(seen$args$openrouter_provider, routing)
+  expect_identical(seen$args$openrouter_model, "openai/gpt-5.6-luna")
+})
+
+test_that("msgraph_summarize_transcripts reicht das Routing an die Schleife durch", {
+  seen <- new.env()
+  routing <- list(zdr = TRUE, only = "azure/eu")
+  local_mocked_bindings(
+    generate_and_save_transcript_summaries = function(...) {
+      seen$args <- list(...)
+      invisible(NULL)
+    }
+  )
+
+  msgraph_summarize_transcripts(con = NULL, openrouter_model = "openai/gpt-5.6-luna",
+                                openrouter_keys = "key", logger = function(...) NULL,
+                                openrouter_provider = routing)
+  expect_identical(seen$args$openrouter_provider, routing)
+})
+
 test_that("summarize_ts reicht das Routing an ellmer::chat_openrouter durch", {
   einfuehrung <- withr::local_tempfile(lines = "Einfuehrung")
   seen <- new.env()
