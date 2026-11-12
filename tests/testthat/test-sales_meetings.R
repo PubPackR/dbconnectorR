@@ -218,6 +218,107 @@ test_that("Ersatzregel: Zeile ohne Lead bekommt den Lead des Tasks", {
   expect_false("crm_7004" %in% r$meetings$meeting_key)
 })
 
+# ---- CRM-Zuordnung: aktive Zeile in der Kette, sonst statt Mehrdeutigkeit (Q21, Q25) ----
+
+mk_kandidaten_task <- function(ptime) data.frame(
+  crm_task_id = 1, lead_id = 10, event_date = as.Date("2026-07-02"),
+  precise_time = ts(ptime), contact_id = 500, is_external_tool = FALSE,
+  stringsAsFactors = FALSE)
+
+# Zwei Kandidaten mit gleichem Lead, Tag und Rep: Zeile 1 um 09:00, Zeile 2 um 14:00.
+kand_lead  <- c(10, 10)
+kand_tag   <- as.Date(c("2026-07-02", "2026-07-02"))
+kand_rep   <- c(500, 500)
+kand_start <- ts(c("2026-07-02 09:00", "2026-07-02 14:00"))
+
+test_that("match_crm_tasks: ohne aktiv gilt das alte Verhalten", {
+  r <- match_crm_tasks(mk_kandidaten_task("2026-07-02 09:00"), kand_lead, kand_tag, kand_rep,
+                       kand_start)
+  expect_equal(r$row, 1L)
+  expect_equal(r$match_rule, "lead_tag_naechste_zeit")
+})
+
+test_that("match_crm_tasks: in einer Kette gewinnt die aktive Zeile vor Rep und Startzeit (Q21)", {
+  r <- match_crm_tasks(mk_kandidaten_task("2026-07-02 09:00"), kand_lead, kand_tag, kand_rep,
+                       kand_start, aktiv = c(FALSE, TRUE), kette = c("k1", "k1"))
+  expect_equal(r$row, 2L)
+  expect_equal(r$match_rule, "lead_tag_aktiv")
+  expect_equal(r$candidate_count, 2L)
+})
+
+test_that("match_crm_tasks: ueber Ketten hinweg entscheiden erst Rep und Startzeit (Q25)", {
+  task <- mk_kandidaten_task("2026-07-02 09:00")
+  r <- match_crm_tasks(task, kand_lead, kand_tag, kand_rep, kand_start,
+                       aktiv = c(FALSE, TRUE), kette = c("k1", "k2"))
+  expect_equal(r$row, 1L)
+  expect_equal(r$match_rule, "lead_tag_naechste_zeit")
+  # Ohne kette gilt jede Zeile als eigener Termin, ebenso mit NA.
+  expect_equal(match_crm_tasks(task, kand_lead, kand_tag, kand_rep, kand_start,
+                               aktiv = c(FALSE, TRUE))$row, 1L)
+  expect_equal(match_crm_tasks(task, kand_lead, kand_tag, kand_rep, kand_start,
+                               aktiv = c(FALSE, TRUE), kette = c(NA, NA))$row, 1L)
+})
+
+test_that("match_crm_tasks: bleibt es mehrdeutig, gewinnt die einzige aktive Zeile statt keiner (Q25)", {
+  gleich <- ts(c("2026-07-02 09:00", "2026-07-02 09:00"))
+  task <- mk_kandidaten_task("2026-07-02 09:00")
+  expect_equal(match_crm_tasks(task, kand_lead, kand_tag, kand_rep, gleich)$match_rule,
+               "mehrdeutig")
+  r <- match_crm_tasks(task, kand_lead, kand_tag, kand_rep, gleich,
+                       aktiv = c(TRUE, FALSE), kette = c("k1", "k2"))
+  expect_equal(r$row, 1L)
+  expect_equal(r$match_rule, "mehrdeutig_aktiv")
+  # Kein Rep passt: ebenfalls die aktive Zeile.
+  r2 <- match_crm_tasks(task, kand_lead, kand_tag, c(600, 700), kand_start,
+                        aktiv = c(FALSE, TRUE), kette = c("k1", "k2"))
+  expect_equal(r2$row, 2L)
+  expect_equal(r2$match_rule, "mehrdeutig_aktiv")
+})
+
+test_that("match_crm_tasks: zwei aktive Kandidaten fallen auf Rep und Startzeit zurueck", {
+  r <- match_crm_tasks(mk_kandidaten_task("2026-07-02 13:30"), kand_lead, kand_tag, kand_rep,
+                       kand_start, aktiv = c(TRUE, TRUE), kette = c("k1", "k1"))
+  expect_equal(r$row, 2L)
+  expect_equal(r$match_rule, "lead_tag_naechste_zeit")
+  gleich <- ts(c("2026-07-02 09:00", "2026-07-02 09:00"))
+  expect_equal(match_crm_tasks(mk_kandidaten_task("2026-07-02 09:00"), kand_lead, kand_tag,
+                               kand_rep, gleich, aktiv = c(TRUE, TRUE))$match_rule, "mehrdeutig")
+})
+
+test_that("match_crm_tasks: ein einzelner Kandidat bleibt lead_tag, auch wenn er nicht aktiv ist", {
+  r <- match_crm_tasks(mk_kandidaten_task("2026-07-02 09:00"), 10, as.Date("2026-07-02"), 500,
+                       ts("2026-07-02 09:00"), aktiv = FALSE, kette = "k1")
+  expect_equal(r$row, 1L)
+  expect_equal(r$match_rule, "lead_tag")
+})
+
+test_that("match_crm_tasks: aktiv oder kette in falscher Laenge bricht ab", {
+  task <- mk_kandidaten_task("2026-07-02 09:00")
+  expect_error(match_crm_tasks(task, kand_lead, kand_tag, kand_rep, kand_start, aktiv = TRUE),
+               "aktiv")
+  expect_error(match_crm_tasks(task, kand_lead, kand_tag, kand_rep, kand_start,
+                               aktiv = c(TRUE, FALSE), kette = "k1"),
+               "kette")
+})
+
+test_that("Task zur alten Uhrzeit eines am selben Tag verlegten Termins landet an der aktiven Zeile (Q21)", {
+  w <- mk_world()
+  # Ersatz 3 liegt jetzt am selben Tag wie die abgesagte Zeile 2, fuenf Stunden spaeter.
+  w$events$event_start[3] <- ts("2026-07-02 14:00")
+  w$tasks <- rbind(w$tasks, transform(w$tasks[1, ], id = 1005, crm_task_id = 7005, lead_id = 20,
+                                      precise_time = ts("2026-07-02 09:00"),
+                                      event_date = as.Date("2026-07-02")))
+  r <- build_world(w)
+  m <- r$meetings
+  expect_equal(row_of(m, "msgraph_2")$calendar_status, "rescheduled")
+  expect_equal(row_of(m, "msgraph_3")$calendar_status, "active")
+  expect_false("crm_7005" %in% m$meeting_key)
+  l <- r$leads
+  key <- paste(l$meeting_key, l$lead_id)
+  expect_equal(l$crm_lead_task_id[key == "msgraph_3 20"], "1005")
+  expect_equal(l$crm_outcome[key == "msgraph_2 20"], "no_task")
+})
+
 # ---- derive_meeting_chains ------------------------------------------------------------
 
 test_that("Kette mit zwei Anfaengen: erste Zeile ist die kleinste msgraph_event_id (Q19)", {
