@@ -191,6 +191,22 @@ test_that("verantwortlich ist der Organisator, der im Call war", {
   expect_equal(row_of(m, "crm_7002")$organizer_source, "crm_task")
 })
 
+test_that("organizer_is_external: externer Organisator TRUE, interner gewinnt, CRM-Zeile NA (Q14)", {
+  w <- mk_world()
+  # Event 1: der Kunde organisiert. Event 3: zusaetzlich ein externer Organisator,
+  # der interne gewinnt.
+  w$participants$is_organizer[w$participants$event_id == 1] <-
+    w$participants$email[w$participants$event_id == 1] == "a@kunde.de"
+  w$participants <- rbind(w$participants, data.frame(
+    event_id = 3, contact_id = 903, is_organizer = TRUE, email = "x@firma.de",
+    stringsAsFactors = FALSE))
+  m <- build_world(w)$meetings
+  expect_true(row_of(m, "msgraph_1")$organizer_is_external)
+  expect_false(row_of(m, "msgraph_3")$organizer_is_external)
+  expect_false(row_of(m, "msgraph_6")$organizer_is_external)  # Bookings-Postfach ist intern
+  expect_true(is.na(row_of(m, "crm_7002")$organizer_is_external))
+})
+
 test_that("Leads: je Record und Lead eine Zeile mit dem Task, der zaehlt", {
   l <- build_world()$leads
   key <- paste(l$meeting_key, l$lead_id)
