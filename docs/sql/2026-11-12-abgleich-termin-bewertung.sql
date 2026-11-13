@@ -331,12 +331,9 @@ bef AS (
             THEN 'CRM-Task jetzt an einer Kalenderzeile'
           WHEN p.r_crm_outcome <> p.a_crm_outcome
             THEN 'CRM-Ausgang anders (Rangfolge 02.11. oder Zuordnung)'
-          WHEN (p.r_grund = 'duplikat_event') IS DISTINCT FROM (p.a_grund = 'duplikat_event')
-            THEN 'Duplikat-Menge'
-          WHEN 'termin_in_zukunft' IN (p.r_grund, p.a_grund)
-            THEN 'Zukunft zu anderem Zeitpunkt bestimmt'
-          WHEN 'verschoben' IN (p.r_grund, p.a_grund)
-            THEN 'Verschiebung anders erkannt'
+          -- Grund heute -> Grund in der Referenz-SQL, "kein" fuer keinen Grund.
+          WHEN p.r_grund IS DISTINCT FROM p.a_grund
+            THEN 'Grund ' || coalesce(p.a_grund, 'kein') || ' -> ' || coalesce(p.r_grund, 'kein')
           WHEN p.r_is_no_show IS DISTINCT FROM p.a_is_no_show
             THEN 'Teams-Messung anders'
           WHEN p.meeting_date IS DISTINCT FROM p.event_date
