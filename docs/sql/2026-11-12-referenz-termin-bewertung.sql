@@ -61,12 +61,14 @@ zeile AS (
     (m.msgraph_event_id IS NOT NULL AND coalesce(e.meeting_id, '') = '') AS ohne_teams_meeting,
     m.organizer_is_external,
     -- Echter No-Show trotz Verlegung: interner Call hoechstens 30 Minuten um den Slot,
-    -- geaendert erst nach dem Slot.
+    -- geaendert erst nach dem Slot. Wie heute zaehlt event_updated_at aus Outlook, nicht
+    -- calendar_changed_at_utc: bei verschwundenen Zeilen traegt das Signal vanished_at und
+    -- liegt fast immer nach dem Slot (13.11.2026: 835 Zeilen Unterschied).
     (m.calendar_status = 'rescheduled'
      AND m.teams_status IN ('internal_only', 'no_call')
      AND m.call_started_at_utc IS NOT NULL
      AND abs(extract(epoch FROM m.call_started_at_utc - m.starts_at_utc)) <= 30 * 60
-     AND m.calendar_changed_at_utc > m.starts_at_utc) AS echter_no_show
+     AND e.event_updated_at > e.event_start) AS echter_no_show
   FROM processed.sales_meetings m
   LEFT JOIN processed.sales_meeting_leads l ON l.meeting_id = m.id
   LEFT JOIN raw.msgraph_events e ON e.id = m.msgraph_event_id
