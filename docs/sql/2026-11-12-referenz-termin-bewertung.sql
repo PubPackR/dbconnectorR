@@ -25,7 +25,9 @@
 --   abgesagt                         abgesagt oder verschwunden, ohne Teams-Call,     nein            ja
 --                                    ohne CRM-Task
 --   ohne_teams_meeting               aktiv, ohne Teams-Meeting, ohne CRM-Task         nein            ja
---   zu_viele_interne                 mindestens 7 interne Teilnehmende                nein            ja
+--   externer_organisator             aktiv, Kunde organisiert, kein Teams-Call bei    nein            ja
+--                                    uns, ohne CRM-Task
+--   zu_viele_interne                mindestens 7 interne Teilnehmende                nein            ja
 --   duplikat_event                   derselbe Termin ein zweites Mal                  nein            ja
 --   termin_in_zukunft                liegt in der Zukunft                             ja              nein (nicht vergangen)
 --   alt_tenant_join_url              Teams-Link aus dem Alt-Tenant                    ja              nein
@@ -57,6 +59,7 @@ zeile AS (
     m.teams_status IN ('external_joined', 'internal_only') AS mit_call,
     -- Termin ohne Teams-Meeting: das Event traegt keine meeting_id.
     (m.msgraph_event_id IS NOT NULL AND coalesce(e.meeting_id, '') = '') AS ohne_teams_meeting,
+    m.organizer_is_external,
     -- Echter No-Show trotz Verlegung: interner Call hoechstens 30 Minuten um den Slot,
     -- geaendert erst nach dem Slot.
     (m.calendar_status = 'rescheduled'
@@ -69,9 +72,11 @@ zeile AS (
   LEFT JOIN raw.msgraph_events e ON e.id = m.msgraph_event_id
 ),
 
--- Welche Regel greift. Die Kalenderzeilen der Arten verschoben, abgesagt und
--- ohne_teams_meeting bewertet heute niemand: Mit CRM-Task zaehlen sie allein ueber den
--- CRM-Ausgang wie eine CRM-Zeile, ohne Task tragen sie die Art als Grund.
+-- Welche Regel greift. Die Kalenderzeilen der Arten verschoben, abgesagt,
+-- ohne_teams_meeting und externer_organisator bewertet heute niemand: Mit CRM-Task zaehlen
+-- sie allein ueber den CRM-Ausgang wie eine CRM-Zeile, ohne Task tragen sie die Art als
+-- Grund. externer_organisator: Der Kunde laedt in sein eigenes Teams-Meeting ein, einen
+-- Anwesenheitsbericht dazu bekommen wir nie.
 art AS (
   SELECT z.*,
     CASE
@@ -79,6 +84,8 @@ art AS (
       WHEN z.calendar_status = 'rescheduled' AND NOT z.mit_call                   THEN 'verschoben'
       WHEN z.calendar_status IN ('cancelled', 'vanished') AND NOT z.mit_call      THEN 'abgesagt'
       WHEN z.calendar_status IN ('active', 'stale_copy') AND z.ohne_teams_meeting THEN 'ohne_teams_meeting'
+      WHEN z.calendar_status IN ('active', 'stale_copy') AND z.organizer_is_external
+           AND NOT z.mit_call                                                    THEN 'externer_organisator'
       ELSE 'kalender'
     END AS art
   FROM zeile z
@@ -146,6 +153,7 @@ SELECT
                                       'crm_storniert'))) AS bewertbar,
   (w.exclusion_reason IS NULL
    OR w.exclusion_reason NOT IN ('verschoben', 'abgesagt', 'ohne_teams_meeting',
-                                 'zu_viele_interne', 'duplikat_event')) AS eigener_termin
+                                 'externer_organisator', 'zu_viele_interne',
+                                 'duplikat_event')) AS eigener_termin
 FROM bewertung w
 CROSS JOIN heute h

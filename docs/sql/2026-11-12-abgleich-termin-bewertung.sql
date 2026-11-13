@@ -47,6 +47,7 @@ zeile AS (
     m.teams_status IN ('external_joined', 'internal_only') AS mit_call,
     -- Termin ohne Teams-Meeting: das Event traegt keine meeting_id.
     (m.msgraph_event_id IS NOT NULL AND coalesce(e.meeting_id, '') = '') AS ohne_teams_meeting,
+    m.organizer_is_external,
     -- Echter No-Show trotz Verlegung: interner Call hoechstens 30 Minuten um den Slot,
     -- geaendert erst nach dem Slot.
     (m.calendar_status = 'rescheduled'
@@ -59,9 +60,11 @@ zeile AS (
   LEFT JOIN raw.msgraph_events e ON e.id = m.msgraph_event_id
 ),
 
--- Welche Regel greift. Die Kalenderzeilen der Arten verschoben, abgesagt und
--- ohne_teams_meeting bewertet heute niemand: Mit CRM-Task zaehlen sie allein ueber den
--- CRM-Ausgang wie eine CRM-Zeile, ohne Task tragen sie die Art als Grund.
+-- Welche Regel greift. Die Kalenderzeilen der Arten verschoben, abgesagt,
+-- ohne_teams_meeting und externer_organisator bewertet heute niemand: Mit CRM-Task zaehlen
+-- sie allein ueber den CRM-Ausgang wie eine CRM-Zeile, ohne Task tragen sie die Art als
+-- Grund. externer_organisator: Der Kunde laedt in sein eigenes Teams-Meeting ein, einen
+-- Anwesenheitsbericht dazu bekommen wir nie.
 art AS (
   SELECT z.*,
     CASE
@@ -69,6 +72,8 @@ art AS (
       WHEN z.calendar_status = 'rescheduled' AND NOT z.mit_call                   THEN 'verschoben'
       WHEN z.calendar_status IN ('cancelled', 'vanished') AND NOT z.mit_call      THEN 'abgesagt'
       WHEN z.calendar_status IN ('active', 'stale_copy') AND z.ohne_teams_meeting THEN 'ohne_teams_meeting'
+      WHEN z.calendar_status IN ('active', 'stale_copy') AND z.organizer_is_external
+           AND NOT z.mit_call                                                    THEN 'externer_organisator'
       ELSE 'kalender'
     END AS art
   FROM zeile z
@@ -136,7 +141,8 @@ SELECT
                                       'crm_storniert'))) AS bewertbar,
   (w.exclusion_reason IS NULL
    OR w.exclusion_reason NOT IN ('verschoben', 'abgesagt', 'ohne_teams_meeting',
-                                 'zu_viele_interne', 'duplikat_event')) AS eigener_termin
+                                 'externer_organisator', 'zu_viele_interne',
+                                 'duplikat_event')) AS eigener_termin
 FROM bewertung w
 CROSS JOIN heute h
 ),
@@ -153,6 +159,19 @@ r AS (
          m.teams_status,
          m.teams_status IN ('external_joined', 'internal_only') AS mit_call,
          (m.msgraph_event_id IS NOT NULL AND coalesce(e.meeting_id, '') = '') AS ohne_teams_meeting,
+         -- Regel wie im Block "art" der Referenz-SQL.
+         CASE
+           WHEN m.calendar_status = 'not_in_calendar' THEN 'crm'
+           WHEN m.calendar_status = 'rescheduled'
+                AND m.teams_status NOT IN ('external_joined', 'internal_only') THEN 'verschoben'
+           WHEN m.calendar_status IN ('cancelled', 'vanished')
+                AND m.teams_status NOT IN ('external_joined', 'internal_only') THEN 'abgesagt'
+           WHEN m.calendar_status IN ('active', 'stale_copy')
+                AND m.msgraph_event_id IS NOT NULL AND coalesce(e.meeting_id, '') = '' THEN 'ohne_teams_meeting'
+           WHEN m.calendar_status IN ('active', 'stale_copy') AND m.organizer_is_external
+                AND m.teams_status NOT IN ('external_joined', 'internal_only') THEN 'externer_organisator'
+           ELSE 'kalender'
+         END AS art,
          l.crm_lead_task_id,
          CASE
            WHEN l.crm_outcome IS NOT NULL             THEN l.crm_outcome
@@ -250,7 +269,7 @@ alt_events AS (
 
 paar AS (
   SELECT r.meeting_id AS r_meeting_id, r.lead_id AS r_lead_id, r.meeting_date,
-         r.calendar_status, r.teams_status, r.mit_call, r.ohne_teams_meeting,
+         r.calendar_status, r.teams_status, r.mit_call, r.art AS r_art,
          r.crm_outcome AS r_crm_outcome, r.is_no_show AS r_is_no_show,
          r.exclusion_reason AS r_grund, r.stattgefunden AS r_stattgefunden,
          r.bewertbar AS r_bewertbar, r.eigener_termin AS r_eigener_termin,
@@ -280,13 +299,17 @@ bef AS (
         CASE
           WHEN p.calendar_status = 'not_in_calendar' THEN 'CRM-Zeile, heute verworfen oder anders zugeordnet'
           WHEN p.event_in_unified THEN 'Lead nur in der Referenz-SQL'
-          WHEN p.calendar_status = 'rescheduled' AND NOT p.mit_call THEN 'verschoben ohne Call (Q1)'
-          WHEN p.calendar_status IN ('cancelled', 'vanished') AND NOT p.mit_call THEN 'abgesagt ohne Call (Q1)'
-          WHEN p.ohne_teams_meeting THEN 'ohne Teams-Meeting (Q9)'
+          WHEN p.r_art = 'verschoben' THEN 'verschoben ohne Call (Q1)'
+          WHEN p.r_art = 'abgesagt' THEN 'abgesagt ohne Call (Q1)'
+          WHEN p.r_art = 'ohne_teams_meeting' THEN 'ohne Teams-Meeting (Q9)'
+          WHEN p.r_art = 'externer_organisator' THEN 'externer Organisator ohne Call (Q14)'
           ELSE 'Filter auf die verantwortliche Person (Rest Q1)'
         END ||
-        CASE WHEN p.calendar_status <> 'not_in_calendar' AND p.r_crm_outcome <> 'no_task'
-             THEN ', mit CRM-Task (Q10)' ELSE '' END
+        CASE WHEN p.r_art NOT IN ('crm', 'kalender') AND p.r_crm_outcome <> 'no_task'
+               THEN ', mit CRM-Task (Q10)'
+             WHEN p.r_art = 'kalender' AND p.r_crm_outcome <> 'no_task'
+               THEN ', mit CRM-Task'
+             ELSE '' END
       WHEN p.r_meeting_id IS NULL THEN 'fehlt: ' ||
         CASE
           WHEN p.source = 'msgraph' AND NOT p.event_in_sales_meetings THEN 'Event nicht in sales_meetings'
