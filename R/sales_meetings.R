@@ -484,6 +484,41 @@ attach_meeting_persons <- function(meetings, person_roles, person_ids) {
   meetings
 }
 
+#' Spalten, die update_sales_meetings() nach processed.sales_meetings schreibt
+#'
+#' Ohne `id`, `created_at`, `updated_at` (vergibt die Datenbank) und ohne
+#' `successor_meeting_id`, `meeting_chain_id` (setzt ein UPDATE nach dem Upsert).
+#'
+#' @keywords internal
+SALES_MEETINGS_SPALTEN <- c(
+  "meeting_key", "msgraph_event_id", "meeting_date", "starts_at_utc", "booked_date",
+  "booked_date_source", "organizer_person_id", "organizer_type", "organizer_is_external",
+  "responsible_person_id", "calendar_status", "calendar_changed_at_utc", "teams_status",
+  "booking_role", "is_short_lived", "is_duplicate", "internal_participant_count",
+  "external_participant_count", "external_speaker_count", "call_started_at_utc",
+  "call_duration_minutes")
+
+#' Bricht ab, wenn der Zieltabelle eine Spalte fehlt
+#'
+#' Rein. `Billomatics::postgres_upsert_data()` verwirft Spalten, die die Tabelle
+#' nicht hat, ohne Fehler; ohne diese Pruefung bliebe eine neue Spalte nach einem
+#' Deploy vor ihrer DDL still leer.
+#'
+#' @param vorhanden Spaltennamen der Tabelle, etwa aus `DBI::dbListFields()`.
+#' @param benoetigt Spalten, die geschrieben werden sollen.
+#' @param tabelle Name fuer die Meldung.
+#' @return `invisible(TRUE)`; sonst `stop()`.
+#' @keywords internal
+# ---- start ---- #
+pruefe_zielspalten <- function(vorhanden, benoetigt, tabelle) {
+  fehlt <- setdiff(benoetigt, vorhanden)
+  if (length(fehlt) > 0) {
+    stop(tabelle, ": Spalte(n) ", paste(fehlt, collapse = ", "),
+         " fehlen. Erst die DDL aus inst/sql/ ausfuehren. Abbruch.")
+  }
+  invisible(TRUE)
+}
+
 #' Rebuild processed.sales_meetings und processed.sales_meeting_leads
 #'
 #' Eine Zeile je Meeting record und eine je Record und Lead, nur Signale, keine
@@ -585,14 +620,11 @@ update_sales_meetings <- function(con, person_roles, tenant_id = NULL, now_utc =
   message(paste0("  ", nrow(meetings), " Meeting records (", sum(is.na(meetings$msgraph_event_id)),
                  " nur im CRM), ", nrow(leads), " Lead-Zeilen"))
 
-  spalten_meetings <- c("meeting_key", "msgraph_event_id", "meeting_date", "starts_at_utc",
-                        "booked_date", "booked_date_source", "organizer_person_id",
-                        "organizer_type", "organizer_is_external", "responsible_person_id",
-                        "calendar_status",
-                        "calendar_changed_at_utc", "teams_status", "booking_role",
-                        "is_short_lived", "is_duplicate", "internal_participant_count",
-                        "external_participant_count", "external_speaker_count",
-                        "call_started_at_utc", "call_duration_minutes")
+  spalten_meetings <- SALES_MEETINGS_SPALTEN
+  # Der Upsert verwirft Spalten, die die Tabelle nicht hat, ohne Fehler. Fehlt die
+  # DDL einer neuen Spalte, soll der Lauf brechen statt sie still leer zu lassen.
+  pruefe_zielspalten(DBI::dbListFields(con, DBI::Id(schema = "processed", table = "sales_meetings")),
+                     spalten_meetings, "processed.sales_meetings")
   schreiben <- meetings[, spalten_meetings]
   for (spalte in c("msgraph_event_id", "organizer_person_id", "responsible_person_id")) {
     schreiben[[spalte]] <- bit64::as.integer64(schreiben[[spalte]])

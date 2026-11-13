@@ -207,6 +207,17 @@ test_that("organizer_is_external: externer Organisator TRUE, interner gewinnt, C
   expect_true(is.na(row_of(m, "crm_7002")$organizer_is_external))
 })
 
+test_that("der Writer schreibt organizer_is_external, und eine fehlende Spalte bricht ab", {
+  expect_true("organizer_is_external" %in% SALES_MEETINGS_SPALTEN)
+  expect_true(all(SALES_MEETINGS_SPALTEN %in% names(build_world()$meetings) |
+                    SALES_MEETINGS_SPALTEN %in% c("organizer_person_id", "organizer_type",
+                                                  "responsible_person_id")))
+  expect_error(pruefe_zielspalten(setdiff(SALES_MEETINGS_SPALTEN, "organizer_is_external"),
+                                  SALES_MEETINGS_SPALTEN, "processed.sales_meetings"),
+               "organizer_is_external")
+  expect_true(pruefe_zielspalten(SALES_MEETINGS_SPALTEN, SALES_MEETINGS_SPALTEN, "x"))
+})
+
 test_that("Leads: je Record und Lead eine Zeile mit dem Task, der zaehlt", {
   l <- build_world()$leads
   key <- paste(l$meeting_key, l$lead_id)
