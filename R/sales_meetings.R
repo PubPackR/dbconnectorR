@@ -278,6 +278,16 @@ build_sales_meetings <- function(events, participants, call_event, calls, call_p
     match(rec$event_id, verantwortlich$event_id)])
   rec$organizer_contact_id <- org$organizer_contact_id[match(rec$event_id, org$event_id)]
 
+  # Organisator mit externer Adresse: Der Kunde laedt in sein eigenes Teams-Meeting
+  # ein, dessen Anwesenheitsbericht nie bei uns ankommt (Spec
+  # 2026-11-12-referenz-termin-bewertung, Q14). Ein interner Organisator gewinnt;
+  # ohne Organisator-Zeile bleibt es NA.
+  org_alle <- pa[pa$is_organizer %in% TRUE, , drop = FALSE]
+  org_intern <- unique(org_alle$event_id[is_internal_email(org_alle$email) %in% TRUE])
+  org_extern <- unique(org_alle$event_id[org_alle$is_external])
+  rec$organizer_is_external <- ifelse(rec$event_id %in% org_intern, FALSE,
+                                      ifelse(rec$event_id %in% org_extern, TRUE, NA))
+
   # ---- 6. Duplikate (Q2, Q20) ---- #
   geprueft <- rec$event_id[rec$calendar_status %in% "active" & !rec$ist_bookings]
   dk <- mit_zeit(geprueft)
@@ -352,6 +362,7 @@ build_sales_meetings <- function(events, participants, call_event, calls, call_p
     successor_key = rep(NA_character_, nrow(c1)),
     responsible_contact_id = as.character(c1$contact_id),
     organizer_contact_id = rep(NA_character_, nrow(c1)),
+    organizer_is_external = rep(NA, nrow(c1)),
     organizer_source = rep("crm_task", nrow(c1)),
     booked_at_utc = crm_gelegt,
     stringsAsFactors = FALSE)
@@ -382,6 +393,7 @@ build_sales_meetings <- function(events, participants, call_event, calls, call_p
     successor_key = rec$successor_key,
     responsible_contact_id = rec$responsible_contact_id,
     organizer_contact_id = rec$organizer_contact_id,
+    organizer_is_external = rec$organizer_is_external,
     organizer_source = rep("msgraph", nrow(rec)),
     booked_at_utc = rec$booked_at_utc,
     stringsAsFactors = FALSE)
@@ -470,6 +482,41 @@ attach_meeting_persons <- function(meetings, person_roles, person_ids) {
   meetings$organizer_person_id   <- pruefen(rollen$organizer_person_id)
   meetings$organizer_type        <- as.character(rollen$organizer_type)
   meetings
+}
+
+#' Spalten, die update_sales_meetings() nach processed.sales_meetings schreibt
+#'
+#' Ohne `id`, `created_at`, `updated_at` (vergibt die Datenbank) und ohne
+#' `successor_meeting_id`, `meeting_chain_id` (setzt ein UPDATE nach dem Upsert).
+#'
+#' @keywords internal
+SALES_MEETINGS_SPALTEN <- c(
+  "meeting_key", "msgraph_event_id", "meeting_date", "starts_at_utc", "booked_date",
+  "booked_date_source", "organizer_person_id", "organizer_type", "organizer_is_external",
+  "responsible_person_id", "calendar_status", "calendar_changed_at_utc", "teams_status",
+  "booking_role", "is_short_lived", "is_duplicate", "internal_participant_count",
+  "external_participant_count", "external_speaker_count", "call_started_at_utc",
+  "call_duration_minutes")
+
+#' Bricht ab, wenn der Zieltabelle eine Spalte fehlt
+#'
+#' Rein. `Billomatics::postgres_upsert_data()` verwirft Spalten, die die Tabelle
+#' nicht hat, ohne Fehler; ohne diese Pruefung bliebe eine neue Spalte nach einem
+#' Deploy vor ihrer DDL still leer.
+#'
+#' @param vorhanden Spaltennamen der Tabelle, etwa aus `DBI::dbListFields()`.
+#' @param benoetigt Spalten, die geschrieben werden sollen.
+#' @param tabelle Name fuer die Meldung.
+#' @return `invisible(TRUE)`; sonst `stop()`.
+#' @keywords internal
+# ---- start ---- #
+pruefe_zielspalten <- function(vorhanden, benoetigt, tabelle) {
+  fehlt <- setdiff(benoetigt, vorhanden)
+  if (length(fehlt) > 0) {
+    stop(tabelle, ": Spalte(n) ", paste(fehlt, collapse = ", "),
+         " fehlen. Erst die DDL aus inst/sql/ ausfuehren. Abbruch.")
+  }
+  invisible(TRUE)
 }
 
 #' Rebuild processed.sales_meetings und processed.sales_meeting_leads
@@ -573,13 +620,11 @@ update_sales_meetings <- function(con, person_roles, tenant_id = NULL, now_utc =
   message(paste0("  ", nrow(meetings), " Meeting records (", sum(is.na(meetings$msgraph_event_id)),
                  " nur im CRM), ", nrow(leads), " Lead-Zeilen"))
 
-  spalten_meetings <- c("meeting_key", "msgraph_event_id", "meeting_date", "starts_at_utc",
-                        "booked_date", "booked_date_source", "organizer_person_id",
-                        "organizer_type", "responsible_person_id", "calendar_status",
-                        "calendar_changed_at_utc", "teams_status", "booking_role",
-                        "is_short_lived", "is_duplicate", "internal_participant_count",
-                        "external_participant_count", "external_speaker_count",
-                        "call_started_at_utc", "call_duration_minutes")
+  spalten_meetings <- SALES_MEETINGS_SPALTEN
+  # Der Upsert verwirft Spalten, die die Tabelle nicht hat, ohne Fehler. Fehlt die
+  # DDL einer neuen Spalte, soll der Lauf brechen statt sie still leer zu lassen.
+  pruefe_zielspalten(DBI::dbListFields(con, DBI::Id(schema = "processed", table = "sales_meetings")),
+                     spalten_meetings, "processed.sales_meetings")
   schreiben <- meetings[, spalten_meetings]
   for (spalte in c("msgraph_event_id", "organizer_person_id", "responsible_person_id")) {
     schreiben[[spalte]] <- bit64::as.integer64(schreiben[[spalte]])
