@@ -207,3 +207,74 @@ test_that("derive_responsible_contact: ohne Organisator und ohne Call bleibt es 
     data.frame(call_id = numeric(0), contact_id = numeric(0), is_internal = logical(0)))
   expect_true(is.na(r$responsible_contact_id))
 })
+
+# ---- detect_move_sessions (Spec 2026-11-13-mailbox-copy-status, Q10) ----
+
+mk_sitzung <- function() data.frame(
+  event_id = c("1", "2", "3", "4", "5", "6"),
+  msgraph_ical_uid = c("a", "b", "c", "d", "booking:e", "f"),
+  event_created_at = utc(c("2026-09-10 08:00", "2026-09-10 08:20", "2026-09-10 08:50",
+                           "2026-09-10 10:00", "2026-09-10 08:10", "2026-07-15 08:00")),
+  event_start = utc(c("2026-09-01 09:00", "2026-10-01 09:00", "2026-09-02 09:00",
+                      "2026-09-03 09:00", "2026-09-01 09:00", "2026-07-01 09:00")),
+  organizer_contact_id = "500",
+  stringsAsFactors = FALSE)
+
+test_that("detect_move_sessions: zwei vergangene Termine in Abstaenden bis 30 Minuten ziehen die ganze Sitzung mit", {
+  # 1 und 3 lagen vorher, 2 liegt in der Zukunft; 30 Minuten Abstand gehoeren noch dazu.
+  # 4 beginnt nach 70 Minuten eine neue Sitzung mit nur einem vergangenen Termin.
+  # 5 ist ein booking:-Eintrag, 6 liegt vor dem Umzugszeitraum.
+  expect_setequal(detect_move_sessions(mk_sitzung()), c("1", "2", "3"))
+})
+
+test_that("detect_move_sessions: ein anderer Organisator trennt die Sitzung", {
+  s <- mk_sitzung()
+  s$organizer_contact_id[2] <- "501"
+  # 1 und 3 liegen jetzt 50 Minuten auseinander: zwei Sitzungen mit je einem vergangenen.
+  expect_length(detect_move_sessions(s), 0)
+})
+
+test_that("detect_move_sessions: vergangen heisst ueber einen Tag vor der Anlage, ohne Organisator keine Sitzung", {
+  s <- mk_sitzung()
+  s$event_start[3] <- utc("2026-09-10 01:00")   # nur knapp acht Stunden vorher
+  expect_length(detect_move_sessions(s), 0)
+  s <- mk_sitzung()
+  s$organizer_contact_id[3] <- NA
+  expect_length(detect_move_sessions(s), 0)
+})
+
+test_that("detect_move_sessions: der Zeitraum endet vor dem 01.11.", {
+  s <- mk_sitzung()
+  s$event_created_at[1:3] <- utc(c("2026-10-31 23:00", "2026-10-31 23:20", "2026-11-01 00:00"))
+  s$event_start[2] <- utc("2026-12-01 09:00")
+  # 3 faellt heraus, und 1 und 2 haben nur einen vergangenen Termin.
+  expect_length(detect_move_sessions(s), 0)
+  s$event_created_at[3] <- utc("2026-10-31 23:50")
+  expect_setequal(detect_move_sessions(s), c("1", "2", "3"))
+})
+
+# ---- detect_mailbox_copies (Spec 2026-11-13-mailbox-copy-status, Q2, Q3, Q5, Q15) ----
+
+test_that("detect_mailbox_copies: nur Verdachtsfaelle bekommen einen Wert, Original vor Beleg vor Verdacht", {
+  rows <- data.frame(
+    event_created_at = utc(c("2026-09-10 08:00", "2026-09-10 08:00", "2026-09-10 10:00",
+                             "2026-07-31 21:00", "2026-09-10 08:00", "2026-09-10 08:00",
+                             "2026-09-10 08:00", "2026-09-10 08:00", "2026-10-31 22:30")),
+    event_start = utc(c("2026-10-01 09:00", "2026-09-09 09:00", "2026-09-10 07:00",
+                        "2026-10-01 09:00", "2026-10-01 09:00", "2026-10-01 09:00",
+                        "2026-10-01 09:00", "2026-10-01 09:00", "2026-10-01 09:00")),
+    in_move_session = c(TRUE, FALSE, FALSE, TRUE, TRUE, TRUE, TRUE, FALSE, TRUE),
+    has_earlier_original = c(FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, TRUE, FALSE),
+    first_crm_task_at = utc(c(NA, NA, NA, NA, "2026-08-01 08:00", "2026-08-20 08:00",
+                              "2026-09-10 09:00", NA, NA)))
+  expect_equal(detect_mailbox_copies(rows), c(
+    "suspected",             # 1 aus einer Umzugs-Sitzung
+    "suspected",             # 2 Termintag vor dem Anlagetag
+    NA,                      # 3 frueher am selben Berliner Tag: nicht vorbei
+    NA,                      # 4 vor dem Umzugszeitraum angelegt (UTC 31.07. 21:00)
+    "has_earlier_original",  # 5 Original schlaegt CRM-Beleg
+    "evidenced",             # 6 Task vor der Kopie
+    "suspected",             # 7 Task erst nach der Kopie
+    NA,                      # 8 Original, aber kein Verdacht (Q2)
+    "suspected"))            # 9 31.10. 22:30 UTC liegt noch im Zeitraum
+})
