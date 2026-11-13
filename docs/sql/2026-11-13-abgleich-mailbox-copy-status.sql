@@ -8,8 +8,9 @@
 
 
 -- A: Verteilung je Wert und Quelle des Legedatums. Erwartet: nur Kalenderzeilen haben einen
--- Wert, has_earlier_original und suspected tragen outlook, evidenced meist crm_task (outlook
--- nur, wenn die ical_uid aelter ist als der Task, Q17).
+-- Wert, has_earlier_original und suspected tragen outlook (crm_task nur als Ersatztermin einer
+-- belegten Kopie, Q16), evidenced meist crm_task (outlook nur, wenn die ical_uid aelter ist als
+-- der Task, Q17).
 SELECT coalesce(m.mailbox_copy_status, '(leer)')                     AS mailbox_copy_status,
        m.booked_date_source,
        count(*)                                                      AS zeilen,
@@ -98,7 +99,7 @@ SELECT count(*) FILTER (WHERE m.mailbox_copy_status = 'evidenced')            AS
        count(*) FILTER (WHERE m.mailbox_copy_status = 'evidenced'
                           AND m.booked_date > (e.event_created_at AT TIME ZONE 'UTC'
                                                AT TIME ZONE 'Europe/Berlin')::date) AS ueber_kopie,
-       count(*) FILTER (WHERE m.mailbox_copy_status IS NULL
+       count(*) FILTER (WHERE m.mailbox_copy_status IS DISTINCT FROM 'evidenced'
                           AND m.booked_date_source = 'crm_task'
                           AND m.msgraph_event_id IS NOT NULL)                 AS ersatz_mit_crm
 FROM processed.sales_meetings m

@@ -206,9 +206,10 @@ detect_replaced_events <- function(canceled_events, active_events, max_days = 2)
 #' Calendar rows whose Graph `createdDateTime` lies in `[MAILBOX_MOVE_FROM,
 #' MAILBOX_MOVE_TO)` can be mailbox-move copies (`CONTEXT.md`). The mailboxes
 #' moved to the new tenant from the end of August to September 2026, a
-#' different day per person; the period adds a month on each side, like the
-#' Sales-Challenge list (spec `docs/specs/2026-11-13-mailbox-copy-status.md`,
-#' Q3 and Q15). UTC, like `raw.msgraph_events.event_created_at`.
+#' different day per person; the period runs from August to October, like the
+#' move sessions of the Sales-Challenge list (spec
+#' `docs/specs/2026-11-13-mailbox-copy-status.md`, Q3 and Q15). UTC, like
+#' `raw.msgraph_events.event_created_at`.
 #'
 #' @keywords internal
 MAILBOX_MOVE_FROM <- as.POSIXct("2026-08-01 00:00:00", tz = "UTC")

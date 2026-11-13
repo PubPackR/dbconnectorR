@@ -18,8 +18,9 @@ MAILBOX_MOVE_TO
 \description{
 Calendar rows whose Graph \code{createdDateTime} lies in \verb{[MAILBOX_MOVE_FROM, MAILBOX_MOVE_TO)} can be mailbox-move copies (\code{CONTEXT.md}). The mailboxes
 moved to the new tenant from the end of August to September 2026, a
-different day per person; the period adds a month on each side, like the
-Sales-Challenge list (spec \code{docs/specs/2026-11-13-mailbox-copy-status.md},
-Q3 and Q15). UTC, like \code{raw.msgraph_events.event_created_at}.
+different day per person; the period runs from August to October, like the
+move sessions of the Sales-Challenge list (spec
+\code{docs/specs/2026-11-13-mailbox-copy-status.md}, Q3 and Q15). UTC, like
+\code{raw.msgraph_events.event_created_at}.
 }
 \keyword{internal}
