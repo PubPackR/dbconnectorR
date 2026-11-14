@@ -26,6 +26,9 @@
 #' @param prompt_base_path Base path for prompt template files.
 #'   Default: "../../base-data/msgraph/text_for_summary_prompt/"
 #' @param logger Logger function for output messages
+#' @param openrouter_provider Optional OpenRouter provider routing, sent as the
+#'   `provider` object of every request (see [build_openrouter_api_args()]).
+#'   Default `NULL`: no routing, OpenRouter picks any provider of the model.
 #'
 #' @return Invisible NULL (updates database)
 #'
@@ -34,7 +37,9 @@
 #' msgraph_summarize_transcripts(
 #'   con = con,
 #'   openrouter_keys = keys$openrouter,
-#'   openrouter_model = "openai/gpt-5-chat"
+#'   openrouter_model = "openai/gpt-5.6-luna",
+#'   openrouter_provider = list(zdr = TRUE, data_collection = "deny",
+#'                              only = "azure/eu", allow_fallbacks = FALSE)
 #' )
 #' }
 #'
@@ -43,16 +48,23 @@ msgraph_summarize_transcripts <- function(con,
                                               openrouter_model = "openai/gpt-5-chat",
                                               openrouter_keys,
                                               prompt_base_path = "../../base-data/msgraph/text_for_summary_prompt/",
-                                              logger = function(msg, level = "INFO") cat(msg, "\n")) {
+                                              logger = function(msg, level = "INFO") cat(msg, "\n"),
+                                              openrouter_provider = NULL) {
 
   logger(sprintf("Using model: %s", openrouter_model), "DEBUG")
+  logger(sprintf("OpenRouter provider routing: %s",
+                 if (is.null(openrouter_provider)) "none"
+                 else jsonlite::toJSON(build_openrouter_api_args(openrouter_provider)$provider,
+                                       auto_unbox = TRUE)),
+         "INFO")
 
   # Call the main summary generation function
   generate_and_save_transcript_summaries(
     con,
     openrouter_model,
     openrouter_keys,
-    prompt_base_path
+    prompt_base_path,
+    openrouter_provider = openrouter_provider
   )
 
   logger("Summary generation completed", "INFO")
@@ -70,9 +82,12 @@ msgraph_summarize_transcripts <- function(con,
 #' @param openrouter_model The OpenRouter model to use
 #' @param openrouter_key The OpenRouter API key
 #' @param prompt_base_path Base path for prompt template files
+#' @param openrouter_provider Optional OpenRouter provider routing, passed on to
+#'   [summarize_ts()]. Default `NULL`: no routing.
 #' @keywords internal
 generate_and_save_transcript_summaries <- function(con, openrouter_model, openrouter_key,
-                                                    prompt_base_path = "../../base-data/msgraph/text_for_summary_prompt/") {
+                                                    prompt_base_path = "../../base-data/msgraph/text_for_summary_prompt/",
+                                                    openrouter_provider = NULL) {
 
   # Load prompt paths
   paths <- list(
@@ -97,6 +112,12 @@ generate_and_save_transcript_summaries <- function(con, openrouter_model, openro
     return(invisible(NULL))
   }
 
+  # Einzelne Fehler werden uebersprungen und im naechsten Lauf erneut versucht.
+  # Gelingt in einem Lauf aber keine einzige Zusammenfassung (z. B. weil der
+  # einzige erlaubte OpenRouter-Endpunkt ausfaellt), bricht die Funktion am
+  # Ende ab, damit FlowForce den Lauf als fehlgeschlagen meldet.
+  n_saved <- 0L
+
   for (i in seq_len(nrow(transcripts_with_date))) {
     row <- transcripts_with_date[i, ]
 
@@ -105,7 +126,8 @@ generate_and_save_transcript_summaries <- function(con, openrouter_model, openro
     tryCatch({
       # Actually generate the summary
       row$transcript_content_anonymized <- paste0("Gespräch vom ", row$call_start, "\r\n ", row$transcript_content_anonymized)
-      summary_text <- summarize_ts(row$transcript_content_anonymized, paths, openrouter_model, openrouter_key)
+      summary_text <- summarize_ts(row$transcript_content_anonymized, paths, openrouter_model, openrouter_key,
+                                   openrouter_provider = openrouter_provider)
 
       if (is.na(summary_text)) {
         message(sprintf("Summarization failed for transcript ID: %s - skipping, will retry next run", row$transcript_id))
@@ -124,6 +146,7 @@ generate_and_save_transcript_summaries <- function(con, openrouter_model, openro
          WHERE transcript_id = $2",
         params = list(summary_text, row$transcript_id)
       )
+      n_saved <- n_saved + 1L
 
     }, error = function(e) {
       cat("❌ Failed to summarize transcript ID:", row$transcript_id, "\n")
@@ -134,7 +157,34 @@ generate_and_save_transcript_summaries <- function(con, openrouter_model, openro
     Sys.sleep(1.2)  # Respect API limits
   }
 
-  message("Transcript summaries successfully saved to the database.")
+  stop_if_no_summary_saved(nrow(transcripts_with_date), n_saved)
+  message(sprintf("Transcript summaries saved to the database: %d of %d.",
+                  n_saved, nrow(transcripts_with_date)))
+}
+
+
+#' Bricht ab, wenn in einem Lauf keine einzige Zusammenfassung gespeichert wurde
+#'
+#' Der Zusammenfassungs-Schritt ueberspringt einzelne Fehler, damit ein kaputtes
+#' Transkript die anderen nicht aufhaelt. Scheitern aber alle, liegt der Fehler
+#' fast immer ausserhalb des einzelnen Transkripts: das Modell ist nicht mehr
+#' verfuegbar oder der einzige erlaubte OpenRouter-Endpunkt verweigert die
+#' Anfrage. Ohne Abbruch endete der Lauf erfolgreich und niemand merkte, dass
+#' keine Protokolle mehr ins CRM gehen (Hausregel: FlowForce braucht den Absturz).
+#'
+#' @param n_attempted Zahl der Transkripte, die der Lauf versucht hat.
+#' @param n_saved Zahl der gespeicherten Zusammenfassungen.
+#' @return `invisible(NULL)`, oder ein Fehler.
+#' @keywords internal
+# ---- start ---- #
+stop_if_no_summary_saved <- function(n_attempted, n_saved) {
+  if (n_attempted > 0 && n_saved == 0) {
+    stop(sprintf(paste0(
+      "No transcript summary could be saved in this run (%d attempted). ",
+      "Check that the OpenRouter model is available and that its allowed provider ",
+      "endpoints accept the request."), n_attempted), call. = FALSE)
+  }
+  invisible(NULL)
 }
 
 
@@ -144,9 +194,13 @@ generate_and_save_transcript_summaries <- function(con, openrouter_model, openro
 #' @param paths A list containing file paths to the different prompt template files.
 #' @param openrouter_model A string specifying the OpenRouter model to use for processing.
 #' @param openrouter_key A string containing the OpenRouter API key for authentication.
+#' @param openrouter_provider Optional OpenRouter provider routing, sent as the
+#'   `provider` object of every request of this chat (see
+#'   [build_openrouter_api_args()]). Default `NULL`: no routing.
 #' @return A string containing the category codes and summary text, separated by comma and space.
 #' @keywords internal
-summarize_ts <- function(transcript_anonymized, paths, openrouter_model, openrouter_key){
+summarize_ts <- function(transcript_anonymized, paths, openrouter_model, openrouter_key,
+                         openrouter_provider = NULL){
 
   # Define the possible category codes
   possible_categories <- c("NV", #Neuvorstellung
@@ -163,6 +217,7 @@ summarize_ts <- function(transcript_anonymized, paths, openrouter_model, openrou
     system_prompt = paste(task_einfuehrung, transcript_anonymized),
     model = openrouter_model,
     api_key = openrouter_key,
+    api_args = build_openrouter_api_args(openrouter_provider),
     echo = "none"
   )
 
@@ -228,6 +283,59 @@ summarize_ts <- function(transcript_anonymized, paths, openrouter_model, openrou
 ################################################################################
 # Helper Functions
 ################################################################################
+
+#' Builds the ellmer api_args for an OpenRouter provider routing
+#'
+#' Without routing, OpenRouter may send a request to any provider of the model,
+#' including providers that keep prompts or train on them. `openrouter_provider`
+#' restricts that per request, e.g. to Zero Data Retention endpoints in the EU.
+#' It goes into the request body unchanged as `provider`
+#' (https://openrouter.ai/docs/features/provider-routing). The list fields
+#' `only`, `order`, `ignore` and `quantizations` are turned into lists so that a
+#' single slug is still sent as a JSON array, not as a string.
+#'
+#' @param openrouter_provider `NULL` or a named list, e.g.
+#'   `list(zdr = TRUE, data_collection = "deny", only = "azure/eu",
+#'   allow_fallbacks = FALSE)`.
+#' @return List for the `api_args` argument of [ellmer::chat_openrouter()]:
+#'   empty without routing, otherwise `list(provider = <routing>)`.
+#' @keywords internal
+# ---- start ---- #
+build_openrouter_api_args <- function(openrouter_provider = NULL) {
+  if (is.null(openrouter_provider)) return(list())
+
+  if (!is.list(openrouter_provider) || length(openrouter_provider) == 0 ||
+      is.null(names(openrouter_provider)) || any(names(openrouter_provider) == "")) {
+    stop("openrouter_provider must be NULL or a named list, ",
+         "e.g. list(zdr = TRUE, only = \"azure/eu\").", call. = FALSE)
+  }
+
+  for (flag in intersect(c("zdr", "allow_fallbacks", "require_parameters"),
+                         names(openrouter_provider))) {
+    value <- openrouter_provider[[flag]]
+    if (!is.logical(value) || length(value) != 1 || is.na(value)) {
+      stop("openrouter_provider$", flag, " must be TRUE or FALSE.", call. = FALSE)
+    }
+  }
+  if ("data_collection" %in% names(openrouter_provider) &&
+      !identical(openrouter_provider$data_collection, "deny") &&
+      !identical(openrouter_provider$data_collection, "allow")) {
+    stop("openrouter_provider$data_collection must be \"deny\" or \"allow\".", call. = FALSE)
+  }
+
+  array_fields <- intersect(c("only", "order", "ignore", "quantizations"),
+                            names(openrouter_provider))
+  for (field in array_fields) {
+    values <- unlist(openrouter_provider[[field]])
+    if (!is.character(values) || length(values) == 0 || anyNA(values) || any(values == "")) {
+      stop("openrouter_provider$", field, " must name at least one provider slug.", call. = FALSE)
+    }
+    openrouter_provider[[field]] <- as.list(values)
+  }
+
+  list(provider = openrouter_provider)
+}
+
 
 #' Retries the llm call in case of transient errors
 #'

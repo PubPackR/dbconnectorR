@@ -4,7 +4,13 @@
 \alias{summarize_ts}
 \title{Categorizes and summarizes a call transcript using OpenRouter API}
 \usage{
-summarize_ts(transcript_anonymized, paths, openrouter_model, openrouter_key)
+summarize_ts(
+  transcript_anonymized,
+  paths,
+  openrouter_model,
+  openrouter_key,
+  openrouter_provider = NULL
+)
 }
 \arguments{
 \item{transcript_anonymized}{A string containing the anonymized call transcript to be categorized and summarized.}
@@ -14,6 +20,10 @@ summarize_ts(transcript_anonymized, paths, openrouter_model, openrouter_key)
 \item{openrouter_model}{A string specifying the OpenRouter model to use for processing.}
 
 \item{openrouter_key}{A string containing the OpenRouter API key for authentication.}
+
+\item{openrouter_provider}{Optional OpenRouter provider routing, sent as the
+\code{provider} object of every request of this chat (see
+\code{\link[=build_openrouter_api_args]{build_openrouter_api_args()}}). Default \code{NULL}: no routing.}
 }
 \value{
 A string containing the category codes and summary text, separated by comma and space.

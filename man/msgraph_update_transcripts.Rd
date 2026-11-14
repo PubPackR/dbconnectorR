@@ -17,7 +17,8 @@ msgraph_update_transcripts(
   debug_lead_id = NULL,
   resume = FALSE,
   log_level = "INFO",
-  log_file = NULL
+  log_file = NULL,
+  openrouter_provider = NULL
 )
 }
 \arguments{
@@ -65,6 +66,10 @@ Default: FALSE}
 Options: "DEBUG", "INFO", "WARNING", "ERROR". Default: "INFO"}
 
 \item{log_file}{Optional. File path for logging output.}
+
+\item{openrouter_provider}{Optional OpenRouter provider routing for the
+summary step, sent as the \code{provider} object of every request, e.g.
+\code{list(zdr = TRUE, data_collection = "deny", only = "azure/eu", allow_fallbacks = FALSE)}. Default \code{NULL}: no routing.}
 }
 \value{
 Invisible NULL. Function is called for side effects (database updates).

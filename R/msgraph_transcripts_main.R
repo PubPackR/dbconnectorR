@@ -46,6 +46,10 @@
 #' @param log_level Character string specifying logging verbosity.
 #'   Options: "DEBUG", "INFO", "WARNING", "ERROR". Default: "INFO"
 #' @param log_file Optional. File path for logging output.
+#' @param openrouter_provider Optional OpenRouter provider routing for the
+#'   summary step, sent as the `provider` object of every request, e.g.
+#'   `list(zdr = TRUE, data_collection = "deny", only = "azure/eu",
+#'   allow_fallbacks = FALSE)`. Default `NULL`: no routing.
 #'
 #' @return Invisible NULL. Function is called for side effects (database updates).
 #'
@@ -113,7 +117,8 @@ msgraph_update_transcripts <- function(con,
                                        debug_lead_id = NULL,
                                        resume = FALSE,
                                        log_level = "INFO",
-                                       log_file = NULL) {
+                                       log_file = NULL,
+                                       openrouter_provider = NULL) {
 
   # Initialize logging
   logger <- create_transcript_logger(log_level, log_file)
@@ -125,6 +130,7 @@ msgraph_update_transcripts <- function(con,
     openrouter_keys = openrouter_keys,
     crm_keys = crm_keys,
     openrouter_model = openrouter_model,
+    openrouter_provider = openrouter_provider,
     use_test_account = use_test_account,
     debug_lead_id = debug_lead_id,
     start_date = start_date,
@@ -221,7 +227,8 @@ execute_transcript_summarization <- function(con, config) {
     con = con,
     openrouter_model = config$openrouter_model,
     openrouter_keys = config$openrouter_keys,
-    logger = config$logger
+    logger = config$logger,
+    openrouter_provider = config$openrouter_provider
   )
 }
 
