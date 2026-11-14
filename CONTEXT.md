@@ -156,6 +156,23 @@ A one-off calendar row still active although a newer version of the same
 calendar item exists, typically held by another invitee's calendar.
 _Avoid_: Mailbox-move copy (a different item carrying the same meeting).
 
+**Mailbox-move copy**:
+A calendar row that the move of the mailboxes to the new tenant
+(August to October 2026) re-created under a new iCal UID. It carries
+the move day as its creation date, although the meeting was often
+arranged long before. Whether a row is one can only be suspected or
+evidenced, never read off.
+_Avoid_: Stale copy (same iCal UID, older version), duplicate (the copy
+is often the meeting's only row).
+
+**Move session**:
+A run of calendar creations by the same organizer in quick succession,
+among which at least two meetings had already taken place before they
+were created. That is what copying a calendar looks like; no person
+creates several past meetings within minutes. A row from a move session
+is a suspected mailbox-move copy.
+_Avoid_: Move day (there was no fixed day per person).
+
 **Successor**:
 The calendar row that replaces another one: the active row of the same calendar
 item, or else the replacement found by same external contact and nearby start.
