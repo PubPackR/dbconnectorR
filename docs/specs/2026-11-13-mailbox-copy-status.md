@@ -21,7 +21,7 @@ Umzugs-Sitzung, wie im Befüllungsskript der Challenge (Q10): Anlagen derselben 
 | Wert | Wann |
 |---|---|
 | `has_earlier_original` | Die ical_uid hat ein früheres Original: gleicher Start, gemeinsamer externer Kontakt, andere ical_uid, früher angelegt (Paarung von `inherit_moved_copy_created_at()`). |
-| `evidenced` | Der früheste CRM-Task, den der Producer dieser Zeile zuordnet (`match_crm_tasks()`, gelöschte Tasks lädt `load_crm_vc_tasks()` nicht), wurde vor der Kopie angelegt: `task_created_at < event_created_at` (Q15). Ein Task an einer anderen Zeile derselben Kette zählt nicht. |
+| `evidenced` | Der früheste CRM-Task, den der Producer dieser Zeile zuordnet (`match_crm_tasks()`, gelöschte Tasks lädt `load_crm_vc_tasks()` nicht), wurde vor der Kopie angelegt: `task_created_at < event_created_at` (Q15). Ein Task an einer anderen Zeile derselben Kette zählt nicht, ebenso wenig ein Task aus der Auffangregel `mehrdeutig_aktiv` (Q18). |
 | `suspected` | sonst |
 
 Ohne Verdacht bleibt die Spalte leer, auch bei einem Original.
@@ -34,7 +34,7 @@ Daraus folgt (Q5, Q9): `stale_copy`-Zeilen und Bookings-Kalenderkopien sind kein
 
 ## Entscheidungen
 
-Die Empfehlungen zu Q1 bis Q11 hat der Nutzer am 13.11.2026 mit „passt alles“ bestätigt, Q12 bis Q16 und das Zielbild ebenfalls mit „passt alles“, Q17 mit „passt“.
+Die Empfehlungen zu Q1 bis Q11 hat der Nutzer am 13.11.2026 mit „passt alles“ bestätigt, Q12 bis Q16 und das Zielbild ebenfalls mit „passt alles“, Q17 mit „passt“. Q18 kam aus dem Review und wurde am 14.11.2026 mit „passt“ bestätigt.
 
 - **Q1 Wo entsteht das Signal?:** passt alles. (a) Eine reine Funktion `detect_mailbox_copies()` in `R/msgraph_event_detection.R`, aufgerufen in `build_sales_meetings()`; `update_sales_meetings()` schreibt die Spalte mit, wie `organizer_is_external` in #69. Kein eigener Job.
 - **Q2 Wann trägt eine Zeile `has_earlier_original`?:** passt alles. (b) Nur wenn sie außerdem unter Verdacht steht. Die drei Werte sind die drei Ausgänge eines Verdachts.
@@ -53,6 +53,7 @@ Die Empfehlungen zu Q1 bis Q11 hat der Nutzer am 13.11.2026 mit „passt alles�
 - **Q15 Zeitgrenzen genau:** passt alles. Graph-Anlage ab 01.08.2026 00:00 bis vor 01.11.2026 00:00; „vor der Kopie“ heißt `task_created_at < event_created_at`, beide mit UTC-Ziffern.
 - **Q16 Quelle beim Ersatztermin:** passt alles. `crm_task`: die Quelle folgt dem Datum.
 - **Q17 Belegte Kopie, aber die ical_uid war schon früher da:** passt. (a) Das frühere Datum bleibt, mit der Quelle `outlook`.
+- **Q18 Belegt auch ein Task aus der Auffangregel?:** passt. (b) Nein. Ein Task, den `match_crm_tasks()` nur über `mehrdeutig_aktiv` an die einzige aktive Zeile hängt, bleibt deren Task (Outcome, Lead), belegt sie aber nicht. Die Zeile bleibt `suspected`. Grund: Q5 verlangt eine eindeutige Zuordnung, und die Liste der Challenge schloss mehrdeutige Zuordnungen aus.
 
 ## Betroffen
 

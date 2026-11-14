@@ -281,7 +281,9 @@ detect_move_sessions <- function(events, move_from = MAILBOX_MOVE_FROM,
 #' @param rows Data frame with one row per calendar row: `event_created_at` and
 #'   `event_start` (POSIXct, UTC), `in_move_session` and `has_earlier_original`
 #'   (logical) and `first_crm_task_at` (POSIXct, UTC, `NA` without task: the
-#'   creation of the earliest CRM task assigned to the row).
+#'   creation of the earliest CRM task that counts as evidence for the row;
+#'   [build_sales_meetings()] leaves out tasks of the `mehrdeutig_aktiv`
+#'   fallback).
 #' @param move_from,move_to POSIXct. Period of the move, `move_to` excluded.
 #' @return Character vector of the same length: `has_earlier_original`,
 #'   `evidenced`, `suspected` or `NA` when the row is not suspected.

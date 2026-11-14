@@ -14,7 +14,9 @@ detect_mailbox_copies(
 \item{rows}{Data frame with one row per calendar row: \code{event_created_at} and
 \code{event_start} (POSIXct, UTC), \code{in_move_session} and \code{has_earlier_original}
 (logical) and \code{first_crm_task_at} (POSIXct, UTC, \code{NA} without task: the
-creation of the earliest CRM task assigned to the row).}
+creation of the earliest CRM task that counts as evidence for the row;
+\code{\link[=build_sales_meetings]{build_sales_meetings()}} leaves out tasks of the \code{mehrdeutig_aktiv}
+fallback).}
 
 \item{move_from, move_to}{POSIXct. Period of the move, \code{move_to} excluded.}
 }

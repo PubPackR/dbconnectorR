@@ -329,8 +329,9 @@ build_sales_meetings <- function(events, participants, call_event, calls, call_p
     stringsAsFactors = FALSE))
 
   # Beleg: der frueheste eigene CRM-Task der Zeile (Q5). Geloeschte Tasks laedt
-  # load_crm_vc_tasks() gar nicht erst.
-  getroffen <- tk[!is.na(tk$event_hit), , drop = FALSE]
+  # load_crm_vc_tasks() gar nicht erst. Ein Task aus der Auffangregel
+  # mehrdeutig_aktiv bleibt der Task der Zeile, belegt sie aber nicht (Q18).
+  getroffen <- tk[!is.na(tk$event_hit) & !(tk$match_rule %in% "mehrdeutig_aktiv"), , drop = FALSE]
   erster_task <- if (nrow(getroffen) > 0) {
     tapply(as.numeric(sm_utc(getroffen$task_created_at)), getroffen$event_hit, min)
   } else numeric(0)

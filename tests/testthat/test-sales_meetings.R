@@ -467,6 +467,42 @@ test_that("Das CRM-Datum gilt vor Kurzlebigkeit und Ersatz-Erbe (Q12, Q16)", {
   expect_equal(row_of(m, "msgraph_25")$booked_date_source, "outlook")
 })
 
+test_that("Ein Task aus der Auffangregel mehrdeutig_aktiv belegt keine Kopie (Q18)", {
+  # 28: vorbei, angelegt 10.09. 08:30. 29: abgesagt am selben Tag, ein anderer Kontakt
+  # desselben Leads, also kein Ersatz. Der Task kommt von einem anderen Rep (600):
+  # er landet nur ueber mehrdeutig_aktiv an der einzigen aktiven Zeile 28.
+  w <- mk_umzug_world()
+  e28 <- transform(w$events[w$events$id == 21, ], id = 28, msgraph_ical_uid = "u28",
+                   event_created_at = ts("2026-09-10 08:30"), event_updated_at = ts("2026-09-10 08:30"),
+                   created_at = ts("2026-09-10 09:30"), event_start = ts("2026-09-04 09:00"))
+  e29 <- transform(e28, id = 29, msgraph_ical_uid = "u29", is_canceled = TRUE,
+                   event_created_at = ts("2026-07-15 08:00"), event_updated_at = ts("2026-07-20 08:00"),
+                   created_at = ts("2026-07-15 09:00"), event_start = ts("2026-09-04 14:00"))
+  w$events <- rbind(w$events, e28, e29)
+  p <- function(event, contact, email, org = FALSE) data.frame(
+    event_id = event, contact_id = contact, is_organizer = org, email = email,
+    stringsAsFactors = FALSE)
+  w$participants <- rbind(w$participants,
+    p(28, 500, "rep@studyflix.de", TRUE), p(28, 928, "k28@kunde.de"),
+    p(29, 500, "rep@studyflix.de", TRUE), p(29, 929, "k29@kunde.de"))
+  w$lead_mappings <- rbind(w$lead_mappings,
+    data.frame(msgraph_contact_id = c(928, 929), crm_lead_id = c(128, 128)))
+  w$tasks <- rbind(w$tasks, transform(
+    w$tasks[1, ], id = 1028, crm_task_id = 7028, lead_id = 128, contact_id = 600,
+    precise_time = ts("2026-09-04 09:00"), event_date = as.Date("2026-09-04"),
+    task_created_at = ts("2026-08-20 08:00")))
+  r <- build_world(w)
+  m <- r$meetings
+
+  # Der Task bleibt der Task der Zeile 28, er belegt sie nur nicht.
+  expect_false("crm_7028" %in% m$meeting_key)
+  l <- r$leads
+  expect_equal(l$crm_lead_task_id[l$meeting_key == "msgraph_28" & l$lead_id == "128"], "1028")
+  expect_equal(row_of(m, "msgraph_28")$mailbox_copy_status, "suspected")
+  expect_equal(row_of(m, "msgraph_28")$booked_date, as.Date("2026-09-10"))
+  expect_equal(row_of(m, "msgraph_28")$booked_date_source, "outlook")
+})
+
 test_that("der Writer schreibt mailbox_copy_status", {
   expect_true("mailbox_copy_status" %in% SALES_MEETINGS_SPALTEN)
   expect_true("mailbox_copy_status" %in% names(build_world()$meetings))
