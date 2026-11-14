@@ -200,3 +200,106 @@ detect_replaced_events <- function(canceled_events, active_events, max_days = 2)
     dplyr::select(canceled_event_id, replacement_event_id) %>%
     as.data.frame()
 }
+
+#' Period of the Mailbox Move
+#'
+#' Calendar rows whose Graph `createdDateTime` lies in `[MAILBOX_MOVE_FROM,
+#' MAILBOX_MOVE_TO)` can be mailbox-move copies (`CONTEXT.md`). The mailboxes
+#' moved to the new tenant from the end of August to September 2026, a
+#' different day per person; the period runs from August to October, like the
+#' move sessions of the Sales-Challenge list (spec
+#' `docs/specs/2026-11-13-mailbox-copy-status.md`, Q3 and Q15). UTC, like
+#' `raw.msgraph_events.event_created_at`.
+#'
+#' @keywords internal
+MAILBOX_MOVE_FROM <- as.POSIXct("2026-08-01 00:00:00", tz = "UTC")
+
+#' @rdname MAILBOX_MOVE_FROM
+#' @keywords internal
+MAILBOX_MOVE_TO <- as.POSIXct("2026-11-01 00:00:00", tz = "UTC")
+
+#' Detect Calendar Rows Created in a Move Session
+#'
+#' A move session is a run of calendar creations by the same organizer in quick
+#' succession, among which at least two meetings had already taken place before
+#' they were created (`CONTEXT.md`). Rule as in shiny-99
+#' `one-off/2026-11-03_sales_challenge_umzugskopie_befuellen.sql`: only rows
+#' created in `[move_from, move_to)` and not a Bookings entry (`booking:`), the
+#' organizer is the participant flagged `is_organizer` with the smallest
+#' `contact_id` (any address), a gap of more than `gap_minutes` starts a new
+#' session, and a meeting counts as past when it started more than a day before
+#' its creation.
+#'
+#' @param events Data frame with one row per calendar row: `event_id`,
+#'   `msgraph_ical_uid`, `event_created_at` and `event_start` (POSIXct, UTC) and
+#'   `organizer_contact_id` (`NA` without organizer; such rows never belong to a
+#'   session).
+#' @param move_from,move_to POSIXct. Period of the move, `move_to` excluded.
+#' @param gap_minutes Numeric. Largest gap between two creations of a session.
+#'   Default 30.
+#' @param min_past Integer. Past meetings a session needs. Default 2.
+#' @return The `event_id`s of all rows in a qualifying session, without
+#'   duplicates, in the type of `events$event_id`.
+#' @keywords internal
+detect_move_sessions <- function(events, move_from = MAILBOX_MOVE_FROM,
+                                 move_to = MAILBOX_MOVE_TO, gap_minutes = 30, min_past = 2) {
+  # ---- start ---- #
+  ev <- as.data.frame(events)
+  im_zeitraum <- (ev$event_created_at >= move_from & ev$event_created_at < move_to) %in% TRUE
+  ev <- ev[im_zeitraum & !(startsWith(ev$msgraph_ical_uid, "booking:") %in% TRUE) &
+             !is.na(ev$organizer_contact_id), , drop = FALSE]
+  if (nrow(ev) == 0) return(events$event_id[0])
+
+  ev$vorbei <- (ev$event_start < ev$event_created_at - 86400) %in% TRUE
+  ev <- ev[order(as.character(ev$organizer_contact_id), ev$event_created_at,
+                 as.numeric(ev$event_id)), , drop = FALSE]
+  gleicher_org <- c(FALSE, ev$organizer_contact_id[-1] == ev$organizer_contact_id[-nrow(ev)])
+  abstand <- c(Inf, as.numeric(difftime(ev$event_created_at[-1], ev$event_created_at[-nrow(ev)],
+                                        units = "mins")))
+  neu <- !gleicher_org | abstand > gap_minutes
+  sitzung <- cumsum(neu)
+  vorbei_je_sitzung <- tapply(ev$vorbei, sitzung, sum)
+  treffer <- sitzung %in% as.integer(names(vorbei_je_sitzung)[vorbei_je_sitzung >= min_past])
+  unique(ev$event_id[treffer])
+}
+
+#' Detect Mailbox-Move Copies
+#'
+#' A calendar row is suspected to be a mailbox-move copy (`CONTEXT.md`) when it
+#' was created in the move period and either belongs to a move session
+#' ([detect_move_sessions()]) or was created after its meeting day (Berlin
+#' days). Of a suspected row the first that applies wins:
+#'
+#' - `has_earlier_original`: an earlier calendar item of the same start shares
+#'   an external participant (the pairing of [inherit_moved_copy_created_at()]);
+#' - `evidenced`: a CRM task assigned to this row was created before the row;
+#' - `suspected`: neither.
+#'
+#' Applies the rule to the given rows only. Which rows take part is up to the
+#' caller (spec `docs/specs/2026-11-13-mailbox-copy-status.md`).
+#'
+#' @param rows Data frame with one row per calendar row: `event_created_at` and
+#'   `event_start` (POSIXct, UTC), `in_move_session` and `has_earlier_original`
+#'   (logical) and `first_crm_task_at` (POSIXct, UTC, `NA` without task: the
+#'   creation of the earliest CRM task that counts as evidence for the row;
+#'   [build_sales_meetings()] leaves out tasks of the `mehrdeutig_aktiv`
+#'   fallback).
+#' @param move_from,move_to POSIXct. Period of the move, `move_to` excluded.
+#' @return Character vector of the same length: `has_earlier_original`,
+#'   `evidenced`, `suspected` or `NA` when the row is not suspected.
+#' @keywords internal
+detect_mailbox_copies <- function(rows, move_from = MAILBOX_MOVE_FROM, move_to = MAILBOX_MOVE_TO) {
+  # ---- start ---- #
+  angelegt <- rows$event_created_at
+  im_zeitraum <- (angelegt >= move_from & angelegt < move_to) %in% TRUE
+  vorbei <- (as.Date(rows$event_start, tz = "Europe/Berlin") <
+               as.Date(angelegt, tz = "Europe/Berlin")) %in% TRUE
+  verdacht <- im_zeitraum & ((rows$in_move_session %in% TRUE) | vorbei)
+
+  belegt <- (rows$first_crm_task_at < angelegt) %in% TRUE
+  status <- rep(NA_character_, nrow(rows))
+  status[verdacht] <- "suspected"
+  status[verdacht & belegt] <- "evidenced"
+  status[verdacht & rows$has_earlier_original %in% TRUE] <- "has_earlier_original"
+  status
+}

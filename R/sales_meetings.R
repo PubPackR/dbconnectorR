@@ -184,37 +184,11 @@ build_sales_meetings <- function(events, participants, call_event, calls, call_p
   rec$successor_key <- ifelse(!is.na(nachfolger) & nachfolger %in% rec$event_id,
                               paste0("msgraph_", nachfolger), NA_character_)
 
-  # ---- 3. Legedatum wie original_created_at (Q4, Q10) ---- #
-  angelegt <- compute_original_created_at(data.frame(
-    msgraph_ical_uid = ev$uid, event_created_at = ev$event_created_at,
-    created_at = ev$created_at, stringsAsFactors = FALSE))
-  angelegt <- inherit_moved_copy_created_at(
-    angelegt,
-    data.frame(id = ev$event_id, msgraph_ical_uid = ev$uid, event_start = ev$event_start,
-               stringsAsFactors = FALSE),
-    pa[, c("event_id", "contact_id", "email")])
-  gelegt <- sm_utc(angelegt$original_created_at[match(rec$uid, angelegt$msgraph_ical_uid)])
-  # Ein Ersatztermin erbt das fruehere Datum seines abgesagten Vorgaengers.
-  if (nrow(ersatz) > 0) {
-    alt <- gelegt[match(as.character(ersatz$canceled_event_id), rec$event_id)]
-    neu <- match(as.character(ersatz$replacement_event_id), rec$event_id)
-    for (k in seq_along(neu)) {
-      if (!is.na(neu[k]) && !is.na(alt[k]) && (is.na(gelegt[neu[k]]) || alt[k] < gelegt[neu[k]])) {
-        gelegt[neu[k]] <- alt[k]
-      }
-    }
-  }
-  # booking:-Eintraege tragen keine echte Anlagezeit (msgraph_scoped_bookings.R).
-  gelegt[ist_eintrag] <- rec$start_utc[ist_eintrag]
-  rec$booked_at_utc <- gelegt
-  rec$booked_date <- as.Date(rec$booked_at_utc, tz = "Europe/Berlin")
-  rec$booked_date_source <- ifelse(ist_eintrag, "bookings_start", "outlook")
-
-  # Kurzlebig: Absagezeitpunkt vanished_at, sonst event_updated_at.
-  abgesagt_am <- dplyr::coalesce(sm_utc(rec$vanished_at), sm_utc(rec$event_updated_at))
-  rec$is_short_lived <- detect_short_lived_events(rec$is_canceled %in% TRUE, abgesagt_am,
-                                                  rec$booked_at_utc)
-  rec$is_short_lived[ist_eintrag] <- NA
+  # ---- 3. Legedatum: erst in Schritt 7b ---- #
+  # Eine belegte Umzugskopie bekommt das Datum ihres CRM-Tasks, und das gilt schon
+  # fuer Kurzlebigkeit, Personenrollen und das Erbe an den Ersatztermin (Spec
+  # 2026-11-13-mailbox-copy-status, Q12). Die Schritte 4 bis 7 brauchen kein
+  # Legedatum.
 
   # ---- 4. Teams: alle Sitzungen des Events (Q9, Q16) ---- #
   ce <- as.data.frame(call_event)
@@ -326,6 +300,86 @@ build_sales_meetings <- function(events, participants, call_event, calls, call_p
   tk$event_hit   <- kz$event_id[abgleich$row]
   tk$match_rule  <- abgleich$match_rule
 
+  # ---- 7b. Umzugskopien und Legedatum (Q4, Q10; Spec 2026-11-13-mailbox-copy-status) ---- #
+  # Legedatum wie original_created_at: je ical_uid die frueheste Anlage, dann das
+  # Erbe der Umzugskopie (#62). Wo das Erbe greift, hat die ical_uid ein frueheres
+  # Original.
+  eigen <- compute_original_created_at(data.frame(
+    msgraph_ical_uid = ev$uid, event_created_at = ev$event_created_at,
+    created_at = ev$created_at, stringsAsFactors = FALSE))
+  angelegt <- inherit_moved_copy_created_at(
+    eigen,
+    data.frame(id = ev$event_id, msgraph_ical_uid = ev$uid, event_start = ev$event_start,
+               stringsAsFactors = FALSE),
+    pa[, c("event_id", "contact_id", "email")])
+  gelegt <- sm_utc(angelegt$original_created_at[match(rec$uid, angelegt$msgraph_ical_uid)])
+  gelegt_eigen <- sm_utc(eigen$original_created_at[match(rec$uid, eigen$msgraph_ical_uid)])
+  mit_original <- (gelegt < gelegt_eigen) %in% TRUE
+
+  # Umzugs-Sitzungen ueber alle Kalenderzeilen, auch interne Termine (Q9). Der
+  # Organisator ist hier jede Adresse, die kleinste contact_id (Q10).
+  org_jede <- pa[pa$is_organizer %in% TRUE & !is.na(pa$contact_id), c("event_id", "contact_id"),
+                 drop = FALSE]
+  org_jede <- org_jede[order(org_jede$event_id, as.numeric(org_jede$contact_id)), , drop = FALSE]
+  org_jede <- org_jede[!duplicated(org_jede$event_id), , drop = FALSE]
+  sitzung_ids <- detect_move_sessions(data.frame(
+    event_id = ev$event_id, msgraph_ical_uid = ev$uid,
+    event_created_at = sm_utc(ev$event_created_at), event_start = ev$start_utc,
+    organizer_contact_id = org_jede$contact_id[match(ev$event_id, org_jede$event_id)],
+    stringsAsFactors = FALSE))
+
+  # Beleg: der frueheste eigene CRM-Task der Zeile (Q5). Geloeschte Tasks laedt
+  # load_crm_vc_tasks() gar nicht erst. Ein Task aus der Auffangregel
+  # mehrdeutig_aktiv bleibt der Task der Zeile, belegt sie aber nicht (Q18).
+  getroffen <- tk[!is.na(tk$event_hit) & !(tk$match_rule %in% "mehrdeutig_aktiv"), , drop = FALSE]
+  erster_task <- if (nrow(getroffen) > 0) {
+    tapply(as.numeric(sm_utc(getroffen$task_created_at)), getroffen$event_hit, min)
+  } else numeric(0)
+  rec$first_crm_task_at <- .POSIXct(unname(erster_task[rec$event_id]), tz = "UTC")
+
+  # Geprueft wird jede Kalenderzeile ausser booking:-Eintraegen (Q9).
+  rec$mailbox_copy_status <- NA_character_
+  pruefen <- !ist_eintrag
+  rec$mailbox_copy_status[pruefen] <- detect_mailbox_copies(data.frame(
+    event_created_at = sm_utc(rec$event_created_at[pruefen]),
+    event_start = rec$start_utc[pruefen],
+    in_move_session = rec$event_id[pruefen] %in% sitzung_ids,
+    has_earlier_original = mit_original[pruefen],
+    first_crm_task_at = rec$first_crm_task_at[pruefen]))
+
+  # Eine belegte Kopie traegt den Tag ihres fruehesten Tasks (Q4), ausser die
+  # ical_uid ist noch aelter: dann gewinnt wie ueberall das fruehere Datum (Q17).
+  quelle <- rep("outlook", nrow(rec))
+  belegt <- rec$mailbox_copy_status %in% "evidenced" &
+    (is.na(gelegt) | rec$first_crm_task_at < gelegt) %in% TRUE
+  gelegt[belegt] <- rec$first_crm_task_at[belegt]
+  quelle[belegt] <- "crm_task"
+
+  # Ein Ersatztermin erbt das fruehere Datum seines abgesagten Vorgaengers, samt
+  # dessen Quelle (Q16).
+  if (nrow(ersatz) > 0) {
+    alt_i <- match(as.character(ersatz$canceled_event_id), rec$event_id)
+    neu <- match(as.character(ersatz$replacement_event_id), rec$event_id)
+    for (k in seq_along(neu)) {
+      alt <- gelegt[alt_i[k]]
+      if (!is.na(neu[k]) && !is.na(alt) && (is.na(gelegt[neu[k]]) || alt < gelegt[neu[k]])) {
+        gelegt[neu[k]] <- alt
+        quelle[neu[k]] <- quelle[alt_i[k]]
+      }
+    }
+  }
+  # booking:-Eintraege tragen keine echte Anlagezeit (msgraph_scoped_bookings.R).
+  gelegt[ist_eintrag] <- rec$start_utc[ist_eintrag]
+  rec$booked_at_utc <- gelegt
+  rec$booked_date <- as.Date(rec$booked_at_utc, tz = "Europe/Berlin")
+  rec$booked_date_source <- ifelse(ist_eintrag, "bookings_start", quelle)
+
+  # Kurzlebig: Absagezeitpunkt vanished_at, sonst event_updated_at.
+  abgesagt_am <- dplyr::coalesce(sm_utc(rec$vanished_at), sm_utc(rec$event_updated_at))
+  rec$is_short_lived <- detect_short_lived_events(rec$is_canceled %in% TRUE, abgesagt_am,
+                                                  rec$booked_at_utc)
+  rec$is_short_lived[ist_eintrag] <- NA
+
   ersatz_leads <- tk[tk$match_rule %in% "ersatzregel", , drop = FALSE]
   ersatz_leads <- data.frame(event_id = ersatz_leads$event_hit, lead_id = ersatz_leads$lead_chr,
                              quelle = rep("substitute_rule", nrow(ersatz_leads)),
@@ -354,6 +408,7 @@ build_sales_meetings <- function(events, participants, call_event, calls, call_p
     booking_role = rep(NA_character_, nrow(c1)),
     is_short_lived = rep(NA, nrow(c1)),
     is_duplicate = rep(NA, nrow(c1)),
+    mailbox_copy_status = rep(NA_character_, nrow(c1)),
     internal_participant_count = rep(NA_integer_, nrow(c1)),
     external_participant_count = rep(NA_integer_, nrow(c1)),
     external_speaker_count = rep(NA_integer_, nrow(c1)),
@@ -385,6 +440,7 @@ build_sales_meetings <- function(events, participants, call_event, calls, call_p
     booking_role = rec$booking_role,
     is_short_lived = rec$is_short_lived,
     is_duplicate = rec$is_duplicate,
+    mailbox_copy_status = rec$mailbox_copy_status,
     internal_participant_count = rec$internal_participant_count,
     external_participant_count = rec$external_participant_count,
     external_speaker_count = rec$external_speaker_count,
@@ -494,7 +550,8 @@ SALES_MEETINGS_SPALTEN <- c(
   "meeting_key", "msgraph_event_id", "meeting_date", "starts_at_utc", "booked_date",
   "booked_date_source", "organizer_person_id", "organizer_type", "organizer_is_external",
   "responsible_person_id", "calendar_status", "calendar_changed_at_utc", "teams_status",
-  "booking_role", "is_short_lived", "is_duplicate", "internal_participant_count",
+  "booking_role", "is_short_lived", "is_duplicate", "mailbox_copy_status",
+  "internal_participant_count",
   "external_participant_count", "external_speaker_count", "call_started_at_utc",
   "call_duration_minutes")
 
