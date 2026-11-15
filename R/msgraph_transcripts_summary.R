@@ -224,6 +224,9 @@ summarize_ts <- function(transcript_anonymized, paths, openrouter_model, openrou
   # Categorize Chat
   task_categorization <- paste(readLines(paths$aufgaben_kategorisierung, warn = FALSE), collapse = "\n")
   transcript_categories <- retry_llm(task_categorization, chat)
+  # Ein gescheiterter Schritt beendet die Kette: Die Folgeschritte bauen auf seiner
+  # Antwort auf und wuerden ohne sie etwas anderes speichern (llm_step_failed).
+  if (llm_step_failed(transcript_categories)) return(NA)
   categories_vector <- character(0)
   # Check for each category in the response and add to vector in order of appearance
   for (category in possible_categories) {
@@ -235,6 +238,7 @@ summarize_ts <- function(transcript_anonymized, paths, openrouter_model, openrou
   if (length(categories_vector) == 0 || !(categories_vector[1] %in% c("NV", "FU", "RP"))) {
     task_retry <- paste(readLines(paths$aufgaben_kategorisierung_refinement, warn = FALSE), collapse = "\n")
     transcript_categories <- retry_llm(task_retry, chat)
+    if (llm_step_failed(transcript_categories)) return(NA)
     categories_vector <- character(0)
     # Check for each category in the response and add to vector in order of appearance
     for (category in possible_categories) {
@@ -261,21 +265,25 @@ summarize_ts <- function(transcript_anonymized, paths, openrouter_model, openrou
   } else {
     summary <- "ICH KONNTE DAS TRANSKRIPT NICHT KATEGORISIEREN, VERSUCHE ES ERNEUT"
   }
+  if (llm_step_failed(summary)) return(NA)
 
   prompt <- paste(readLines(paths$pruefung_wettbewerber, warn = FALSE), collapse = "\n")
   summary <- retry_llm(prompt, chat)
+  if (llm_step_failed(summary)) return(NA)
 
   prompt <- paste(readLines(paths$pruefung_sprecher, warn = FALSE), collapse = "\n")
   summary <- retry_llm(prompt, chat)
+  if (llm_step_failed(summary)) return(NA)
 
   prompt <- paste(readLines(paths$pruefung_datum, warn = FALSE), collapse = "\n")
   summary <- retry_llm(prompt, chat)
+  if (llm_step_failed(summary)) return(NA)
 
   prompt <- paste(readLines(paths$layout, warn = FALSE), collapse = "\n")
   summary <- retry_llm(prompt, chat)
 
   #return(paste(paste(categories_vector, collapse = ", "), summary))
-  if (is.na(summary)) return(NA)
+  if (llm_step_failed(summary)) return(NA)
   return(paste(summary))
 }
 
@@ -337,6 +345,42 @@ build_openrouter_api_args <- function(openrouter_provider = NULL) {
 }
 
 
+#' Prueft, ob ein Schritt der Zusammenfassungs-Kette gescheitert ist
+#'
+#' `retry_llm()` gibt bei einem Fehler `NA` zurueck. Die Schritte der Kette bauen
+#' aufeinander auf (Kategorie, Zusammenfassung, Pruefungen, Layout): Laeuft die
+#' Kette nach einem gescheiterten Schritt weiter, antworten die Folgeschritte
+#' ohne dessen Ergebnis, und ihr Text wuerde als Zusammenfassung gespeichert.
+#'
+#' @param answer Rueckgabe von [retry_llm()].
+#' @return `TRUE`, wenn der Schritt keine Antwort geliefert hat.
+#' @keywords internal
+# ---- start ---- #
+llm_step_failed <- function(answer) {
+  length(answer) != 1 || is.na(answer)
+}
+
+
+#' Entscheidet, ob ein Fehler eines LLM-Aufrufs voruebergehend ist
+#'
+#' Mit einem festgelegten Endpunkt und `allow_fallbacks = FALSE` faengt OpenRouter
+#' einen Ausfall des Providers nicht mehr selbst ab. Deshalb gelten neben 429 und
+#' 503 auch 408, 500, 502, 504, 529 und Verbindungsfehler als voruebergehend.
+#' Ein 404 ("No endpoints found matching your data policy") oder ein 400 bleibt
+#' endgueltig: Ein neuer Versuch aendert daran nichts.
+#'
+#' @param e Die Fehlerbedingung des Aufrufs.
+#' @return `TRUE`, wenn ein neuer Versuch sinnvoll ist.
+#' @keywords internal
+# ---- start ---- #
+is_transient_llm_error <- function(e) {
+  transient_status <- c(408, 429, 500, 502, 503, 504, 529)
+  inherits(e, c(paste0("httr2_http_", transient_status), "httr2_failure")) ||
+    grepl(paste0("\\b(", paste(transient_status, collapse = "|"), ")\\b|timed out|timeout"),
+          conditionMessage(e), ignore.case = TRUE)
+}
+
+
 #' Retries the llm call in case of transient errors
 #'
 #' @param prompt A string containing the call transcript to be summarized.
@@ -352,8 +396,8 @@ retry_llm <- function(prompt, chat, max_attempts = 4, wait_base = 2) {
     }, error = function(e) {
       error_msg <- conditionMessage(e)
       error_class <- paste(class(e), collapse = "/")
-      # Only retry on 503 / 429 or general transient failures
-      if (grepl("503|429", error_msg)) {
+      # Voruebergehende Fehler erneut versuchen (is_transient_llm_error)
+      if (is_transient_llm_error(e)) {
         wait_time <- wait_base ^ i
         message(sprintf("Attempt %d failed with %s. Retrying in %d seconds...", i, error_msg, wait_time))
         Sys.sleep(wait_time)
