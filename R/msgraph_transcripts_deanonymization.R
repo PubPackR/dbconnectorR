@@ -99,6 +99,29 @@ deanonymize_transcript_summaries <- function(con) {
 }
 
 
+#' Findet die Platzhalter in einem anonymisierten Text
+#'
+#' Das Modell schreibt einen Platzhalter manchmal ohne die Leerzeichen in den
+#' spitzen Klammern ("<Lead_1_City_1>" statt "< Lead_1_City_1 >"). Beide
+#' Schreibweisen werden gefunden, sonst bliebe der Platzhalter im CRM stehen.
+#' Die Schreibweise ohne Leerzeichen gilt nur fuer die bekannten Praefixe Lead,
+#' Salesperson und Unknown, damit anderer Text in spitzen Klammern unberuehrt
+#' bleibt.
+#'
+#' @param text Ein einzelner anonymisierter Text.
+#' @return Zeichenvektor mit den Platzhaltern, genau so geschrieben wie im Text.
+#' @keywords internal
+# ---- start ---- #
+extract_placeholder_tokens <- function(text) {
+  stringr::str_extract_all(
+    text,
+    paste0(
+      "< (?:Speaker: )?[A-Za-z0-9_-]+ >",
+      "|<\\s*(?:Speaker:\\s*)?(?:Lead|Salesperson|Unknown)_[A-Za-z0-9_-]+\\s*>"
+    )
+  )[[1]]
+}
+
 #' Deanonymizes text by replacing anonymized IDs with original names
 #'
 #' @param con Database connection
@@ -125,8 +148,7 @@ deanonymize_text <- function(con, anonymized_text, transcript_id_var) {
   }
 
   # Extract tokens: "< Lead_1 >" (with spaces) or "<Lead_1>" (without spaces)
-  # Pattern: < optional-spaces WORD_NUMBER optional-spaces >
-  tokens_raw <- stringr::str_extract_all(anonymized_text, "< (?:Speaker: )?[A-Za-z0-9_-]+ >")[[1]]
+  tokens_raw <- extract_placeholder_tokens(anonymized_text)
 
   if(length(tokens_raw) == 0) {
     return(anonymized_text)
