@@ -72,6 +72,35 @@ Die Empfehlungen zu Q1 bis Q8 hat der Nutzer am 12.11.2026 mit „passt alles“
 ## Validierung
 
 - Die Referenz-SQL läuft in DBeaver gegen Production ohne Fehler, und `(meeting_id, lead_id)` ist in ihrem Ergebnis eindeutig.
-- Abfrage A des Abgleichs nach dem Nachtlauf vom 13.11.2026: Jede Klasse von `befund` ist hier mit Zahl und Ursache erklärt. Erwartet sind die Gruppen aus *Problem*, Abweichungen im CRM-Ausgang (Rangfolge vom 02.11., Task-Zuordnung nach Q1, Q21, Q25 der Sales-Meetings-Spec), in der Duplikat-Menge (Q2 der Sales-Meetings-Spec) und Zeilen, die heute als Kalender- und als CRM-Zeile doppelt stehen.
+- Abfrage A des Abgleichs nach dem ersten Nachtlauf mit `organizer_is_external`: Jede Klasse von `befund` ist hier mit Zahl und Ursache erklärt. Erwartet sind die Gruppen aus *Problem*, Abweichungen im CRM-Ausgang (Rangfolge vom 02.11., Task-Zuordnung nach Q1, Q21, Q25 der Sales-Meetings-Spec), in der Duplikat-Menge (Q2 der Sales-Meetings-Spec) und Zeilen, die heute als Kalender- und als CRM-Zeile doppelt stehen.
 - Abfrage B: No-Shows, stattgefundene und bewertbare Termine je Monat beider Seiten nebeneinander, die Differenz je Monat erklärt sich aus Abfrage A.
 - Moritz oder Elias hat das Modell in Metabase angelegt.
+
+### Ergebnis vom 15.11.2026
+
+Gelaufen nach dem Nachtlauf vom 15.11.2026, dem ersten mit `organizer_is_external`. Das Signal ist gefüllt: 4.140 Kalenderzeilen mit externem Organisator, 46.085 mit internem, 2 ohne Organisator unter den Teilnehmenden; alle 4.196 CRM-Zeilen sind leer, wie vorgesehen.
+
+Sicht C: 55.871 Zeilen und 55.871 Paare `(meeting_id, lead_id)`, der Grain hält.
+
+Sicht A über alle Monate, Referenz-SQL gegen `unified`: gelegt 39.660 zu 39.495 (+165), bewertbar 36.413 zu 36.255 (+158), stattgefunden 21.666 zu 21.629 (+37), No-Shows 14.747 zu 14.626 (+121). Die Differenzen je Klasse (Referenz minus heute):
+
+| Befund | Zeilen Referenz / heute | gelegt | stattgefunden | No-Shows | Ursache |
+|---|---|---|---|---|---|
+| gleich | 41.153 / 41.153 | 0 | 0 | 0 | gleich bewertet |
+| gleich, Umbenennung (Q8) | 8 / 8 | 0 | 0 | 0 | `rescheduled_without_meeting_id` heißt jetzt `verschoben` |
+| neu: verschoben ohne Call (Q1) | 8.197 / 0 | 0 | 0 | 0 | Gruppe aus *Problem*, Grund `verschoben`, zählt nirgends |
+| neu: abgesagt ohne Call (Q1) | 3.591 / 0 | 0 | 0 | 0 | Gruppe aus *Problem*, Grund `abgesagt` |
+| neu: ohne Teams-Meeting (Q9) | 1.501 / 0 | 0 | 0 | 0 | Gruppe aus *Problem*, Grund `ohne_teams_meeting` |
+| neu: externer Organisator ohne Call (Q14) | 825 / 0 | 0 | 0 | 0 | Grund `externer_organisator`, das neue Signal greift |
+| neu: dieselben Gruppen mit CRM-Task (Q10) | 3 / 0 | +3 | +3 | 0 | zählen allein über den CRM-Ausgang; die übrigen Zeilen dieser Gruppen mit Task stehen unter „gleich“, weil ihr Task heute als CRM-Zeile genauso zählt |
+| neu: Filter auf die verantwortliche Person (Rest Q1), auch mit CRM-Task | 406 / 0 | +163 | +47 | +112 | der Rest hinter den beiden Filtern auf die verantwortliche Person (*Problem*); kein Signal trennt ihn (Q1, Out-of-Scope). Größte verbleibende Abweichung |
+| abweichend: Grund kein -> duplikat_event / duplikat_event -> kein | 92 / 92 | −14 | +1 | −15 | `is_duplicate` markiert im Paar teils den anderen Partner als heute; kein Fehler im Signal (D1 vom 13.11.2026) |
+| abweichend: Wechsel zwischen duplikat_event und termin_in_zukunft oder alt_tenant_join_url | 5 / 5 | +1 | 0 | 0 | derselbe Partnertausch, der andere Partner trägt einen anderen Grund |
+| abweichend: CRM-Task jetzt an einer Kalenderzeile | 27 / 27 | −1 | −27 | +26 | Keiner der 27 Tasks hat einen dokumentierten Ausgang, heute `unbekannt`, jetzt `no_outcome` (D6 vom 15.11.2026); der Ausgang hat sich also nicht geändert. Heute steht der Task als eigene CRM-Zeile und zählt als stattgefunden. Jetzt hängt er an einer Kalenderzeile, und dort entscheidet ohne Ausgang wie heute Teams. Die 26 No-Shows sind 24 aktive Termine mit externem Organisator, deren Teams-Call nur Interne hatte, und 2 aktive mit internem Organisator ohne Call. Der 27. ist verlegt und hatte einen internen Call, er trägt `verschoben` |
+| neu: CRM-Zeile, heute verworfen oder anders zugeordnet | 41 / 0 | +41 | +36 | 0 | Tasks, die `unified` heute verwirft oder einem anderen Termin zuordnet; neue Zuordnung nach Q21 und Q25 der Sales-Meetings-Spec |
+| fehlt: CRM-Task heute eigene Zeile, jetzt kein Sieger | 0 / 34 | −34 | −31 | 0 | an keinem Paar Sieger; **Annahme** aus der Sales-Meetings-Spec (Befund E und F): Sie verlieren gegen einen Task mit stärkerem Ausgang am selben Termin und Lead und zählen heute zusätzlich |
+| abweichend: CRM-Ausgang anders | 11 / 11 | +2 | +4 | −2 | Rangfolge vom 02.11.2026 oder andere Task-Zuordnung |
+| abweichend: Grund verschoben -> kein / kein -> verschoben | 6 / 6 | +4 | +4 | 0 | **Annahme:** Die Verlegung erkennt `calendar_status` anders als die heutige Klassifikation |
+| Lead nur in der Referenz-SQL / nur in unified | 5 / 5 | 0 | 0 | 0 | derselbe Termin, ein anderer Lead zugeordnet |
+
+Sicht B, die letzten zwölf vollen Monate (11.2025 bis 10.2026): Je Monat liegt die Referenz-SQL bei gelegt 1 bis 15 Termine über `unified`, bei stattgefunden zwischen 5 darunter und 16 darüber, bei No-Shows zwischen 1 darunter und 10 darüber. Beispiel 10.2026: 326 No-Shows zu 319, im ersten Abgleich vom 13.11.2026 waren es noch 392. Die Monatsdifferenzen setzen sich aus den Klassen oben zusammen, vor allem aus dem Rest hinter dem Filter auf die verantwortliche Person.
