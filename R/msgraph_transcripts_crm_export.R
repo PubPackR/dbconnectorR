@@ -920,9 +920,11 @@ msgraph_export_single_transcript_to_crm <- function(con,
 
   # Execute API call: POST (create) or PUT (update). Through Billomatics'
   # wrappers, which wait and repeat the call when CentralStation throttles it
-  # (HTTP 429, body "Retry later"). A throttled call was not carried out, so
-  # repeating it cannot create a second protocol. Every other status comes back
-  # after the first call, as before.
+  # (HTTP 429, body "Retry later"). Only that status is repeated: by its meaning
+  # the API refused the call, so no protocol exists yet. This rests on the
+  # status code, it was not tested against CentralStation. A 5xx is not
+  # repeated, there the protocol may exist already. Every other status comes
+  # back after the first call, as before.
   if (is.null(protocol_id)) {
     # Create new protocol
     response <- Billomatics::crm_POST(
