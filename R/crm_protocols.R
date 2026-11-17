@@ -211,7 +211,8 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA,
     dplyr::filter(crm_protocol_id %in% protocols$attachment_for_protocols$id) %>% 
     dplyr::filter(!(crm_attachment_id %in% !!downloaded_attachments$crm_attachment_id)) %>%
     dplyr::select(-id, -updated_at, -created_at, -crm_protocol_id) %>%
-    dplyr::mutate(is_deleted = TRUE)
+    dplyr::mutate(is_deleted = TRUE) %>%
+    keep_downloaded_columns(downloaded_attachments)
 
   print(paste0("Number of deleted attachments: ", nrow(attachments_old)))
 
@@ -241,7 +242,8 @@ crm_update_protocols <- function(con, keys, is_daily, override_last_update = NA,
       dplyr::filter(grepl_chunked(filename, searched_prefixes)) %>%
       dplyr::filter(!(crm_attachment_id %in% downloaded_comment_attachments$crm_attachment_id)) %>%
       dplyr::select(-id, -updated_at, -created_at) %>%
-      dplyr::mutate(is_deleted = TRUE)
+      dplyr::mutate(is_deleted = TRUE) %>%
+      keep_downloaded_columns(downloaded_comment_attachments)
 
     print(paste0("Number of deleted comment attachments: ", nrow(comment_attachments_old)))
 
@@ -950,6 +952,29 @@ drop_attachments_without_file_metadata <- function(attachments, attachment_kind 
   }
 
   attachments[!missing_metadata, , drop = FALSE]
+}
+
+#' Keep only the columns the import downloads
+#'
+#' \code{crm_update_protocols()} re-reads the stored rows of attachments that
+#' are missing from the download, sets \code{is_deleted} and upserts them
+#' together with the downloaded rows. The stored rows carry every column of the
+#' table, the downloaded rows only those the CRM delivers. A column only the
+#' stored rows carry would reach the upsert with \code{NA} for every downloaded
+#' row and be cleared in the database. Restricting the stored rows to the
+#' downloaded columns keeps every column the import does not fill itself out of
+#' the upsert, such as the Bereinigungsmarke \code{storage_cleanup_marked_at}.
+#'
+#' @param stored A data frame of stored attachment rows.
+#' @param downloaded A data frame of downloaded attachment rows; only its
+#'   column names are used, so an empty download works as well.
+#' @return \code{stored} with only the columns that \code{downloaded} has too.
+#' @noRd
+keep_downloaded_columns <- function(stored, downloaded) {
+
+  # ---- start ---- #
+
+  dplyr::select(stored, dplyr::any_of(names(downloaded)))
 }
 
 # grepl with a single huge alternation pattern can exceed R's regex memory limit.
