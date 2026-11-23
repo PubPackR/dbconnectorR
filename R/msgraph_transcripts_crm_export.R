@@ -223,6 +223,47 @@ msgraph_export_transcripts_to_crm <- function(con,
 # Core Export Functions
 ################################################################################
 
+#' Find Additional Leads Whose Lead Rep Was in the Call
+#'
+#' A call's protocol goes to one picked lead. Every other candidate lead of
+#' the call whose lead rep (the CRM user responsible for the lead) took part in
+#' the call is returned here, so the protocol can be attached to it as well.
+#'
+#' @param candidate_leads Data frame with one row per call and candidate lead:
+#'   `call_id`, `crm_lead_id` (internal id), `external_lead_id` (CRM person id)
+#'   and `responsible_user_id` (`raw.crm_users.id`, may be NA).
+#' @param chosen_leads Data frame with the picked lead per call: `call_id`,
+#'   `crm_lead_id`.
+#' @param call_crm_users Data frame with the internal participants of each call
+#'   as CRM users: `call_id`, `crm_user_id`.
+#'
+#' @return Tibble with one row per call that has additional leads: `call_id`
+#'   and `additional_person_ids`, a list column of sorted, unique external CRM
+#'   person ids. Calls without additional leads are absent.
+#' @keywords internal
+find_lead_rep_additional_leads <- function(candidate_leads, chosen_leads, call_crm_users) {
+  # ---- start ---- #
+  additional <- candidate_leads %>%
+    dplyr::filter(!is.na(responsible_user_id)) %>%
+    dplyr::inner_join(
+      call_crm_users %>% dplyr::distinct(call_id, crm_user_id),
+      by = c("call_id", "responsible_user_id" = "crm_user_id")
+    ) %>%
+    dplyr::anti_join(chosen_leads, by = c("call_id", "crm_lead_id")) %>%
+    dplyr::distinct(call_id, external_lead_id) %>%
+    dplyr::arrange(call_id, external_lead_id)
+
+  if (nrow(additional) == 0) {
+    return(tibble::tibble(call_id = additional$call_id[0],
+                          additional_person_ids = list()))
+  }
+
+  additional %>%
+    dplyr::group_by(call_id) %>%
+    dplyr::summarise(additional_person_ids = list(external_lead_id), .groups = "drop")
+}
+
+
 #' Map Transcript Summaries to CRM Entities
 #'
 #' Maps transcript participants to CRM people/companies for protocol attachment
@@ -416,7 +457,12 @@ map_transcripts_to_crm_entities <- function(con, transcript_summaries) {
       attachable_type = ifelse(!is.na(crm_lead_id), "people", NA_character_),
       attachable_id = crm_lead_id
     ) %>%
-    dplyr::filter(!is.na(attachable_id)) %>%
+    dplyr::filter(!is.na(attachable_id))
+
+  # Every lead reachable through a participant address, before one is picked
+  candidate_leads <- transcript_mappings
+
+  transcript_mappings <- candidate_leads %>%
     # Remove duplicates (one protocol per call), prioritizing by email source type
     # Priority: office > office_hq > other / private > from_description
     dplyr::group_by(call_id) %>%
@@ -437,6 +483,59 @@ map_transcripts_to_crm_entities <- function(con, transcript_summaries) {
     dplyr::mutate(
       author_user_id = ifelse(is.na(author_user_id), CRM_DEFAULT_AUTHOR_USER_ID, author_user_id)
     )
+
+  # Additional leads: candidates whose lead rep was an internal participant of
+  # the call. The picked lead stays the protocol's person; these only join
+  # person_ids. Deleted leads are left out, since one invalid person id fails
+  # the whole protocol.
+  candidate_lead_ids <- unique(candidate_leads$crm_lead_id)
+  candidate_lead_reps <- dplyr::tbl(con, I("raw.crm_leads")) %>%
+    dplyr::filter(id %in% !!candidate_lead_ids, !is_deleted) %>%
+    dplyr::select(crm_lead_id = id, external_lead_id = crm_lead_id, responsible_user_id) %>%
+    dplyr::collect() %>%
+    dplyr::mutate(
+      crm_lead_id = as.integer(crm_lead_id),
+      external_lead_id = as.integer(external_lead_id),
+      responsible_user_id = as.integer(responsible_user_id)
+    )
+
+  call_crm_users <- all_internal_participants %>%
+    dplyr::inner_join(
+      crm_users %>% dplyr::select(crm_user_id = id, user_login),
+      by = c("internal_email" = "user_login")
+    ) %>%
+    dplyr::transmute(call_id, crm_user_id = as.integer(crm_user_id)) %>%
+    dplyr::distinct()
+
+  # call_id arrives as integer64 from some tables and integer from others;
+  # a character key keeps the joins type-safe
+  additional_leads <- find_lead_rep_additional_leads(
+    candidate_leads = candidate_leads %>%
+      dplyr::distinct(call_id, crm_lead_id) %>%
+      dplyr::mutate(call_id = as.character(call_id)) %>%
+      dplyr::inner_join(candidate_lead_reps, by = "crm_lead_id"),
+    chosen_leads = transcript_mappings %>%
+      dplyr::distinct(call_id, crm_lead_id) %>%
+      dplyr::mutate(call_id = as.character(call_id)),
+    call_crm_users = call_crm_users %>%
+      dplyr::mutate(call_id = as.character(call_id))
+  ) %>%
+    dplyr::rename(call_key = call_id)
+
+  transcript_mappings <- transcript_mappings %>%
+    dplyr::mutate(call_key = as.character(call_id)) %>%
+    dplyr::left_join(additional_leads, by = "call_key") %>%
+    dplyr::select(-call_key) %>%
+    dplyr::mutate(
+      additional_person_ids = lapply(additional_person_ids, function(x) {
+        if (is.null(x)) integer(0) else x
+      })
+    )
+
+  if (nrow(additional_leads) > 0) {
+    message(sprintf("Lead rep in call: %d calls get the protocol on additional leads",
+                    nrow(additional_leads)))
+  }
 
   # Filter to only mappable transcripts
   mappable_transcripts <- transcript_mappings %>%
@@ -543,7 +642,7 @@ export_transcripts_to_crm <- function(con, crm_api_key, transcript_mappings,
       action = "add",
       badge = "meeting-summary"
     ) %>%
-    dplyr::select(transcript_id, protocol_header, occurred_at, content, attachable_id, attachable_type, author_user_id, field_type, action, badge, sales_user_names) %>%
+    dplyr::select(transcript_id, protocol_header, occurred_at, content, attachable_id, attachable_type, author_user_id, field_type, action, badge, sales_user_names, additional_person_ids) %>%
     dplyr::filter(!is.na(content), content != "") %>%
     dplyr::mutate(attachable_id = as.integer(attachable_id)) %>%
     # Map internal CRM lead IDs to external IDs
@@ -556,7 +655,7 @@ export_transcripts_to_crm <- function(con, crm_api_key, transcript_mappings,
     dplyr::mutate(attachable_id = crm_lead_id) %>%
     dplyr::select(-crm_lead_id) %>%
     dplyr::filter(!is.na(attachable_id)) %>%
-    dplyr::select(transcript_id, protocol_header, occurred_at, content, attachable_id, attachable_type, author_user_id, field_type, action, badge, sales_user_names)
+    dplyr::select(transcript_id, protocol_header, occurred_at, content, attachable_id, attachable_type, author_user_id, field_type, action, badge, sales_user_names, additional_person_ids)
 
   # Export statistics tracking
   exported_count <- 0
@@ -666,6 +765,15 @@ export_single_protocol_to_crm <- function(con, headers, protocol_data, use_test_
     person_id <- protocol_data$attachable_id  # Production person ID
   }
 
+  # Leads whose lead rep was in the call get the same protocol. The picked lead
+  # stays person_id. The test account keeps everything on the test person.
+  additional_ids <- if (!use_test_account && "additional_person_ids" %in% names(protocol_data)) {
+    as.integer(unlist(protocol_data$additional_person_ids))
+  } else {
+    integer(0)
+  }
+  all_person_ids <- unique(c(as.integer(person_id), additional_ids[!is.na(additional_ids)]))
+
   # print(protocol_data$attachable_id)
   # print(protocol_data$protocol_header)
   # print(paste0("https://studyflix-gmbh.centralstationcrm.net/people/", protocol_data$attachable_id))
@@ -696,7 +804,7 @@ export_single_protocol_to_crm <- function(con, headers, protocol_data, use_test_
       type = "ProtocolObjectNote",
       badge = "meeting",
       person_id = person_id,
-      person_ids = list(person_id),
+      person_ids = as.list(all_person_ids),
       format = "markdown"
     )
   )

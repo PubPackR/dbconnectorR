@@ -67,6 +67,13 @@ The internal salesperson accountable for a meeting. A rep cannot be in two
 meetings at the same instant — the basis for time-based disambiguation.
 _Avoid_: Owner, organizer, agent, Mitarbeiter.
 
+**Lead rep**:
+The CRM user set as responsible for a lead in the CRM. Belongs to the lead, not
+to a meeting: a colleague may hold a meeting with a lead whose lead rep is
+someone else, and one person can have two leads with different lead reps (one
+per product line).
+_Avoid_: Owner, Betreuer, responsible rep (that is the meeting's).
+
 **Meeting owner** (Meeting-Besitzer):
 The account that created the Teams link of a meeting. Microsoft keeps the
 online meeting, its attendance reports and its transcripts under this account.
