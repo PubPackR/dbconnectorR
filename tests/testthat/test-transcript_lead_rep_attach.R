@@ -135,6 +135,51 @@ test_that("without additional leads the payload is the same as before", {
   expect_equal(unlist(body$person_ids), 21400532L)
 })
 
+test_that("a rejected multi-person protocol is sent to the picked lead alone", {
+  bodies <- list()
+  result <- testthat::with_mocked_bindings(
+    suppressWarnings(suppressMessages({
+      out <- NULL
+      capture.output(out <- export_single_protocol_to_crm(
+        NULL, c("X-apikey" = "KEY"), protocol_row(47174012L), FALSE))
+      out
+    })),
+    POST = function(url, ..., body) {
+      bodies[[length(bodies) + 1]] <<- jsonlite::fromJSON(body, simplifyVector = FALSE)$protocol
+      status <- if (length(bodies) == 1) 422L else 201L
+      structure(list(status_code = status), class = "response")
+    },
+    content = function(x, ...) "Unprocessable",
+    .package = "httr"
+  )
+
+  expect_true(result$success)
+  expect_length(bodies, 2)
+  expect_equal(unlist(bodies[[1]]$person_ids), c(21400532L, 47174012L))
+  expect_equal(unlist(bodies[[2]]$person_ids), 21400532L)
+})
+
+test_that("a rate-limited multi-person protocol is not narrowed", {
+  calls <- 0
+  result <- testthat::with_mocked_bindings(
+    suppressWarnings(suppressMessages({
+      out <- NULL
+      capture.output(out <- export_single_protocol_to_crm(
+        NULL, c("X-apikey" = "KEY"), protocol_row(47174012L), FALSE))
+      out
+    })),
+    POST = function(url, ..., body) {
+      calls <<- calls + 1
+      structure(list(status_code = 429L), class = "response")
+    },
+    content = function(x, ...) "Retry later",
+    .package = "httr"
+  )
+
+  expect_false(result$success)
+  expect_equal(calls, 1)
+})
+
 test_that("the test account keeps the protocol on the test person only", {
   body <- posted_body(protocol_row(47174012L), use_test_account = TRUE)
 

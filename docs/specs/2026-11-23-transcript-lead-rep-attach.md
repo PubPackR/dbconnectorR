@@ -33,6 +33,9 @@ The picked lead stays the protocol's `person_id`, exactly as today. On top, ever
 - Deleted leads (`raw.crm_leads.is_deleted`) are never added: the CRM cannot attach a protocol to
   a deleted person, and one invalid id would fail the whole protocol.
 - With `use_test_account = TRUE` every protocol keeps going to the test person only.
+- Additional leads never cost the picked lead its protocol: if the CRM rejects the request with
+  several persons (HTTP 4xx other than 429), it is sent once more with the picked lead alone and
+  a warning is logged.
 
 The rule lives in a pure helper, `find_lead_rep_additional_leads()`, so it is tested without a
 database.

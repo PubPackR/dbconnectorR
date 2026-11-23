@@ -835,6 +835,24 @@ export_single_protocol_to_crm <- function(con, headers, protocol_data, use_test_
 
   status_code <- httr::status_code(response)
 
+  # Additional leads must never cost the picked lead its protocol. If the CRM
+  # rejects the request with several persons (a client error other than the
+  # rate limit), it is sent once more with the picked lead alone, as before.
+  if (status_code != 201 && length(all_person_ids) > 1 &&
+      status_code >= 400 && status_code < 500 && status_code != 429) {
+    warning(sprintf(paste0("CRM rejected the protocol for persons %s (HTTP %d); ",
+                           "sent it to person %s alone."),
+                    paste(all_person_ids, collapse = ", "), status_code, person_id))
+    json_data$protocol$person_ids <- list(person_id)
+    response <- httr::POST(
+      "https://api.centralstationcrm.net/api/protocols?only_object_logging=true",
+      httr::add_headers(headers),
+      body = jsonlite::toJSON(json_data, auto_unbox = TRUE),
+      encode = "json"
+    )
+    status_code <- httr::status_code(response)
+  }
+
   if (status_code == 201) {
     # The POST stores occurred_at on the protocol but does not move the activity
     # that drives the CRM feed. A partial PUT does — see
