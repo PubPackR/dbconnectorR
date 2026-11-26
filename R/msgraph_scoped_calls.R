@@ -154,7 +154,8 @@ resolve_meeting <- function(object_id, join_url, app_token) {
                    app_token, query = list(`$filter` = paste0("JoinWebUrl eq '", join_url, "'")))
   list(status = res$status,
        id = if (!is.null(res$content$value) && length(res$content$value) > 0)
-         res$content$value[[1]]$id %||% NA_character_ else NA_character_)
+         res$content$value[[1]]$id %||% NA_character_ else NA_character_,
+       error = res$content$error)
 }
 
 #' Organisator-oid aus einer Teams-joinUrl (rein)
@@ -395,15 +396,25 @@ lookup_outcome_konto <- function(status, id) {
 #' Ausgang der Online-Meeting-Suche ueber JoinWebUrl (rein)
 #'
 #' 404 auf `/users/{oid}/onlineMeetings` heisst: das Konto gibt es bei Microsoft
-#' nicht mehr.
+#' nicht mehr. Exception: Graph code 3004 ("Specified meeting is not found")
+#' means only this one meeting is missing (e.g. deleted) while the account
+#' exists. That is `nicht_gefunden` and must not lock the oid.
 #'
 #' @param status HTTP-Status von `resolve_meeting()` (NA bei Exception).
 #' @param id Gefundene onlineMeeting-id oder NA.
+#' @param error Graph error object (`content$error`, incl. `innerError`) or NULL.
 #' @return list(ausgang, http_status); `ausgang` NA, wenn das Meeting gefunden ist.
 #' @keywords internal
-lookup_outcome_suche <- function(status, id) {
+lookup_outcome_suche <- function(status, id, error = NULL) {
   # ---- start ---- #
+  # Search every text field of the error, innerError included: where Graph puts
+  # the 3004 is not documented. Non-list bodies count as "no code". 3004 must
+  # not sit inside a GUID (request-id, oid), hence no hex digit or hyphen around it.
+  fehlertext <- if (is.list(error)) paste(unlist(error, use.names = FALSE), collapse = " ") else ""
+  meeting_fehlt <- grepl("(?<![-0-9a-f])3004(?![-0-9a-f])|meeting is not found",
+                         fehlertext, ignore.case = TRUE, perl = TRUE)
   ausgang <- if (isTRUE(status == 403)) "policy_403"
+    else if (isTRUE(status == 404) && meeting_fehlt) "nicht_gefunden"
     else if (isTRUE(status == 404)) "organisator_unbekannt"
     else if (isTRUE(status == 200) && is.na(id)) "nicht_gefunden"
     else if (isTRUE(status == 200)) NA_character_
@@ -561,7 +572,8 @@ write_online_meeting_lookups <- function(con, rs, ausgaenge) {
 #' das Konto einmal per E-Mail aufgeloest: rund 290 interne User tragen dort
 #' noch die oid aus dem Alt-Tenant. Liefert Graph eine andere oid, zaehlt die
 #' Suche mit ihr. Eine oid mit endgueltigem 403/404 wird fuer den Rest des Laufs
-#' gesperrt.
+#' gesperrt. Not so a 404 with Graph code 3004 (deleted meeting): that link gets
+#' `nicht_gefunden`, the oid stays open and the link counts as no failure.
 #'
 #' @param con DB-Pool.
 #' @param app_token app-only Provider (Meeting-Aufloesung + Attendance).
@@ -586,6 +598,8 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
   gesperrt <- character(0)
   # gescheiterte E-Mail-Abfragen im Rueckfall fuer veraltete oids (nur Log)
   n_rueckfall_fehler <- 0L
+  # links whose meeting is gone (404/3004): nicht_gefunden, but no failure
+  n_meeting_geloescht <- 0L
   # veraltete oid aus msgraph_users -> oid, die Graph per E-Mail liefert
   umgeschluesselt <- character(0)
   # E-Mail -> list(status, id). Nur Antworten mit 200 werden gemerkt: ein
@@ -650,7 +664,7 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
       next
     }
     mt <- tryCatch(resolve_meeting(oid, ju, app_token), error = abfangen(list(status = NA, id = NA_character_)))
-    su <- lookup_outcome_suche(mt$status, mt$id)
+    su <- lookup_outcome_suche(mt$status, mt$id, mt$error)
     if (su$ausgang %in% c("policy_403", "organisator_unbekannt") && !aus_email && !aus_link && hat_email) {
       # Die oid aus msgraph_users kann veraltet sein (Alt-Tenant-oid aus dem
       # base-35-Directory-Load). Einmal per E-Mail nachschlagen; nur eine ANDERE
@@ -671,7 +685,7 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
           next
         }
         mt <- tryCatch(resolve_meeting(oid, ju, app_token), error = abfangen(list(status = NA, id = NA_character_)))
-        su <- lookup_outcome_suche(mt$status, mt$id)
+        su <- lookup_outcome_suche(mt$status, mt$id, mt$error)
       }
     }
     if (!is.na(su$ausgang)) {
@@ -681,6 +695,10 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
       # erwartete Abgrenzung und zaehlen nicht hinein; nicht_gefunden und
       # abruf_fehler zaehlen als Fehlschlag.
       if (su$ausgang %in% c("policy_403", "organisator_unbekannt")) gesperrt[oid] <- su$ausgang
+      # A 404 that still ends as nicht_gefunden is a deleted meeting (code 3004):
+      # expected, like 403, so it stays out of the failure counts below.
+      if (isTRUE(mt$status == 404) && identical(su$ausgang, "nicht_gefunden"))
+        n_meeting_geloescht <- n_meeting_geloescht + 1L
       versuche[[i]] <- c(su, stufe = "suche"); next
     }
     at <- tryCatch(attendance_records(oid, mt$id, app_token),
@@ -732,6 +750,9 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
             "(Ausgang 403/404 behalten, oid nicht gesperrt).")
   if (length(umgeschluesselt) > 0)
     message(length(umgeschluesselt), " veraltete Organizer-oid(s) aus msgraph_users per E-Mail ersetzt.")
+  if (n_meeting_geloescht > 0)
+    message(n_meeting_geloescht, " link(s) with a deleted meeting (404/3004), counted as nicht_gefunden, ",
+            "no failure, oid not locked.")
   if (ausnahmen$n > 0)
     message(ausnahmen$n, " R-Fehler in Graph-Abfragen (als abruf_fehler ohne HTTP-Status verbucht), ",
             "erste Meldung: ", ausnahmen$erste)
@@ -744,12 +765,14 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
   n_versucht <- nrow(versuche_df)
   n_policy_403 <- sum(versuche_df$ausgang == "policy_403")
   n_organisator_unbekannt <- sum(versuche_df$ausgang == "organisator_unbekannt")
+  # Deleted meetings (404/3004) are nicht_gefunden on the event but no failure here
   n_resolve_fehler <- sum(versuche_df$stufe %in% c("konto", "suche") &
-                            versuche_df$ausgang %in% c("nicht_gefunden", "abruf_fehler"))
+                            versuche_df$ausgang %in% c("nicht_gefunden", "abruf_fehler")) -
+    n_meeting_geloescht
   n_attendance_fehler <- sum(versuche_df$stufe == "bericht" & versuche_df$ausgang == "abruf_fehler")
   n_fehler <- n_resolve_fehler + n_attendance_fehler
-  # 403 und unbekannter Organisator sind Abgrenzung, kein Fehlschlag
-  n_bewertbar <- n_versucht - n_policy_403 - n_organisator_unbekannt
+  # 403, unbekannter Organisator und geloeschtes Meeting sind Abgrenzung, kein Fehlschlag
+  n_bewertbar <- n_versucht - n_policy_403 - n_organisator_unbekannt - n_meeting_geloescht
 
   # Mindestmenge, bevor eine Quote ueberhaupt aussagekraeftig ist. Ohne sie
   # kippt ein einzelner transienter 500 an einem ruhigen Tag - Feiertag, Ferien,

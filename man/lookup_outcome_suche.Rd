@@ -4,18 +4,22 @@
 \alias{lookup_outcome_suche}
 \title{Ausgang der Online-Meeting-Suche ueber JoinWebUrl (rein)}
 \usage{
-lookup_outcome_suche(status, id)
+lookup_outcome_suche(status, id, error = NULL)
 }
 \arguments{
 \item{status}{HTTP-Status von \code{resolve_meeting()} (NA bei Exception).}
 
 \item{id}{Gefundene onlineMeeting-id oder NA.}
+
+\item{error}{Graph error object (\code{content$error}, incl. \code{innerError}) or NULL.}
 }
 \value{
 list(ausgang, http_status); \code{ausgang} NA, wenn das Meeting gefunden ist.
 }
 \description{
 404 auf \verb{/users/\{oid\}/onlineMeetings} heisst: das Konto gibt es bei Microsoft
-nicht mehr.
+nicht mehr. Exception: Graph code 3004 ("Specified meeting is not found")
+means only this one meeting is missing (e.g. deleted) while the account
+exists. That is \code{nicht_gefunden} and must not lock the oid.
 }
 \keyword{internal}
