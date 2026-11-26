@@ -572,7 +572,8 @@ write_online_meeting_lookups <- function(con, rs, ausgaenge) {
 #' das Konto einmal per E-Mail aufgeloest: rund 290 interne User tragen dort
 #' noch die oid aus dem Alt-Tenant. Liefert Graph eine andere oid, zaehlt die
 #' Suche mit ihr. Eine oid mit endgueltigem 403/404 wird fuer den Rest des Laufs
-#' gesperrt.
+#' gesperrt. Not so a 404 with Graph code 3004 (deleted meeting): that link gets
+#' `nicht_gefunden`, the oid stays open and the link counts as no failure.
 #'
 #' @param con DB-Pool.
 #' @param app_token app-only Provider (Meeting-Aufloesung + Attendance).
@@ -597,6 +598,8 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
   gesperrt <- character(0)
   # gescheiterte E-Mail-Abfragen im Rueckfall fuer veraltete oids (nur Log)
   n_rueckfall_fehler <- 0L
+  # links whose meeting is gone (404/3004): nicht_gefunden, but no failure
+  n_meeting_geloescht <- 0L
   # veraltete oid aus msgraph_users -> oid, die Graph per E-Mail liefert
   umgeschluesselt <- character(0)
   # E-Mail -> list(status, id). Nur Antworten mit 200 werden gemerkt: ein
@@ -692,6 +695,10 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
       # erwartete Abgrenzung und zaehlen nicht hinein; nicht_gefunden und
       # abruf_fehler zaehlen als Fehlschlag.
       if (su$ausgang %in% c("policy_403", "organisator_unbekannt")) gesperrt[oid] <- su$ausgang
+      # A 404 that still ends as nicht_gefunden is a deleted meeting (code 3004):
+      # expected, like 403, so it stays out of the failure counts below.
+      if (isTRUE(mt$status == 404) && identical(su$ausgang, "nicht_gefunden"))
+        n_meeting_geloescht <- n_meeting_geloescht + 1L
       versuche[[i]] <- c(su, stufe = "suche"); next
     }
     at <- tryCatch(attendance_records(oid, mt$id, app_token),
@@ -743,6 +750,9 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
             "(Ausgang 403/404 behalten, oid nicht gesperrt).")
   if (length(umgeschluesselt) > 0)
     message(length(umgeschluesselt), " veraltete Organizer-oid(s) aus msgraph_users per E-Mail ersetzt.")
+  if (n_meeting_geloescht > 0)
+    message(n_meeting_geloescht, " link(s) with a deleted meeting (404/3004), counted as nicht_gefunden, ",
+            "no failure, oid not locked.")
   if (ausnahmen$n > 0)
     message(ausnahmen$n, " R-Fehler in Graph-Abfragen (als abruf_fehler ohne HTTP-Status verbucht), ",
             "erste Meldung: ", ausnahmen$erste)
@@ -755,12 +765,14 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
   n_versucht <- nrow(versuche_df)
   n_policy_403 <- sum(versuche_df$ausgang == "policy_403")
   n_organisator_unbekannt <- sum(versuche_df$ausgang == "organisator_unbekannt")
+  # Deleted meetings (404/3004) are nicht_gefunden on the event but no failure here
   n_resolve_fehler <- sum(versuche_df$stufe %in% c("konto", "suche") &
-                            versuche_df$ausgang %in% c("nicht_gefunden", "abruf_fehler"))
+                            versuche_df$ausgang %in% c("nicht_gefunden", "abruf_fehler")) -
+    n_meeting_geloescht
   n_attendance_fehler <- sum(versuche_df$stufe == "bericht" & versuche_df$ausgang == "abruf_fehler")
   n_fehler <- n_resolve_fehler + n_attendance_fehler
-  # 403 und unbekannter Organisator sind Abgrenzung, kein Fehlschlag
-  n_bewertbar <- n_versucht - n_policy_403 - n_organisator_unbekannt
+  # 403, unbekannter Organisator und geloeschtes Meeting sind Abgrenzung, kein Fehlschlag
+  n_bewertbar <- n_versucht - n_policy_403 - n_organisator_unbekannt - n_meeting_geloescht
 
   # Mindestmenge, bevor eine Quote ueberhaupt aussagekraeftig ist. Ohne sie
   # kippt ein einzelner transienter 500 an einem ruhigen Tag - Feiertag, Ferien,

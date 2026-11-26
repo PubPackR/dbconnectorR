@@ -43,5 +43,6 @@ Antwortet die Suche fuer eine oid aus msgraph_users mit 403 oder 404, wird
 das Konto einmal per E-Mail aufgeloest: rund 290 interne User tragen dort
 noch die oid aus dem Alt-Tenant. Liefert Graph eine andere oid, zaehlt die
 Suche mit ihr. Eine oid mit endgueltigem 403/404 wird fuer den Rest des Laufs
-gesperrt.
+gesperrt. Not so a 404 with Graph code 3004 (deleted meeting): that link gets
+\code{nicht_gefunden}, the oid stays open and the link counts as no failure.
 }

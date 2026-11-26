@@ -632,3 +632,32 @@ test_that("lookup_outcome_suche: 404 with meeting code 3004 is nicht_gefunden, o
   # a non-list error body does not crash the outcome
   expect_equal(lookup_outcome_suche(404, NA_character_, "not found")$ausgang, "organisator_unbekannt")
 })
+
+test_that("calls_attendance: a deleted meeting is no failure, the run does not abort", {
+  # Q1: 3004 stays nicht_gefunden on the event but counts like 403 for the abort
+  # checks. One deleted meeting plus one meeting nobody joined is a normal day.
+  geloescht <- teams_link("GELOESCHT", oid_besitzer); leer <- teams_link("LEER", oid_besitzer)
+  disc <- data.frame(join_url = c(geloescht, leer), organizer_oid = oid_besitzer,
+                     organizer_email = NA_character_, stringsAsFactors = FALSE)
+  resolve <- mockery::mock(
+    list(status = 404, id = NA_character_,
+         error = list(code = "NotFound", message = "3004: Specified meeting is not found.")),
+    list(status = 200, id = "MID_LEER"))
+  write <- mockery::mock(1L)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "discover_meetings_from_events",
+                function(con, cfg) disc)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "resolve_meeting", resolve)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "attendance_records",
+                function(oid, mid, tok) list(status = 200, reports = list()))
+  mockery::stub(msgraph_scoped_update_calls_attendance, "assert_online_meeting_lookup_columns", TRUE)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "write_online_meeting_lookups", write)
+
+  n <- suppressMessages(msgraph_scoped_update_calls_attendance(con = NULL, app_token = "t",
+                                                               cfg = lookup_cfg, dry_run = FALSE))
+
+  expect_equal(n, 0L)
+  aus <- mockery::mock_args(write)[[1]][[3]]
+  ist <- stats::setNames(aus$online_meeting_lookup, aus$join_url)
+  expect_equal(ist[[geloescht]], "nicht_gefunden")
+  expect_equal(ist[[leer]], "gefunden_ohne_bericht")
+})
