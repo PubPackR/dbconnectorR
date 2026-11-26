@@ -154,7 +154,8 @@ resolve_meeting <- function(object_id, join_url, app_token) {
                    app_token, query = list(`$filter` = paste0("JoinWebUrl eq '", join_url, "'")))
   list(status = res$status,
        id = if (!is.null(res$content$value) && length(res$content$value) > 0)
-         res$content$value[[1]]$id %||% NA_character_ else NA_character_)
+         res$content$value[[1]]$id %||% NA_character_ else NA_character_,
+       error = res$content$error)
 }
 
 #' Organisator-oid aus einer Teams-joinUrl (rein)
@@ -395,15 +396,21 @@ lookup_outcome_konto <- function(status, id) {
 #' Ausgang der Online-Meeting-Suche ueber JoinWebUrl (rein)
 #'
 #' 404 auf `/users/{oid}/onlineMeetings` heisst: das Konto gibt es bei Microsoft
-#' nicht mehr.
+#' nicht mehr. Exception: Graph code 3004 ("Specified meeting is not found")
+#' means only this one meeting is missing (e.g. deleted) while the account
+#' exists. That is `nicht_gefunden` and must not lock the oid.
 #'
 #' @param status HTTP-Status von `resolve_meeting()` (NA bei Exception).
 #' @param id Gefundene onlineMeeting-id oder NA.
+#' @param error Graph error object (`content$error`: code, message) or NULL.
 #' @return list(ausgang, http_status); `ausgang` NA, wenn das Meeting gefunden ist.
 #' @keywords internal
-lookup_outcome_suche <- function(status, id) {
+lookup_outcome_suche <- function(status, id, error = NULL) {
   # ---- start ---- #
+  meeting_fehlt <- grepl("\\b3004\\b|meeting is not found",
+                         paste(error$code %||% "", error$message %||% ""), ignore.case = TRUE)
   ausgang <- if (isTRUE(status == 403)) "policy_403"
+    else if (isTRUE(status == 404) && meeting_fehlt) "nicht_gefunden"
     else if (isTRUE(status == 404)) "organisator_unbekannt"
     else if (isTRUE(status == 200) && is.na(id)) "nicht_gefunden"
     else if (isTRUE(status == 200)) NA_character_
@@ -650,7 +657,7 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
       next
     }
     mt <- tryCatch(resolve_meeting(oid, ju, app_token), error = abfangen(list(status = NA, id = NA_character_)))
-    su <- lookup_outcome_suche(mt$status, mt$id)
+    su <- lookup_outcome_suche(mt$status, mt$id, mt$error)
     if (su$ausgang %in% c("policy_403", "organisator_unbekannt") && !aus_email && !aus_link && hat_email) {
       # Die oid aus msgraph_users kann veraltet sein (Alt-Tenant-oid aus dem
       # base-35-Directory-Load). Einmal per E-Mail nachschlagen; nur eine ANDERE
@@ -671,7 +678,7 @@ msgraph_scoped_update_calls_attendance <- function(con, app_token, cfg, suppress
           next
         }
         mt <- tryCatch(resolve_meeting(oid, ju, app_token), error = abfangen(list(status = NA, id = NA_character_)))
-        su <- lookup_outcome_suche(mt$status, mt$id)
+        su <- lookup_outcome_suche(mt$status, mt$id, mt$error)
       }
     }
     if (!is.na(su$ausgang)) {

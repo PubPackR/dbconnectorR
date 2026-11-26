@@ -584,3 +584,37 @@ test_that("calls_attendance: ein R-Fehler im Graph-Helfer wird gezaehlt und mit 
   expect_true(any(grepl("1 R-Fehler in Graph-Abfragen.*kaputter Helfer", log$meldungen)))
   mockery::expect_called(write, 0)
 })
+
+# --- 404 auf ein einzelnes Meeting sperrt die oid nicht (Asana Hotfix) --------
+
+test_that("calls_attendance: 404 '3004 meeting not found' sperrt die oid nicht", {
+  # Ein geloeschtes Meeting liefert 404 mit Code 3004, das Konto gibt es aber.
+  # Die weiteren Links derselben oid muessen trotzdem gesucht werden.
+  resolve <- mockery::mock(
+    list(status = 404, id = NA_character_,
+         error = list(code = "NotFound", message = "3004: Specified meeting is not found.")),
+    list(status = 200, id = "MID_B"))
+  mockery::stub(msgraph_scoped_update_calls_attendance, "discover_meetings_from_events",
+                function(con, cfg) data.frame(join_url = c("https://teams/a", "https://teams/b"),
+                                              organizer_oid = c("OID1", "OID1"),
+                                              organizer_email = c(NA_character_, NA_character_),
+                                              stringsAsFactors = FALSE))
+  mockery::stub(msgraph_scoped_update_calls_attendance, "resolve_meeting", resolve)
+  mockery::stub(msgraph_scoped_update_calls_attendance, "attendance_records",
+                function(oid, mid, tok) list(status = 200, reports = list(bericht_mit_teilnehmer)))
+
+  n <- msgraph_scoped_update_calls_attendance(con = NULL, app_token = "t",
+                                              cfg = lookup_cfg, dry_run = TRUE)
+
+  mockery::expect_called(resolve, 2)   # zweiter Link derselben oid wird angefragt
+  expect_equal(n, 1)
+})
+
+test_that("lookup_outcome_suche: 404 mit Meeting-Code 3004 ist nicht_gefunden, sonst organisator_unbekannt", {
+  fehlt <- list(code = "NotFound", message = "3004: Specified meeting is not found.")
+  expect_equal(lookup_outcome_suche(404, NA_character_, fehlt)$ausgang, "nicht_gefunden")
+  expect_equal(lookup_outcome_suche(404, NA_character_)$ausgang, "organisator_unbekannt")
+  expect_equal(lookup_outcome_suche(404, NA_character_, list(code = "ResourceNotFound",
+                                                             message = "User not found"))$ausgang,
+               "organisator_unbekannt")
+})
