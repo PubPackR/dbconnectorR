@@ -11,7 +11,7 @@ lookup_outcome_suche(status, id, error = NULL)
 
 \item{id}{Gefundene onlineMeeting-id oder NA.}
 
-\item{error}{Graph error object (\code{content$error}: code, message) or NULL.}
+\item{error}{Graph error object (\code{content$error}, incl. \code{innerError}) or NULL.}
 }
 \value{
 list(ausgang, http_status); \code{ausgang} NA, wenn das Meeting gefunden ist.

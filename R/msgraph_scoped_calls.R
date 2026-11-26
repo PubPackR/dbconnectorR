@@ -402,13 +402,17 @@ lookup_outcome_konto <- function(status, id) {
 #'
 #' @param status HTTP-Status von `resolve_meeting()` (NA bei Exception).
 #' @param id Gefundene onlineMeeting-id oder NA.
-#' @param error Graph error object (`content$error`: code, message) or NULL.
+#' @param error Graph error object (`content$error`, incl. `innerError`) or NULL.
 #' @return list(ausgang, http_status); `ausgang` NA, wenn das Meeting gefunden ist.
 #' @keywords internal
 lookup_outcome_suche <- function(status, id, error = NULL) {
   # ---- start ---- #
-  meeting_fehlt <- grepl("\\b3004\\b|meeting is not found",
-                         paste(error$code %||% "", error$message %||% ""), ignore.case = TRUE)
+  # Search every text field of the error, innerError included: where Graph puts
+  # the 3004 is not documented. Non-list bodies count as "no code". 3004 must
+  # not sit inside a GUID (request-id, oid), hence no hex digit or hyphen around it.
+  fehlertext <- if (is.list(error)) paste(unlist(error, use.names = FALSE), collapse = " ") else ""
+  meeting_fehlt <- grepl("(?<![-0-9a-f])3004(?![-0-9a-f])|meeting is not found",
+                         fehlertext, ignore.case = TRUE, perl = TRUE)
   ausgang <- if (isTRUE(status == 403)) "policy_403"
     else if (isTRUE(status == 404) && meeting_fehlt) "nicht_gefunden"
     else if (isTRUE(status == 404)) "organisator_unbekannt"

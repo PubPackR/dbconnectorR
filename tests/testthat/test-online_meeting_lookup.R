@@ -585,36 +585,50 @@ test_that("calls_attendance: ein R-Fehler im Graph-Helfer wird gezaehlt und mit 
   mockery::expect_called(write, 0)
 })
 
-# --- 404 auf ein einzelnes Meeting sperrt die oid nicht (Asana Hotfix) --------
+# --- A 404 on a single meeting does not lock the oid (Asana 1220923993530724) --
 
-test_that("calls_attendance: 404 '3004 meeting not found' sperrt die oid nicht", {
-  # Ein geloeschtes Meeting liefert 404 mit Code 3004, das Konto gibt es aber.
-  # Die weiteren Links derselben oid muessen trotzdem gesucht werden.
+test_that("calls_attendance: 404 '3004 meeting not found' does not lock the oid from the link", {
+  # A deleted meeting returns 404 with code 3004 while the account exists. The
+  # owner's other links must still be searched and get their own outcome.
+  geloescht <- teams_link("GELOESCHT", oid_besitzer); danach <- teams_link("DANACH", oid_besitzer)
+  disc <- data.frame(join_url = c(geloescht, danach), organizer_oid = oid_besitzer,
+                     organizer_email = NA_character_, stringsAsFactors = FALSE)
   resolve <- mockery::mock(
     list(status = 404, id = NA_character_,
-         error = list(code = "NotFound", message = "3004: Specified meeting is not found.")),
-    list(status = 200, id = "MID_B"))
+         error = list(code = "NotFound", message = "Specified meeting is not found.",
+                      innerError = list(code = "3004",
+                                        `request-id` = "1a2b3c4d-3004-4bbb-8ccc-000000000003"))),
+    list(status = 200, id = "MID_DANACH"))
+  # Capture the per-link outcomes on their way to the writer (dry_run writes nothing)
+  erfasst <- new.env()
+  aggregate <- aggregate_online_meeting_lookups
   mockery::stub(msgraph_scoped_update_calls_attendance, "discover_meetings_from_events",
-                function(con, cfg) data.frame(join_url = c("https://teams/a", "https://teams/b"),
-                                              organizer_oid = c("OID1", "OID1"),
-                                              organizer_email = c(NA_character_, NA_character_),
-                                              stringsAsFactors = FALSE))
+                function(con, cfg) disc)
   mockery::stub(msgraph_scoped_update_calls_attendance, "resolve_meeting", resolve)
   mockery::stub(msgraph_scoped_update_calls_attendance, "attendance_records",
                 function(oid, mid, tok) list(status = 200, reports = list(bericht_mit_teilnehmer)))
+  mockery::stub(msgraph_scoped_update_calls_attendance, "aggregate_online_meeting_lookups",
+                function(versuche) { erfasst$aus <- aggregate(versuche); erfasst$aus })
 
-  n <- msgraph_scoped_update_calls_attendance(con = NULL, app_token = "t",
-                                              cfg = lookup_cfg, dry_run = TRUE)
+  suppressMessages(msgraph_scoped_update_calls_attendance(con = NULL, app_token = "t",
+                                                          cfg = lookup_cfg, dry_run = TRUE))
 
-  mockery::expect_called(resolve, 2)   # zweiter Link derselben oid wird angefragt
-  expect_equal(n, 1)
+  mockery::expect_called(resolve, 2)   # the second link of the same oid is still searched
+  ist <- stats::setNames(erfasst$aus$online_meeting_lookup, erfasst$aus$join_url)
+  expect_equal(ist[[geloescht]], "nicht_gefunden")
+  expect_equal(ist[[danach]], "gefunden_mit_bericht")
 })
 
-test_that("lookup_outcome_suche: 404 mit Meeting-Code 3004 ist nicht_gefunden, sonst organisator_unbekannt", {
-  fehlt <- list(code = "NotFound", message = "3004: Specified meeting is not found.")
-  expect_equal(lookup_outcome_suche(404, NA_character_, fehlt)$ausgang, "nicht_gefunden")
+test_that("lookup_outcome_suche: 404 with meeting code 3004 is nicht_gefunden, otherwise organisator_unbekannt", {
+  expect_equal(lookup_outcome_suche(404, NA_character_,
+                                    list(code = "NotFound", message = "3004: Specified meeting is not found."))$ausgang,
+               "nicht_gefunden")
   expect_equal(lookup_outcome_suche(404, NA_character_)$ausgang, "organisator_unbekannt")
-  expect_equal(lookup_outcome_suche(404, NA_character_, list(code = "ResourceNotFound",
-                                                             message = "User not found"))$ausgang,
+  # 3004 inside a GUID is not the meeting code
+  expect_equal(lookup_outcome_suche(404, NA_character_,
+                                    list(code = "ResourceNotFound",
+                                         message = "User 1a2b3c4d-3004-4bbb-8ccc-000000000003 not found"))$ausgang,
                "organisator_unbekannt")
+  # a non-list error body does not crash the outcome
+  expect_equal(lookup_outcome_suche(404, NA_character_, "not found")$ausgang, "organisator_unbekannt")
 })
